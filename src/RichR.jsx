@@ -528,7 +528,7 @@ export default function RichR({ user, onSignOut }) {
             <h1 className="text-2xl font-extrabold tracking-tight">
               Rich<span className="text-transparent bg-clip-text bg-gradient-to-r from-emerald-500 to-teal-500">R</span>
             </h1>
-            <p className="text-xs text-slate-400 font-medium">Grow your money with friends</p>
+            <p className="text-xs text-slate-400 font-medium">Grow your money with friends · build 27</p>
           </div>
           <NamePill data={data} user={user} say={say}
             onName={(userName) => patch(() => ({ userName }))}
@@ -2300,7 +2300,7 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClosePosition, onClose })
           </button>
         </div>
         {/* scrollable body */}
-        <div className="flex-1 overflow-y-auto overscroll-contain">
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain">
         {/* header */}
         <div className="p-5 border-b border-slate-100 flex items-center gap-3">
           <Logo h={h} size={48} />
