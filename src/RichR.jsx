@@ -528,7 +528,7 @@ export default function RichR({ user, onSignOut }) {
             <h1 className="text-2xl font-extrabold tracking-tight">
               Rich<span className="text-transparent bg-clip-text bg-gradient-to-r from-emerald-500 to-teal-500">R</span>
             </h1>
-            <p className="text-xs text-slate-400 font-medium">Grow your money with friends · build 27</p>
+            <p className="text-xs text-slate-400 font-medium">Grow your money with friends · build 28</p>
           </div>
           <NamePill data={data} user={user} say={say}
             onName={(userName) => patch(() => ({ userName }))}
@@ -2288,10 +2288,11 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClosePosition, onClose })
 
   return (
     <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] flex flex-col"
+      <div className="absolute inset-0 flex flex-col bg-white sm:static sm:inset-auto sm:w-full sm:max-w-md sm:rounded-3xl sm:max-h-[90vh]"
         onClick={(e) => e.stopPropagation()}>
         {/* back bar — fixed, always visible */}
-        <div className="shrink-0 bg-white px-4 py-3 border-b border-slate-100 flex items-center justify-between rounded-t-3xl">
+        <div className="shrink-0 bg-white px-4 py-3 border-b border-slate-100 flex items-center justify-between sm:rounded-t-3xl"
+          style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top))" }}>
           <button onClick={onClose} className="flex items-center gap-0.5 text-sm font-semibold text-emerald-600 -ml-1">
             <ChevronLeft size={20} /> Back
           </button>
@@ -2676,8 +2677,9 @@ function ProfileSheet({ r, me, onClose }) {
   );
   return (
     <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
-        <div className="shrink-0 bg-white px-4 py-3 border-b border-slate-100 flex items-center justify-between rounded-t-3xl">
+      <div className="absolute inset-0 flex flex-col bg-white sm:static sm:inset-auto sm:w-full sm:max-w-md sm:rounded-3xl sm:max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
+        <div className="shrink-0 bg-white px-4 py-3 border-b border-slate-100 flex items-center justify-between sm:rounded-t-3xl"
+          style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top))" }}>
           <button onClick={onClose} className="flex items-center gap-0.5 text-sm font-semibold text-emerald-600 -ml-1">
             <ChevronLeft size={20} /> Back
           </button>
