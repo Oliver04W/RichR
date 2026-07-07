@@ -58,6 +58,8 @@ const TICKER_DOMAINS = {
   "SAAB-B": "saab.com", EXENS: "exosens.com", NOK: "nokia.com", NOKIA: "nokia.com",
   NDA: "nordea.com", SAMPO: "sampo.com", KNEBV: "kone.com", NESTE: "neste.com",
   FORTUM: "fortum.com", UPM: "upm.com", WSP: "wsp.com", STN: "stantec.com",
+  ENR: "siemens-energy.com", "ENR.DE": "siemens-energy.com", ASML: "asml.com",
+  SCYR: "sacyr.com", MHID: "mahindra.com", "EXENS.PA": "exosens.com",
   VOO: "vanguard.com", VTI: "vanguard.com", VXUS: "vanguard.com",
   SPY: "ssga.com", IVV: "ishares.com", QQQ: "invesco.com", EUNL: "ishares.com",
   IUSQ: "ishares.com", SXR8: "ishares.com",
@@ -67,7 +69,7 @@ const guessDomain = (h) => {
   const t = (h.ticker || "").toUpperCase();
   if (TICKER_DOMAINS[t]) return TICKER_DOMAINS[t];
   const base = (h.name || "").toLowerCase()
-    .replace(/\b(inc|corp|corporation|plc|oyj|ab|oy|group|holdings?|class [a-z]|etf|fund|the)\b/g, "")
+    .replace(/\b(inc|corp|corporation|company|co|plc|oyj|ab|oy|ag|sa|sas|se|nv|asa|spa|ltd|limited|group|holdings?|class [a-z]|etf|fund|the)\b/g, "")
     .replace(/[^a-z0-9]/g, "");
   return base ? `${base}.com` : null;
 };
@@ -964,8 +966,6 @@ function PositionModal({ holding, cur, onClose, onSave }) {
           </div>
           <div><label className={label}>NAME (OPTIONAL)</label>
             <input value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="Nvidia" className={input} /></div>
-          <div><label className={label}>COMPANY WEBSITE (OPTIONAL — USED FOR THE LOGO)</label>
-            <input value={f.domain || ""} onChange={(e) => set("domain", e.target.value)} placeholder="nvidia.com" className={input} /></div>
           <div className="grid grid-cols-3 gap-3">
             <div><label className={label}>SHARES</label>
               <input type="number" value={f.shares} onChange={(e) => set("shares", e.target.value)} placeholder="10" className={input} /></div>
@@ -2421,7 +2421,7 @@ function ResearchTab({ cur, say, onUpsert }) {
    (Yahoo, US + non-US). Used in the position detail sheet and the
    Research quote card. 1M / 6M / 1Y ranges. */
 function PriceChart({ symbol, currency }) {
-  const RANGES = [["1mo", "1M"], ["6mo", "6M"], ["1y", "1Y"]];
+  const RANGES = [["1d", "1D"], ["5d", "1W"], ["1mo", "1M"], ["6mo", "6M"], ["1y", "1Y"], ["5y", "5Y"], ["max", "Max"]];
   const [range, setRange] = useState("6mo");
   const [points, setPoints] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -2458,7 +2458,7 @@ function PriceChart({ symbol, currency }) {
     <div>
       <div className="flex items-center justify-between mb-1.5">
         <h4 className="text-xs font-semibold text-slate-400">PRICE</h4>
-        <div className="flex gap-1">
+        <div className="flex gap-1 flex-wrap justify-end">
           {RANGES.map(([r, lbl]) => (
             <button key={r} onClick={() => setRange(r)}
               className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${range === r ? "bg-slate-800 text-white" : "text-slate-400 bg-slate-100"}`}>
@@ -2482,7 +2482,9 @@ function PriceChart({ symbol, currency }) {
               <XAxis dataKey="t" hide />
               <YAxis domain={["auto", "auto"]} hide />
               <Tooltip
-                labelFormatter={(t) => new Date(t).toLocaleDateString()}
+                labelFormatter={(t) => new Date(t).toLocaleString([], (range === "1d" || range === "5d")
+                  ? { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }
+                  : { year: "numeric", month: "short", day: "numeric" })}
                 formatter={(v) => [money(v, currency), "Close"]}
                 contentStyle={{ borderRadius: 12, border: "1px solid #e2e8f0", fontSize: 12 }} />
               <Area type="monotone" dataKey="c" stroke={color} strokeWidth={2} fill={`url(#${gid})`} />
