@@ -1053,7 +1053,7 @@ function ThesesTab({ active, cur, fx, onVerdict }) {
 function FriendsTab({ data, active, totals, cur, say, user }) {
   const [board, setBoard] = useState(null);
   const [friends, setFriends] = useState(null);
-  const [mode, setMode] = useState("friends");
+  const [onBoard, setOnBoard] = useState(false);
   const [addName, setAddName] = useState("");
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1074,7 +1074,7 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
       })));
       const { data: rows, error: bErr } = await supabase
         .from("leaderboard")
-        .select("user_id, name, profile, portfolio, return_pct, holdings")
+        .select("user_id, name, profile, portfolio, return_pct, holdings, top_holdings")
         .order("return_pct", { ascending: false })
         .limit(100);
       if (bErr) throw bErr;
@@ -1085,7 +1085,9 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
         portfolio: r.portfolio || "",
         returnPct: Number(r.return_pct) || 0,
         holdings: r.holdings || 0,
+        topHoldings: Array.isArray(r.top_holdings) ? r.top_holdings : [],
       })));
+      setOnBoard((rows || []).some((r) => r.user_id === user.id));
     } catch (e) { setBoard([]); setFriends([]); }
   };
   useEffect(() => { loadAll(); }, []);
@@ -1118,12 +1120,21 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
   const publish = async () => {
     if (!data.userName.trim()) { say("Set your name (top right) before sharing."); return; }
     setBusy(true);
+    const fx = data.fx || DEFAULT_FX;
+    const totalVal = active.holdings.reduce((s, h) => s + holdingValue(h, cur, fx), 0);
+    const topHoldings = byValueDesc(active.holdings, cur, fx)
+      .slice(0, 10)
+      .map((h) => ({
+        ticker: h.ticker,
+        pct: totalVal > 0 ? Number(((holdingValue(h, cur, fx) / totalVal) * 100).toFixed(1)) : 0,
+      }));
     const entry = {
       name: data.userName.trim(),
       profile: data.profile || "",
       portfolio: active.name,
       returnPct: Number(totals.plPct.toFixed(2)),
       holdings: active.holdings.length,
+      topHoldings,
       at: Date.now(),
     };
     try {
@@ -1134,6 +1145,7 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
         portfolio: entry.portfolio,
         return_pct: entry.returnPct,
         holdings: entry.holdings,
+        top_holdings: entry.topHoldings,
         updated_at: new Date().toISOString(),
       });
       if (error) throw error;
@@ -1143,8 +1155,19 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
     setBusy(false);
   };
 
+  const unpublish = async () => {
+    setBusy(true);
+    try {
+      const { error } = await supabase.from("leaderboard").delete().eq("user_id", user.id);
+      if (error) throw error;
+      say("Unshared — you're off the board.");
+      await loadAll();
+    } catch (e) { say("Couldn't unshare — try again."); }
+    setBusy(false);
+  };
+
   const friendIds = new Set([user.id, ...((friends || []).map((f) => f.id))]);
-  const shown = board === null ? null : (mode === "friends" ? board.filter((r) => friendIds.has(r.userId)) : board);
+  const shown = board === null ? null : board.filter((r) => friendIds.has(r.userId));
 
   return (
     <div className="space-y-4">
@@ -1152,12 +1175,20 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
       <div className="rounded-3xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white p-6 shadow-lg shadow-emerald-200">
         <div className="flex items-center gap-2 font-bold"><Share2 size={17} /> Share your progress</div>
         <p className="text-sm text-emerald-50 mt-1.5 leading-relaxed">
-          Publish “{active.name}” — your return % and position count go on the board. Amounts stay private.
+          Publish “{active.name}” to your friends — your return %, position count and top 10 holdings (with their portfolio weight) show on their leaderboard. Amounts and theses stay private. Unshare anytime.
         </p>
-        <button onClick={publish} disabled={busy}
-          className="mt-4 bg-white text-emerald-600 font-semibold text-sm px-5 py-2.5 rounded-full shadow disabled:opacity-60">
-          {busy ? "Sharing…" : "Share now"}
-        </button>
+        <div className="mt-4 flex items-center gap-2">
+          <button onClick={publish} disabled={busy}
+            className="bg-white text-emerald-600 font-semibold text-sm px-5 py-2.5 rounded-full shadow disabled:opacity-60">
+            {busy ? "Working…" : onBoard ? "Update share" : "Share now"}
+          </button>
+          {onBoard && (
+            <button onClick={unpublish} disabled={busy}
+              className="bg-emerald-700/40 text-white font-semibold text-sm px-5 py-2.5 rounded-full disabled:opacity-60">
+              Unshare
+            </button>
+          )}
+        </div>
       </div>
 
       {/* friends manager */}
@@ -1207,27 +1238,14 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
         </button>
       </div>
 
-      {/* friends / everyone toggle */}
-      <div className="bg-slate-100 rounded-full p-1 flex">
-        {[["friends", "Friends"], ["everyone", "Everyone"]].map(([id, label]) => (
-          <button key={id} onClick={() => setMode(id)}
-            className={`flex-1 text-sm font-semibold py-2 rounded-full transition ${
-              mode === id ? "bg-white text-slate-700 shadow-sm" : "text-slate-400"}`}>
-            {label}
-          </button>
-        ))}
-      </div>
-
       {shown === null ? (
         <div className="bg-white rounded-3xl p-6 text-center text-slate-400 text-sm shadow-sm border border-slate-100">Loading…</div>
       ) : shown.length === 0 ? (
         <div className="bg-white rounded-3xl p-8 text-center shadow-sm border border-slate-100">
           <Trophy size={24} className="mx-auto text-amber-300 mb-3" />
-          <p className="font-semibold text-slate-600 mb-1">{mode === "friends" ? "No shared returns yet" : "The board is empty"}</p>
+          <p className="font-semibold text-slate-600 mb-1">No shared returns yet</p>
           <p className="text-sm text-slate-400">
-            {mode === "friends"
-              ? "Add friends above, and make sure you (and they) have tapped Share."
-              : "Be the first to share your progress."}
+            Add friends above, and make sure you (and they) have tapped Share.
           </p>
         </div>
       ) : (
@@ -1247,6 +1265,15 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
                     {r.name} {me && <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-full ml-1">YOU</span>}
                   </div>
                   <div className="text-xs text-slate-400">{prof ? `${prof.label} · ` : ""}{r.portfolio} · {r.holdings} positions</div>
+                  {r.topHoldings && r.topHoldings.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-1.5">
+                      {r.topHoldings.map((h) => (
+                        <span key={h.ticker} className="text-[10px] font-semibold text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded-md">
+                          {h.ticker} {h.pct}%
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div className={`font-bold ${up ? "text-emerald-600" : "text-rose-500"}`}>{pct(r.returnPct)}</div>
               </div>
@@ -1255,8 +1282,8 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
         </div>
       )}
       <p className="text-[11px] text-slate-400 leading-relaxed">
-        Friends shows you and people you've added; Everyone shows all RichR users who shared. Only name, portfolio name,
-        return % and position count are published — holdings, amounts and theses stay on your device.
+        Your leaderboard shows only you and the friends you've added — there's no public list. Shared with friends: name, portfolio name,
+        return %, position count, and your top 10 tickers with their portfolio weight. Amounts, buy prices and theses stay on your device.
       </p>
     </div>
   );
