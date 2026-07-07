@@ -2216,6 +2216,9 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClose }) {
             )}
           </div>
 
+          {/* price chart */}
+          {ticker && <PriceChart symbol={ticker} currency={hc} />}
+
           {/* position numbers */}
           <div className="bg-slate-50 rounded-2xl p-4 grid grid-cols-3 gap-3 text-center">
             <div>
@@ -2380,6 +2383,10 @@ function ResearchTab({ cur, say, onUpsert }) {
             <div className="text-xs text-slate-400 mt-2">Prev close {money(quote.prevClose, quote.currency)}</div>
           )}
 
+          <div className="mt-4">
+            <PriceChart symbol={sel.symbol} currency={(quote && quote.currency) || sel.currency} />
+          </div>
+
           <div className="mt-4 flex items-center gap-2">
             <button onClick={() => startAdd(sel)}
               className="flex-1 bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold py-2.5 rounded-full shadow flex items-center justify-center gap-1.5">
@@ -2405,6 +2412,88 @@ function ResearchTab({ cur, say, onUpsert }) {
           onClose={() => setAdding(null)}
           onSave={(h) => { onUpsert(h); setAdding(null); say(`Added ${h.ticker} to your portfolio.`); }} />
       )}
+    </div>
+  );
+}
+
+/* ================= PRICE CHART ================= */
+/* Reusable daily price chart backed by the get-history edge function
+   (Yahoo, US + non-US). Used in the position detail sheet and the
+   Research quote card. 1M / 6M / 1Y ranges. */
+function PriceChart({ symbol, currency }) {
+  const RANGES = [["1mo", "1M"], ["6mo", "6M"], ["1y", "1Y"]];
+  const [range, setRange] = useState("6mo");
+  const [points, setPoints] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(false);
+
+  useEffect(() => {
+    if (!symbol) return;
+    let cancelled = false;
+    (async () => {
+      setLoading(true); setErr(false);
+      try {
+        const { data, error } = await supabase.functions.invoke("get-history", {
+          body: { symbol, currency, range },
+        });
+        if (cancelled) return;
+        if (!error && data && data.ok && Array.isArray(data.points) && data.points.length) {
+          setPoints(data.points);
+        } else { setPoints(null); setErr(true); }
+      } catch (e) {
+        if (!cancelled) { setPoints(null); setErr(true); }
+      }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [symbol, range, currency]);
+
+  const first = points && points.length ? points[0].c : 0;
+  const last = points && points.length ? points[points.length - 1].c : 0;
+  const up = last >= first;
+  const color = up ? "#10b981" : "#f43f5e";
+  const gid = "g-" + String(symbol || "x").replace(/[^A-Za-z0-9]/g, "");
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1.5">
+        <h4 className="text-xs font-semibold text-slate-400">PRICE</h4>
+        <div className="flex gap-1">
+          {RANGES.map(([r, lbl]) => (
+            <button key={r} onClick={() => setRange(r)}
+              className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${range === r ? "bg-slate-800 text-white" : "text-slate-400 bg-slate-100"}`}>
+              {lbl}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="h-40 w-full">
+        {loading ? (
+          <div className="h-full flex items-center justify-center text-sm text-slate-400">Loading chart…</div>
+        ) : points && points.length > 1 ? (
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={points} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
+              <defs>
+                <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={color} stopOpacity={0.25} />
+                  <stop offset="100%" stopColor={color} stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <XAxis dataKey="t" hide />
+              <YAxis domain={["auto", "auto"]} hide />
+              <Tooltip
+                labelFormatter={(t) => new Date(t).toLocaleDateString()}
+                formatter={(v) => [money(v, currency), "Close"]}
+                contentStyle={{ borderRadius: 12, border: "1px solid #e2e8f0", fontSize: 12 }} />
+              <Area type="monotone" dataKey="c" stroke={color} strokeWidth={2} fill={`url(#${gid})`} />
+            </AreaChart>
+          </ResponsiveContainer>
+        ) : (
+          <div className="h-full flex items-center justify-center text-sm text-slate-400 text-center px-4">
+            {err ? "No chart data for this symbol." : "No data."}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
