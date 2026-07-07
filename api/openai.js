@@ -4,87 +4,76 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+function convertBlock(block) {
+  if (typeof block === "string") {
+    return { type: "input_text", text: block };
+  }
+
+  if (!block) return null;
+
+  if (block.type === "text") {
+    return { type: "input_text", text: block.text || "" };
+  }
+
+  if (block.type === "image" && block.source) {
+    return {
+      type: "input_image",
+      image_url: `data:${block.source.media_type || "image/png"};base64,${block.source.data}`,
+    };
+  }
+
+  return null;
+}
+
+function convertMessages(messages = []) {
+  return messages.map((m) => ({
+    role: m.role === "assistant" ? "assistant" : "user",
+    content: Array.isArray(m.content)
+      ? m.content.map(convertBlock).filter(Boolean)
+      : [{ type: "input_text", text: String(m.content || "") }],
+  }));
+}
+
 export default async function handler(req, res) {
   if (req.method === "GET") {
     return res.status(200).json({
       success: true,
-      message: "OpenAI endpoint is ready. Send POST with { imageBase64 }."
+      message: "OpenAI endpoint ready",
     });
   }
 
   try {
-    const { imageBase64 } = req.body || {};
+    const messages = req.body?.messages;
 
-    if (!imageBase64) {
+    if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({
-        success: false,
-        error: "Missing imageBase64"
+        content: [{ type: "text", text: "Missing messages" }],
       });
     }
 
     const response = await client.responses.create({
       model: "gpt-5.5",
-      input: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: `
-You are extracting investment holdings from a bank/broker screenshot for RichR.
-
-Return ONLY valid JSON. No markdown. No explanation.
-
-JSON format:
-{
-  "broker": null,
-  "baseCurrency": null,
-  "holdings": [
-    {
-      "name": null,
-      "ticker": null,
-      "quantity": null,
-      "price": null,
-      "currency": null,
-      "marketValue": null,
-      "confidence": 0
-    }
-  ],
-  "warnings": []
-}
-
-Rules:
-- Do not guess.
-- If unclear, use null.
-- Preserve decimals exactly.
-- Ignore cash rows.
-- Ignore totals unless useful for validation.
-- confidence must be between 0 and 1.
-- For Finnish/European stocks, include exchange suffix if visible, e.g. RHM.DE, NOKIA.HE.
-              `
-            },
-            {
-              type: "input_image",
-              image_url: imageBase64
-            }
-          ]
-        }
-      ]
+      input: convertMessages(messages),
     });
 
-    const text = response.output_text.trim();
-    const json = JSON.parse(text);
-
     return res.status(200).json({
-      success: true,
-      ...json
+      content: [
+        {
+          type: "text",
+          text: response.output_text || "",
+        },
+      ],
     });
   } catch (error) {
     console.error(error);
 
     return res.status(500).json({
-      success: false,
-      error: error.message
+      content: [
+        {
+          type: "text",
+          text: `error: ${error.message}`,
+        },
+      ],
     });
   }
 }
