@@ -133,11 +133,12 @@ const seed = () => ({
   profile: "",
   currency: "USD",
   activeId: "p1",
-  portfolios: [{ id: "p1", name: "My Portfolio", holdings: [] }],
+  portfolios: [{ id: "p1", name: "My Portfolio", holdings: [], closed: [] }],
   goals: [],
   snapshots: {},
   fx: DEFAULT_FX,
   autoRefresh: false,
+  philosophy: "",
 });
 
 const SAMPLE = [
@@ -195,6 +196,35 @@ const holdingValue = (h, cur, fx) => {
 };
 const byValueDesc = (holdings, cur, fx) =>
   [...holdings].sort((a, b) => holdingValue(b, cur, fx) - holdingValue(a, cur, fx));
+
+/* Social metrics from a portfolio's open (holdings) + closed trades. */
+const socialStats = (p, cur, fx) => {
+  const open = (p && p.holdings) || [];
+  const closed = (p && p.closed) || [];
+  // realized return over closed trades
+  let rCost = 0, rProceeds = 0;
+  closed.forEach((h) => {
+    const hc = h.currency || cur;
+    rCost += fxConvert(h.shares * h.buyPrice, hc, cur, fx);
+    rProceeds += fxConvert(h.shares * (h.sellPrice || 0), hc, cur, fx);
+  });
+  const realizedPct = rCost > 0 ? ((rProceeds - rCost) / rCost) * 100 : null;
+  // average holding duration in days (open: to today; closed: buy→sell)
+  const durs = [];
+  open.forEach((h) => durs.push(daysHeld(h.buyDate)));
+  closed.forEach((h) => {
+    const b = h.buyDate ? new Date(h.buyDate).getTime() : 0;
+    const s = h.sellDate ? new Date(h.sellDate).getTime() : 0;
+    if (b && s) durs.push(Math.max(0, Math.round((s - b) / 86400000)));
+  });
+  const avgDays = durs.length ? Math.round(durs.reduce((a, b) => a + b, 0) / durs.length) : 0;
+  // win rate: open judged by current price, closed by sell price
+  let winners = 0, total = 0;
+  open.forEach((h) => { const cp = h.currentPrice > 0 ? h.currentPrice : h.buyPrice; total++; if (cp > h.buyPrice) winners++; });
+  closed.forEach((h) => { total++; if ((h.sellPrice || 0) > h.buyPrice) winners++; });
+  const winRate = total ? Math.round((winners / total) * 100) : null;
+  return { realizedPct, avgDays, winRate, closedCount: closed.length };
+};
 
 const fxConvert = (amount, from, to, fx) => {
   if (!from || !to || from === to) return amount;
@@ -419,7 +449,7 @@ export default function RichR({ user, onSignOut }) {
   const addPortfolio = () => {
     const id = uid();
     patch((d) => ({
-      portfolios: [...d.portfolios, { id, name: `Portfolio ${d.portfolios.length + 1}`, holdings: [] }],
+      portfolios: [...d.portfolios, { id, name: `Portfolio ${d.portfolios.length + 1}`, holdings: [], closed: [] }],
       activeId: id,
     }));
   };
@@ -439,6 +469,21 @@ export default function RichR({ user, onSignOut }) {
     }));
   };
   const removeHolding = (id) => patchActive((p) => ({ holdings: p.holdings.filter((h) => h.id !== id) }));
+  const closePosition = (id, sellPrice, sellDate) =>
+    patchActive((p) => {
+      const h = (p.holdings || []).find((x) => x.id === id);
+      if (!h) return {};
+      const closedItem = {
+        ...h,
+        sellPrice: Number(sellPrice) || 0,
+        sellDate: sellDate || new Date().toISOString().slice(0, 10),
+        closedAt: Date.now(),
+      };
+      return {
+        holdings: p.holdings.filter((x) => x.id !== id),
+        closed: [...(p.closed || []), closedItem],
+      };
+    });
   const setVerdict = (id, verdict) =>
     patchActive((p) => ({ holdings: p.holdings.map((h) => (h.id === id ? { ...h, verdict } : h)) }));
   const setPrice = (id, currentPrice) =>
@@ -489,7 +534,7 @@ export default function RichR({ user, onSignOut }) {
             onName={(userName) => patch(() => ({ userName }))}
             onUsername={(username) => patch(() => ({ username }))}
             cur={cur} onCurrency={(currency) => patch(() => ({ currency }))}
-            onProfile={(profile) => patch(() => ({ profile }))} onSignOut={onSignOut} />
+            onProfile={(profile) => patch(() => ({ profile }))} onPhilosophy={(philosophy) => patch(() => ({ philosophy }))} onSignOut={onSignOut} />
         </div>
 
         {tab === "home" && (
@@ -509,7 +554,7 @@ export default function RichR({ user, onSignOut }) {
         {tab === "positions" && (
           <PositionsTab active={active} cur={cur} fx={data.fx || DEFAULT_FX}
             companyInfo={data.companyInfo || {}} onSaveInfo={saveCompanyInfo}
-            onUpsert={upsertHolding} onRemove={removeHolding} onSetPrice={setPrice} onLoadSample={loadSample} />
+            onUpsert={upsertHolding} onRemove={removeHolding} onSetPrice={setPrice} onLoadSample={loadSample} onClosePosition={closePosition} />
         )}
         {tab === "theses" && <ThesesTab active={active} cur={cur} fx={data.fx || DEFAULT_FX} onVerdict={setVerdict} />}
         {tab === "insights" && (
@@ -549,7 +594,7 @@ export default function RichR({ user, onSignOut }) {
 }
 
 /* ================= header pill ================= */
-function NamePill({ data, user, say, onName, onUsername, cur, onCurrency, onProfile, onSignOut }) {
+function NamePill({ data, user, say, onName, onUsername, cur, onCurrency, onProfile, onPhilosophy, onSignOut }) {
   const [open, setOpen] = useState(false);
   const prof = profileOf(data.profile);
 
@@ -605,6 +650,12 @@ function NamePill({ data, user, say, onName, onUsername, cur, onCurrency, onProf
               );
             })}
           </div>
+          <label className="block text-xs font-semibold text-slate-400 mb-1.5 mt-3">INVESTING PHILOSOPHY — SHOWN ON YOUR PROFILE</label>
+          <textarea defaultValue={data.philosophy || ""} placeholder="e.g. Concentrated bets on AI infrastructure and defense. Hold winners, cut theses that break."
+            onBlur={(e) => onPhilosophy(e.target.value.trim().slice(0, 280))}
+            rows={3} maxLength={280}
+            className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm resize-none" />
+          <p className="text-[10px] text-slate-400 mb-1">Up to 280 characters. Shared with friends when you tap Share.</p>
           <button onClick={() => setOpen(false)}
             className="mt-3 w-full bg-slate-100 rounded-xl py-2 text-sm font-semibold text-slate-600">Done</button>
           <button onClick={onSignOut}
@@ -770,7 +821,7 @@ function StatCard({ label, value, tone = "text-slate-700" }) {
 }
 
 /* ================= POSITIONS ================= */
-function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRemove, onSetPrice, onLoadSample }) {
+function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRemove, onSetPrice, onLoadSample, onClosePosition }) {
   const [editing, setEditing] = useState(null);
   const [importing, setImporting] = useState(false);
   const [detail, setDetail] = useState(null);
@@ -812,6 +863,30 @@ function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRe
         ))
       )}
 
+      {(active.closed && active.closed.length > 0) && (
+        <div className="pt-2">
+          <h3 className="text-xs font-semibold text-slate-400 mb-2 mt-2">CLOSED TRADES</h3>
+          <div className="space-y-2">
+            {active.closed.slice().reverse().map((h) => {
+              const rc = fxConvert(h.shares * h.buyPrice, h.currency || cur, cur, fx);
+              const rp = fxConvert(h.shares * (h.sellPrice || 0), h.currency || cur, cur, fx);
+              const pl = rc ? ((rp - rc) / rc) * 100 : 0;
+              const win = pl >= 0;
+              return (
+                <div key={h.id + "-" + (h.closedAt || "")} className="bg-white rounded-2xl p-3 flex items-center gap-3 shadow-sm border border-slate-100">
+                  <Logo h={h} size={32} rounded="rounded-xl" />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-semibold text-slate-700 truncate">{h.name || h.ticker}</div>
+                    <div className="text-[11px] text-slate-400">{money(h.buyPrice, h.currency || cur)} → {money(h.sellPrice, h.currency || cur)} · sold {h.sellDate}</div>
+                  </div>
+                  <div className={`text-sm font-bold ${win ? "text-emerald-600" : "text-rose-500"}`}>{pct(pl)}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {importing && (
         <ImportModal cur={cur} onClose={() => setImporting(false)}
           onImport={(rows) => { rows.forEach(onUpsert); setImporting(false); }} />
@@ -822,6 +897,7 @@ function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRe
           cur={cur} fx={fx}
           info={companyInfo[(detail.ticker || "").toUpperCase()]}
           onSaveInfo={onSaveInfo}
+          onClosePosition={(sellPrice, sellDate) => { onClosePosition(detail.id, sellPrice, sellDate); setDetail(null); }}
           onClose={() => setDetail(null)} />
       )}
 
@@ -1065,6 +1141,7 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
   const [board, setBoard] = useState(null);
   const [friends, setFriends] = useState(null);
   const [onBoard, setOnBoard] = useState(false);
+  const [viewing, setViewing] = useState(null);
   const [addName, setAddName] = useState("");
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1085,7 +1162,7 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
       })));
       const { data: rows, error: bErr } = await supabase
         .from("leaderboard")
-        .select("user_id, name, profile, portfolio, return_pct, holdings, top_holdings")
+        .select("user_id, name, profile, portfolio, return_pct, holdings, top_holdings, realized_pct, avg_days, win_rate, philosophy")
         .order("return_pct", { ascending: false })
         .limit(100);
       if (bErr) throw bErr;
@@ -1097,6 +1174,10 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
         returnPct: Number(r.return_pct) || 0,
         holdings: r.holdings || 0,
         topHoldings: Array.isArray(r.top_holdings) ? r.top_holdings : [],
+        realizedPct: r.realized_pct != null ? Number(r.realized_pct) : null,
+        avgDays: r.avg_days != null ? Number(r.avg_days) : null,
+        winRate: r.win_rate != null ? Number(r.win_rate) : null,
+        philosophy: r.philosophy || "",
       })));
       setOnBoard((rows || []).some((r) => r.user_id === user.id));
     } catch (e) { setBoard([]); setFriends([]); }
@@ -1148,6 +1229,7 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
       topHoldings,
       at: Date.now(),
     };
+    const stats = socialStats(active, cur, fx);
     try {
       const { error } = await supabase.from("leaderboard").upsert({
         user_id: user.id,
@@ -1157,10 +1239,14 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
         return_pct: entry.returnPct,
         holdings: entry.holdings,
         top_holdings: entry.topHoldings,
+        realized_pct: stats.realizedPct != null ? Number(stats.realizedPct.toFixed(2)) : null,
+        avg_days: stats.avgDays,
+        win_rate: stats.winRate,
+        philosophy: (data.philosophy || "").slice(0, 280),
         updated_at: new Date().toISOString(),
       });
       if (error) throw error;
-      say("Shared! Your return is on the board.");
+      say("Shared! Your profile is on the board.");
       await loadAll();
     } catch (e) { say("Couldn't publish — try again."); }
     setBusy(false);
@@ -1267,8 +1353,8 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
             const prof = profileOf(r.profile);
             const medal = i === 0 ? "bg-amber-100 text-amber-600" : i === 1 ? "bg-slate-200 text-slate-500" : i === 2 ? "bg-orange-100 text-orange-500" : "bg-slate-100 text-slate-400";
             return (
-              <div key={r.userId}
-                className={`bg-white rounded-2xl p-4 flex items-center gap-3 shadow-sm border ${me ? "border-emerald-300" : "border-slate-100"}`}>
+              <div key={r.userId} onClick={() => setViewing(r)}
+                className={`bg-white rounded-2xl p-4 flex items-center gap-3 shadow-sm border cursor-pointer active:bg-slate-50 ${me ? "border-emerald-300" : "border-slate-100"}`}>
                 <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-sm ${medal}`}>{i + 1}</div>
                 <div className="flex-1 min-w-0">
                   <div className="font-semibold text-slate-700 text-sm truncate">
@@ -1293,9 +1379,13 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
         </div>
       )}
       <p className="text-[11px] text-slate-400 leading-relaxed">
-        Your leaderboard shows only you and the friends you've added — there's no public list. Shared with friends: name, portfolio name,
-        return %, position count, and your top 10 tickers with their portfolio weight. Amounts, buy prices and theses stay on your device.
+        Your leaderboard shows only you and the friends you've added — there's no public list. Tap anyone to see their profile.
+        Shared with friends: name, badge, portfolio name, return %, realized %, win rate, average hold, top-10 allocation, and your philosophy.
+        Amounts, buy prices and theses stay on your device.
       </p>
+      {viewing && (
+        <ProfileSheet r={viewing} me={viewing.userId === user.id} onClose={() => setViewing(null)} />
+      )}
     </div>
   );
 }
@@ -2140,7 +2230,7 @@ function ImportModal({ cur, onClose, onImport }) {
 /* Tap a position → what the company actually does, in plain language.
    The description is AI-written once per ticker and cached, so it's
    instant (and free) on every later open.                              */
-function DetailSheet({ h, cur, fx, info, onSaveInfo, onClose }) {
+function DetailSheet({ h, cur, fx, info, onSaveInfo, onClosePosition, onClose }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const hc = h.currency || cur;
@@ -2150,6 +2240,9 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClose }) {
   const up = plPct >= 0;
   const V = VERDICTS[h.verdict] || VERDICTS.open;
   const ticker = (h.ticker || "").toUpperCase();
+  const [closing, setClosing] = useState(false);
+  const [sellP, setSellP] = useState(cp);
+  const [sellD, setSellD] = useState(new Date().toISOString().slice(0, 10));
 
   // lock the page behind the sheet so only the sheet scrolls
   useEffect(() => {
@@ -2277,6 +2370,44 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClose }) {
               <p className="text-sm text-slate-400">No thesis written yet — the best time is while you still remember why you bought it.</p>
             )}
           </div>
+
+          {/* close position */}
+          {onClosePosition && (
+            <div className="border-t border-slate-100 pt-4">
+              {!closing ? (
+                <button onClick={() => setClosing(true)}
+                  className="w-full bg-slate-100 text-slate-600 text-sm font-semibold py-2.5 rounded-xl">
+                  Close position (record a sale)
+                </button>
+              ) : (
+                <div className="space-y-2">
+                  <div className="text-xs font-semibold text-slate-400">RECORD SALE</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-400 mb-1">SELL PRICE ({hc})</label>
+                      <input type="number" value={sellP} onChange={(e) => setSellP(e.target.value)}
+                        className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm" />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-400 mb-1">SELL DATE</label>
+                      <input type="date" value={sellD} onChange={(e) => setSellD(e.target.value)}
+                        className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm" />
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={() => onClosePosition(Number(sellP), sellD)}
+                      disabled={!(Number(sellP) > 0)}
+                      className="flex-1 bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold py-2.5 rounded-xl disabled:opacity-50">
+                      Confirm sale
+                    </button>
+                    <button onClick={() => setClosing(false)}
+                      className="bg-slate-100 text-slate-500 text-sm font-semibold px-4 rounded-xl">Cancel</button>
+                  </div>
+                  <p className="text-[10px] text-slate-400">Moves it to Closed trades and counts toward your realized return.</p>
+                </div>
+              )}
+            </div>
+          )}
 
           <p className="text-[11px] text-slate-400 leading-relaxed">
             AI-written summary for learning purposes — not investment advice.
@@ -2520,6 +2651,84 @@ function PriceChart({ symbol, currency }) {
             {err ? "No chart data for this symbol." : "No data."}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/* ================= PROFILE SHEET ================= */
+/* Tapping a leaderboard entry opens this: badge, philosophy, unrealized +
+   realized return, win rate, average hold, and top-10 allocation. */
+function ProfileSheet({ r, me, onClose }) {
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = prev; };
+  }, []);
+  const prof = profileOf(r.profile);
+  const up = (r.returnPct || 0) >= 0;
+  const rUp = (r.realizedPct || 0) >= 0;
+  const Stat = ({ label, value, tone }) => (
+    <div className="bg-slate-50 rounded-2xl p-3 text-center">
+      <div className={`font-bold text-sm ${tone || "text-slate-700"}`}>{value}</div>
+      <div className="text-[10px] font-semibold text-slate-400 mt-0.5">{label}</div>
+    </div>
+  );
+  return (
+    <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
+      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="shrink-0 bg-white px-4 py-3 border-b border-slate-100 flex items-center justify-between rounded-t-3xl">
+          <button onClick={onClose} className="flex items-center gap-0.5 text-sm font-semibold text-emerald-600 -ml-1">
+            <ChevronLeft size={20} /> Back
+          </button>
+          <button onClick={onClose} className="w-8 h-8 rounded-xl bg-slate-100 flex items-center justify-center text-slate-500 shrink-0">
+            <X size={15} />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto overscroll-contain p-5 space-y-4">
+          <div className="flex items-center gap-3">
+            <div className="w-12 h-12 rounded-2xl bg-slate-100 flex items-center justify-center text-2xl">{prof ? prof.mascot : "👤"}</div>
+            <div className="min-w-0">
+              <div className="font-bold text-lg text-slate-700 truncate">
+                {r.name} {me && <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-full ml-1">YOU</span>}
+              </div>
+              <div className="text-xs text-slate-400">{prof ? prof.label : "Investor"}{r.portfolio ? ` · ${r.portfolio}` : ""}</div>
+            </div>
+          </div>
+
+          {r.philosophy && (
+            <div>
+              <h4 className="text-xs font-semibold text-slate-400 mb-1.5">INVESTING PHILOSOPHY</h4>
+              <p className="text-[15px] text-slate-600 leading-relaxed italic">"{r.philosophy}"</p>
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-2">
+            <Stat label="UNREALIZED RETURN" value={pct(r.returnPct || 0)} tone={up ? "text-emerald-600" : "text-rose-500"} />
+            <Stat label="REALIZED RETURN" value={r.realizedPct != null ? pct(r.realizedPct) : "—"} tone={r.realizedPct == null ? "text-slate-400" : rUp ? "text-emerald-600" : "text-rose-500"} />
+            <Stat label="WIN RATE" value={r.winRate != null ? `${r.winRate}%` : "—"} />
+            <Stat label="AVG HOLD" value={r.avgDays != null ? `${r.avgDays}d` : "—"} />
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold text-slate-400 mb-2">TOP HOLDINGS · ALLOCATION{typeof r.holdings === "number" ? ` (${r.holdings} positions)` : ""}</h4>
+            {r.topHoldings && r.topHoldings.length > 0 ? (
+              <div className="space-y-1.5">
+                {r.topHoldings.map((h) => (
+                  <div key={h.ticker} className="flex items-center gap-2">
+                    <div className="text-sm font-semibold text-slate-700 w-20 shrink-0 truncate">{h.ticker}</div>
+                    <div className="flex-1 bg-slate-100 rounded-full h-2 overflow-hidden">
+                      <div className="bg-emerald-400 h-full rounded-full" style={{ width: `${Math.min(100, h.pct)}%` }} />
+                    </div>
+                    <div className="text-xs font-semibold text-slate-500 w-12 text-right">{h.pct}%</div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-slate-400">No holdings shared.</p>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );
