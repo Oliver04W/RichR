@@ -1786,7 +1786,7 @@ function ImportModal({ cur, onClose, onImport }) {
     `"kurssi"/"kurs"/"hinta"/"price" = current price per share; ` +
     `"tuotto"/"avkastning"/"return"/"+/-%" = profit/return.\n` +
     `For EVERY holding, extract: ticker (uppercase; null for funds without one), full name, company website domain if you know it, ` +
-    `type (Stock/Fund/ETF), shares (decimals allowed), average buy price per share, current price per share, ` +
+    `type (Stock/Fund/ETF), shares (decimals allowed), average buy price per share, current price per share, market value if visible or derivable, confidence from 0 to 1, ` +
     `and the TRADING currency of the holding (USD/EUR/GBP/SEK). Infer the currency logically: an explicit currency code shown ` +
     `next to the position (e.g. OP-mobiili displays portfolio totals in EUR but marks foreign stocks with their trading ` +
     `currency like "USD" — report USD for those, with prices in USD), currency symbols in the prices, or exchange conventions ` +
@@ -1905,7 +1905,7 @@ function ImportModal({ cur, onClose, onImport }) {
         shares: Number(h.shares),
         buyPrice: Number(h.buyPrice) > 0 ? Number(h.buyPrice) : "",
         currentPrice: Number(h.currentPrice) > 0 ? Number(h.currentPrice) : 0,
-        note: h.note ? String(h.note).slice(0, 120) : "",
+        note: `${h.confidence !== undefined && Number(h.confidence) < 0.9 ? `Low confidence (${Number(h.confidence).toFixed(2)}). ` : ""}${h.note ? String(h.note).slice(0, 100) : ""}`.trim(),
       }));
       if (!found.length) throw new Error("none found");
       setRows(found);
