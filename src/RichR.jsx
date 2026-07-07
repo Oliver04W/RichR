@@ -271,7 +271,11 @@ export default function RichR({ user, onSignOut }) {
     if (!data || !active)
       return [{ label: "Cost", value: 0 }, { label: "Now", value: 0 }];
     const snaps = (data.snapshots || {})[active.id] || [];
-    const pts = snaps.map((s) => ({
+    // one point per calendar day — keep the last value recorded that day
+    const byDay = new Map();
+    snaps.forEach((s) => byDay.set(new Date(s.t).toDateString(), s));
+    const daily = [...byDay.values()].sort((a, b) => a.t - b.t);
+    const pts = daily.map((s) => ({
       label: new Date(s.t).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
       value: Math.round(s.value),
     }));
@@ -355,11 +359,16 @@ export default function RichR({ user, onSignOut }) {
 
       setData((d) => {
         const snaps = { ...(d.snapshots || {}) };
-        const arr = (snaps[active.id] || []).slice(-40);
-        const lastT = arr.length ? arr[arr.length - 1].t : 0;
-        // manual refreshes always snapshot; auto refreshes at most every 5 min
-        if (!silent || Date.now() - lastT > 5 * 60 * 1000) arr.push({ t: Date.now(), value, cost });
-        snaps[active.id] = arr;
+        const arr = (snaps[active.id] || []).slice();
+        const now = Date.now();
+        const last = arr[arr.length - 1];
+        // one snapshot per calendar day: replace today's point, else start a new day
+        if (last && new Date(last.t).toDateString() === new Date(now).toDateString()) {
+          arr[arr.length - 1] = { t: now, value, cost };
+        } else {
+          arr.push({ t: now, value, cost });
+        }
+        snaps[active.id] = arr.slice(-40);
         return {
           ...d, snapshots: snaps, fx: newFx, pricesAt: Date.now(),
           portfolios: d.portfolios.map((p) => (p.id === active.id ? { ...p, holdings: updated } : p)),
@@ -929,7 +938,7 @@ function PositionModal({ holding, cur, onClose, onSave }) {
 
   return (
     <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto"
+      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto overscroll-contain"
         onClick={(e) => e.stopPropagation()}>
         <div className="p-5 border-b border-slate-100 flex items-center justify-between">
           <h3 className="font-bold text-lg text-slate-700">{holding ? "Edit position" : "New position"}</h3>
@@ -1378,7 +1387,7 @@ function GoalModal({ goal, cur, onClose, onSave }) {
 
   return (
     <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto"
+      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto overscroll-contain"
         onClick={(e) => e.stopPropagation()}>
         <div className="p-5 border-b border-slate-100 flex items-center justify-between">
           <h3 className="font-bold text-lg text-slate-700">{goal ? "Edit goal" : "New goal"}</h3>
@@ -1979,7 +1988,7 @@ function ImportModal({ cur, onClose, onImport }) {
 
   return (
     <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto flex flex-col"
+      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto overscroll-contain flex flex-col"
         onClick={(e) => e.stopPropagation()}>
         <div className="p-5 border-b border-slate-100 flex items-center justify-between shrink-0">
           <h3 className="font-bold text-lg text-slate-700">Import from screenshot</h3>
@@ -2142,6 +2151,13 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClose }) {
   const V = VERDICTS[h.verdict] || VERDICTS.open;
   const ticker = (h.ticker || "").toUpperCase();
 
+  // lock the page behind the sheet so only the sheet scrolls
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = prev; };
+  }, []);
+
   const fetchInfo = async () => {
     setLoading(true); setError("");
     try {
@@ -2179,7 +2195,7 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClose }) {
 
   return (
     <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto"
+      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto overscroll-contain"
         onClick={(e) => e.stopPropagation()}>
         {/* header */}
         <div className="p-5 border-b border-slate-100 flex items-center gap-3">
