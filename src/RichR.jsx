@@ -1422,7 +1422,7 @@ function InsightsTab({ active, totals, cur, fx, say, analysis, onSave, news, onS
         `Also write a 2-3 sentence plain-language note on this portfolio's diversification given these holdings. ` +
         `Respond with ONLY JSON, no other text: ` +
         `{"holdings":[{"ticker":"XXX","beta":1.2,"volatility":28.5}],"note":"..."}`;
-      const res = await fetch("/api/claude", {
+      const res = await fetch("/api/openai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1492,7 +1492,7 @@ function InsightsTab({ active, totals, cur, fx, say, analysis, onSave, news, onS
         `For each item write a headline-style title and a 1-2 sentence summary ENTIRELY IN YOUR OWN WORDS — do not copy article text or headlines verbatim. ` +
         `Respond with ONLY JSON, no other text: ` +
         `{"items":[{"tickers":["XXX"],"title":"...","summary":"...","impact":"positive|negative|mixed","source":"publication name","when":"e.g. 2 days ago"}]}`;
-      const res = await fetch("/api/claude", {
+      const res = await fetch("/api/openai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1802,7 +1802,7 @@ function ImportModal({ cur, onClose, onImport }) {
     `{"holdings":[{"ticker":"NVDA","name":"Nvidia","domain":"nvidia.com","type":"Stock","currency":"USD","shares":12.5,"buyPrice":95.2,"currentPrice":128.4,"note":"buy price derived from return %"}]}`;
 
   const callParse = async (content) => {
-    const res = await fetch("/api/claude", {
+    const res = await fetch("/api/openai", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2006,7 +2006,7 @@ function ImportModal({ cur, onClose, onImport }) {
               <button disabled={testing} onClick={async () => {
                 setTesting(true); setTestResult("Testing connection…");
                 try {
-                  const r = await fetch("/api/claude", {
+                  const r = await fetch("/api/openai", {
                     method: "POST", headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1000,
                       messages: [{ role: "user", content: "Reply with exactly: OK" }] }),
@@ -2124,7 +2124,7 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClose }) {
           : `is as a ${h.type}: what it tracks or holds and what an investor gets exposure to. `) +
         `Write for someone new to investing. No numbers, no opinions on whether it's a good investment, no advice. ` +
         `Respond with ONLY the description text, nothing else.`;
-      const res = await fetch("/api/claude", {
+      const res = await fetch("/api/openai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
