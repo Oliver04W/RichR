@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   Plus, RefreshCw, Trash2, Users, BookOpen, Home, Briefcase, Check, X,
   Clock, HelpCircle, Pencil, Trophy, Share2, TrendingUp, TrendingDown,
-  ChevronDown, Target, Sparkles, Flag, Activity, Calendar, Camera, Upload
+  ChevronDown, Target, Sparkles, Flag, Activity, Calendar, Camera, Upload, Search, Eye
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine
@@ -454,6 +454,7 @@ export default function RichR({ user, onSignOut }) {
   const tabs = [
     { id: "home", label: "Home", icon: Home },
     { id: "positions", label: "Positions", icon: Briefcase },
+    { id: "research", label: "Research", icon: Search },
     { id: "theses", label: "Theses", icon: BookOpen },
     { id: "insights", label: "Insights", icon: Activity },
     { id: "friends", label: "Friends", icon: Users },
@@ -505,6 +506,7 @@ export default function RichR({ user, onSignOut }) {
             analysis={(data.analysis || {})[active.id]} onSave={saveAnalysis}
             news={(data.news || {})[active.id]} onSaveNews={saveNews} />
         )}
+        {tab === "research" && <ResearchTab cur={cur} say={say} onUpsert={upsertHolding} />}
         {tab === "friends" && <FriendsTab data={data} active={active} totals={totals} cur={cur} say={say} user={user} />}
       </div>
 
@@ -2254,6 +2256,155 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClose }) {
           </p>
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ================= RESEARCH ================= */
+/* Look up any stock on demand: search → live quote (via the get-quote
+   edge function) → add to portfolio or watch. No seed_tickers bloat;
+   each lookup fetches its own price when you open it. */
+function ResearchTab({ cur, say, onUpsert }) {
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [sel, setSel] = useState(null);        // chosen search result
+  const [quote, setQuote] = useState(null);     // fetched quote
+  const [loadingQuote, setLoadingQuote] = useState(false);
+  const [adding, setAdding] = useState(null);   // prefilled holding for the modal
+  const timer = useRef(null);
+
+  const search = (raw) => {
+    setQ(raw);
+    if (timer.current) clearTimeout(timer.current);
+    const term = (raw || "").trim();
+    if (term.length < 2) { setResults([]); setSearching(false); return; }
+    timer.current = setTimeout(async () => {
+      setSearching(true);
+      try {
+        const { data, error } = await supabase.functions.invoke("search-symbols", { body: { q: term } });
+        setResults(!error && data && Array.isArray(data.results) ? data.results.slice(0, 8) : []);
+      } catch (e) { setResults([]); }
+      setSearching(false);
+    }, 350);
+  };
+
+  const choose = async (r) => {
+    setSel(r); setResults([]); setQuote(null); setLoadingQuote(true);
+    try {
+      const { data, error } = await supabase.functions.invoke("get-quote", {
+        body: { symbol: r.symbol, currency: r.currency },
+      });
+      setQuote(!error && data && data.ok ? data : null);
+    } catch (e) { setQuote(null); }
+    setLoadingQuote(false);
+  };
+
+  const watch = async (r) => {
+    await watchTicker(r.symbol);
+    say(`Watching ${r.symbol} — it'll refresh with your prices.`);
+  };
+
+  const startAdd = (r) => {
+    setAdding({
+      id: uid(), ticker: r.symbol, name: r.name || r.symbol, domain: "",
+      type: r.type || "Stock", currency: (quote && quote.currency) || r.currency || cur,
+      shares: "", buyPrice: "", buyDate: new Date().toISOString().slice(0, 10),
+      currentPrice: (quote && quote.price) || 0, thesis: "", verdict: "open",
+    });
+  };
+
+  const up = quote && quote.pct != null ? quote.pct >= 0 : true;
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2 className="font-bold text-lg text-slate-700 flex items-center gap-2">
+          <Search size={18} className="text-emerald-500" /> Research
+        </h2>
+        <p className="text-sm text-slate-400 mt-0.5">Look up any stock or ETF and see a live quote — then add it or watch it.</p>
+      </div>
+
+      {/* search */}
+      <div className="relative">
+        <input value={q} onChange={(e) => search(e.target.value)}
+          placeholder="Search any company or ticker — e.g. tesla, ENR.DE, ASML"
+          className="w-full border border-slate-200 rounded-2xl px-4 py-3 text-sm bg-white shadow-sm" />
+        {(searching || results.length > 0) && (
+          <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-[60] max-h-72 overflow-y-auto">
+            {searching && <div className="px-3 py-2 text-xs text-slate-400">Searching…</div>}
+            {results.map((r) => (
+              <button key={r.symbol} type="button" onClick={() => choose(r)}
+                className="w-full text-left px-3 py-2.5 hover:bg-slate-50 active:bg-slate-100 border-b border-slate-50 last:border-0">
+                <div className="text-sm font-semibold text-slate-700">{r.symbol}
+                  <span className="ml-1.5 text-[10px] font-bold text-sky-600 bg-sky-50 px-1.5 py-0.5 rounded-full">{r.currency}</span>
+                  <span className="ml-1 text-[10px] font-semibold text-slate-400">{r.type}</span>
+                </div>
+                <div className="text-xs text-slate-400 truncate">{r.name}</div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* quote card */}
+      {sel && (
+        <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="font-bold text-slate-700 truncate">{sel.name || sel.symbol}</div>
+              <div className="text-xs text-slate-400 mt-0.5">
+                {sel.symbol}
+                <span className="ml-1.5 text-[10px] font-bold text-sky-600 bg-sky-50 px-1.5 py-0.5 rounded-full">{(quote && quote.currency) || sel.currency}</span>
+                <span className="ml-1 text-[10px] font-semibold text-slate-400">{sel.type}</span>
+              </div>
+            </div>
+            {loadingQuote ? (
+              <div className="text-sm text-slate-400">Loading…</div>
+            ) : quote ? (
+              <div className="text-right shrink-0">
+                <div className="font-bold text-lg text-slate-800">{money(quote.price, quote.currency)}</div>
+                {quote.pct != null && (
+                  <div className={`text-sm font-semibold flex items-center gap-1 justify-end ${up ? "text-emerald-600" : "text-rose-500"}`}>
+                    {up ? <TrendingUp size={13} /> : <TrendingDown size={13} />}
+                    {up ? "+" : ""}{quote.pct}%
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="text-sm text-rose-500 text-right shrink-0">No live price</div>
+            )}
+          </div>
+
+          {quote && quote.prevClose != null && (
+            <div className="text-xs text-slate-400 mt-2">Prev close {money(quote.prevClose, quote.currency)}</div>
+          )}
+
+          <div className="mt-4 flex items-center gap-2">
+            <button onClick={() => startAdd(sel)}
+              className="flex-1 bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold py-2.5 rounded-full shadow flex items-center justify-center gap-1.5">
+              <Plus size={15} /> Add to portfolio
+            </button>
+            <button onClick={() => watch(sel)}
+              className="bg-slate-100 text-slate-600 text-sm font-semibold px-4 py-2.5 rounded-full flex items-center gap-1.5">
+              <Eye size={15} /> Watch
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!sel && (
+        <div className="bg-white rounded-3xl p-8 text-center shadow-sm border border-slate-100">
+          <Search size={24} className="mx-auto text-slate-300 mb-3" />
+          <p className="text-sm text-slate-400">Search any instrument above to see its current price. Nothing is added until you choose to.</p>
+        </div>
+      )}
+
+      {adding && (
+        <PositionModal holding={adding} cur={cur}
+          onClose={() => setAdding(null)}
+          onSave={(h) => { onUpsert(h); setAdding(null); say(`Added ${h.ticker} to your portfolio.`); }} />
+      )}
     </div>
   );
 }
