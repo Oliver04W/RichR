@@ -2195,10 +2195,10 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClose }) {
 
   return (
     <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto overscroll-contain"
+      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}>
-        {/* sticky back bar */}
-        <div className="sticky top-0 z-10 bg-white/95 backdrop-blur px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+        {/* back bar — fixed, always visible */}
+        <div className="shrink-0 bg-white px-4 py-3 border-b border-slate-100 flex items-center justify-between rounded-t-3xl">
           <button onClick={onClose} className="flex items-center gap-0.5 text-sm font-semibold text-emerald-600 -ml-1">
             <ChevronLeft size={20} /> Back
           </button>
@@ -2206,6 +2206,8 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClose }) {
             <X size={15} />
           </button>
         </div>
+        {/* scrollable body */}
+        <div className="flex-1 overflow-y-auto overscroll-contain">
         {/* header */}
         <div className="p-5 border-b border-slate-100 flex items-center gap-3">
           <Logo h={h} size={48} />
@@ -2279,6 +2281,7 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClose }) {
           <p className="text-[11px] text-slate-400 leading-relaxed">
             AI-written summary for learning purposes — not investment advice.
           </p>
+        </div>
         </div>
       </div>
     </div>
