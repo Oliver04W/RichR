@@ -528,7 +528,7 @@ export default function RichR({ user, onSignOut }) {
             <h1 className="text-2xl font-extrabold tracking-tight">
               Rich<span className="text-transparent bg-clip-text bg-gradient-to-r from-emerald-500 to-teal-500">R</span>
             </h1>
-            <p className="text-xs text-slate-400 font-medium">Grow your money with friends · build 28</p>
+            <p className="text-xs text-slate-400 font-medium">Grow your money with friends · build 29</p>
           </div>
           <NamePill data={data} user={user} say={say}
             onName={(userName) => patch(() => ({ userName }))}
@@ -933,7 +933,7 @@ function PositionCard({ h, cur, fx, onOpen, onEdit, onRemove, onSetPrice }) {
               {" "}· {daysHeld(h.buyDate)}d
             </div>
             <button onClick={(e) => { e.stopPropagation(); setEditPrice(true); }}
-              className="text-xs font-semibold text-emerald-600 mt-0.5 underline decoration-dotted">
+              className={`text-xs font-semibold mt-0.5 underline decoration-dotted ${cp > h.buyPrice ? "text-emerald-600" : cp < h.buyPrice ? "text-rose-500" : "text-slate-400"}`}>
               now {money(cp, hc)}
             </button>
             {editPrice && (
@@ -2296,9 +2296,6 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClosePosition, onClose })
           <button onClick={onClose} className="flex items-center gap-0.5 text-sm font-semibold text-emerald-600 -ml-1">
             <ChevronLeft size={20} /> Back
           </button>
-          <button onClick={onClose} className="w-8 h-8 rounded-xl bg-slate-100 flex items-center justify-center text-slate-500 shrink-0">
-            <X size={15} />
-          </button>
         </div>
         {/* scrollable body */}
         <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain">
@@ -2682,9 +2679,6 @@ function ProfileSheet({ r, me, onClose }) {
           style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top))" }}>
           <button onClick={onClose} className="flex items-center gap-0.5 text-sm font-semibold text-emerald-600 -ml-1">
             <ChevronLeft size={20} /> Back
-          </button>
-          <button onClick={onClose} className="w-8 h-8 rounded-xl bg-slate-100 flex items-center justify-center text-slate-500 shrink-0">
-            <X size={15} />
           </button>
         </div>
         <div className="flex-1 overflow-y-auto overscroll-contain p-5 space-y-4">
