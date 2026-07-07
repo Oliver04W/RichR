@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   Plus, RefreshCw, Trash2, Users, BookOpen, Home, Briefcase, Check, X,
   Clock, HelpCircle, Pencil, Trophy, Share2, TrendingUp, TrendingDown,
-  ChevronDown, Target, Sparkles, Flag, Activity, Calendar, Camera, Upload, Search, Eye
+  ChevronDown, ChevronLeft, Target, Sparkles, Flag, Activity, Calendar, Camera, Upload, Search, Eye
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine
@@ -2197,6 +2197,15 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClose }) {
     <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
       <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto overscroll-contain"
         onClick={(e) => e.stopPropagation()}>
+        {/* sticky back bar */}
+        <div className="sticky top-0 z-10 bg-white/95 backdrop-blur px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+          <button onClick={onClose} className="flex items-center gap-0.5 text-sm font-semibold text-emerald-600 -ml-1">
+            <ChevronLeft size={20} /> Back
+          </button>
+          <button onClick={onClose} className="w-8 h-8 rounded-xl bg-slate-100 flex items-center justify-center text-slate-500 shrink-0">
+            <X size={15} />
+          </button>
+        </div>
         {/* header */}
         <div className="p-5 border-b border-slate-100 flex items-center gap-3">
           <Logo h={h} size={48} />
@@ -2207,9 +2216,6 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClose }) {
               <span className="text-[10px] font-bold text-sky-600 bg-sky-50 px-1.5 py-0.5 rounded-full">{hc}</span>
             </div>
           </div>
-          <button onClick={onClose} className="w-8 h-8 rounded-xl bg-slate-100 flex items-center justify-center text-slate-500 shrink-0">
-            <X size={15} />
-          </button>
         </div>
 
         <div className="p-5 space-y-4">
