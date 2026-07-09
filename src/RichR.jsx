@@ -297,8 +297,6 @@ export default function RichR({ user, onSignOut }) {
     return { cost, value, pl, plPct: cost ? (pl / cost) * 100 : 0 };
   }, [active, cur, data]);
 
-  const [showHistory, setShowHistory] = useState(false);
-
   const chartData = useMemo(() => {
     if (!data || !active)
       return [{ label: "Cost", value: 0 }, { label: "Now", value: 0 }];
@@ -671,6 +669,7 @@ function NamePill({ data, user, say, onName, onUsername, cur, onCurrency, onProf
 /* ================= HOME ================= */
 function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, onAddGoal, onUpdateGoal, onRemoveGoal }) {
   const [renaming, setRenaming] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const up = totals.pl >= 0;
   const flat = Math.abs(totals.plPct) <= 0.005;
   const th = perfTheme(totals.plPct);
