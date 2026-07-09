@@ -1149,7 +1149,53 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
   const [onBoard, setOnBoard] = useState(false);
   const [viewing, setViewing] = useState(null);
   const [addName, setAddName] = useState("");
+  const [sugs, setSugs] = useState([]); // live username suggestions
+  const [searchable, setSearchable] = useState(true); // am I visible in friend search?
   const [adding, setAdding] = useState(false);
+
+  // Load my own search-visibility flag once.
+  useEffect(() => {
+    (async () => {
+      const { data: me } = await supabase
+        .from("profiles").select("searchable").eq("user_id", user.id).maybeSingle();
+      if (me) setSearchable(me.searchable !== false);
+    })();
+  }, []);
+
+  const toggleSearchable = async () => {
+    const next = !searchable;
+    setSearchable(next); // optimistic
+    const { error } = await supabase
+      .from("profiles").update({ searchable: next }).eq("user_id", user.id);
+    if (error) { setSearchable(!next); say("Couldn't update — try again."); return; }
+    say(next
+      ? "You now appear in friend search."
+      : "Hidden from search — people can still add you with your exact username.");
+  };
+
+  // Suggest usernames as you type: prefix match, debounced 250ms,
+  // excluding yourself and people you've already added.
+  useEffect(() => {
+    const q = addName.trim().toLowerCase().replace(/^@/, "");
+    if (q.length < 2) { setSugs([]); return; }
+    const t = setTimeout(async () => {
+      const { data: rows } = await supabase
+        .from("profiles").select("user_id, username")
+        .ilike("username", q + "%").eq("searchable", true).limit(6);
+      const mine = new Set([user.id, ...((friends || []).map((f) => f.id))]);
+      setSugs((rows || []).filter((r) => r.username && !mine.has(r.user_id)));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [addName, friends]);
+
+  // Add straight from a tapped suggestion.
+  const addProfile = async (p) => {
+    const { error } = await supabase.from("friends").insert({ user_id: user.id, friend_id: p.user_id });
+    if (error && error.code !== "23505") { say("Couldn't add friend — try again."); return; }
+    say(`Added @${p.username}!`);
+    setAddName(""); setSugs([]);
+    await loadAll();
+  };
   const [busy, setBusy] = useState(false);
 
   const loadAll = async () => {
@@ -1224,6 +1270,7 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
       }
       say(`Added @${p.username}!`);
       setAddName("");
+      setSugs([]);
       await loadAll();
     } finally { setAdding(false); }
   };
@@ -1336,6 +1383,17 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
             {adding ? "Adding…" : "Add"}
           </button>
         </div>
+        {sugs.length > 0 && (
+          <div className="mb-3 -mt-1 border border-slate-100 rounded-2xl divide-y divide-slate-50 overflow-hidden">
+            {sugs.map((s) => (
+              <button key={s.user_id} onClick={() => addProfile(s)}
+                className="w-full flex items-center justify-between px-3 py-2 text-sm bg-white active:bg-slate-50">
+                <span className="font-semibold text-slate-600">@{s.username}</span>
+                <span className="text-xs font-semibold text-emerald-600">Add</span>
+              </button>
+            ))}
+          </div>
+        )}
         {requests && requests.length > 0 && (
           <div className="mb-3 bg-emerald-50 border border-emerald-100 rounded-2xl p-3">
             <div className="text-[11px] font-bold uppercase tracking-wide text-emerald-600 mb-2">Added you</div>
@@ -1372,6 +1430,18 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
                 </button>
               </span>
             ))}
+          </div>
+        )}
+        {data.username && (
+          <div className="flex items-center justify-between gap-3 mt-4 pt-3 border-t border-slate-100">
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-slate-600">Hide me from search</div>
+              <p className="text-[11px] text-slate-400">You won't appear in suggestions. Friends can still add you with your exact username.</p>
+            </div>
+            <button onClick={toggleSearchable} aria-pressed={!searchable}
+              className={`w-11 h-6 rounded-full p-0.5 shrink-0 transition ${!searchable ? "bg-emerald-500" : "bg-slate-200"}`}>
+              <span className={`block w-5 h-5 bg-white rounded-full shadow transform transition ${!searchable ? "translate-x-5" : ""}`} />
+            </button>
           </div>
         )}
       </div>
