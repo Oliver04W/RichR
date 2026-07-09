@@ -1213,7 +1213,7 @@ function ThesesTab({ active, cur, fx, onVerdict }) {
 function FriendsTab({ data, active, totals, cur, say, user }) {
   const [board, setBoard] = useState(null);
   const [friends, setFriends] = useState(null);
-  const [requests, setRequests] = useState(null); // people who added you, not yet added back
+  const [incoming, setIncoming] = useState(null); // everyone who has added you (mutual or not)
   const [onBoard, setOnBoard] = useState(false);
   const [viewing, setViewing] = useState(null);
   const [addName, setAddName] = useState("");
@@ -1290,7 +1290,7 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
       const uname = (id) => (profs.find((p) => p.user_id === id) || {}).username || "unknown";
 
       setFriends(ids.map((id) => ({ id, username: uname(id), mutual: incSet.has(id) })));
-      setRequests(incIds.filter((id) => !ids.includes(id)).map((id) => ({ id, username: uname(id) })));
+      setIncoming(incIds.map((id) => ({ id, username: uname(id), mutual: ids.includes(id) })));
       const { data: rows, error: bErr } = await supabase
         .from("leaderboard")
         .select("user_id, name, profile, portfolio, return_pct, holdings, top_holdings, realized_pct, avg_days, win_rate, philosophy")
@@ -1311,7 +1311,7 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
         philosophy: r.philosophy || "",
       })));
       setOnBoard((rows || []).some((r) => r.user_id === user.id));
-    } catch (e) { setBoard([]); setFriends([]); setRequests([]); }
+    } catch (e) { setBoard([]); setFriends([]); setIncoming([]); }
   };
   useEffect(() => { loadAll(); }, []);
 
@@ -1462,22 +1462,6 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
             ))}
           </div>
         )}
-        {requests && requests.length > 0 && (
-          <div className="mb-3 bg-emerald-50 border border-emerald-100 rounded-2xl p-3">
-            <div className="text-[11px] font-bold uppercase tracking-wide text-emerald-600 mb-2">Added you</div>
-            <div className="space-y-2">
-              {requests.map((r) => (
-                <div key={r.id} className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-semibold text-slate-600 truncate">@{r.username}</span>
-                  <button onClick={() => addBack(r.id, r.username)}
-                    className="bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-xs font-semibold px-3 py-1.5 rounded-full shadow shrink-0">
-                    Add back
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
         {data.username && (
           <div className="flex items-center justify-between gap-3 mt-4 pt-3 border-t border-slate-100">
             <div className="min-w-0">
@@ -1492,20 +1476,53 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
         )}
       </div>
 
-      {/* your friends list */}
+      {/* friends list */}
       <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
-        <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-1">
-          <Users size={16} className="text-emerald-500" /> Your friends
-          {friends && friends.length > 0 && (
-            <span className="text-xs font-semibold text-slate-400">· {friends.length}</span>
-          )}
+        <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-3">
+          <Users size={16} className="text-emerald-500" /> Friends
         </h3>
-        {friends === null ? (
-          <p className="text-sm text-slate-400 mt-1">Loading…</p>
-        ) : friends.length === 0 ? (
-          <p className="text-sm text-slate-400 mt-1">No friends yet — add them above with the username they set in RichR.</p>
+
+        {/* rubric 1: people who have added you */}
+        <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1">
+          People who have added you{incoming && incoming.length > 0 ? ` · ${incoming.length}` : ""}
+        </div>
+        {incoming === null ? (
+          <p className="text-sm text-slate-400">Loading…</p>
+        ) : incoming.length === 0 ? (
+          <p className="text-sm text-slate-400">No one yet — share your username so friends can add you.</p>
         ) : (
-          <div className="mt-1">
+          <div>
+            {incoming.map((r) => (
+              <div key={r.id} className="flex items-center justify-between gap-2 py-2.5 border-b border-slate-50 last:border-0">
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-slate-700 truncate">@{r.username}</div>
+                  {r.mutual && (
+                    <div className="text-[11px] font-medium text-emerald-600 flex items-center gap-1">
+                      <Check size={10} /> Friends
+                    </div>
+                  )}
+                </div>
+                {!r.mutual && (
+                  <button onClick={() => addBack(r.id, r.username)}
+                    className="bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-xs font-semibold px-3 py-1.5 rounded-full shadow shrink-0">
+                    Add back
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* rubric 2: people you've added */}
+        <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1 mt-4 pt-3 border-t border-slate-100">
+          People you have added{friends && friends.length > 0 ? ` · ${friends.length}` : ""}
+        </div>
+        {friends === null ? (
+          <p className="text-sm text-slate-400">Loading…</p>
+        ) : friends.length === 0 ? (
+          <p className="text-sm text-slate-400">No friends yet — add them above with the username they set in RichR.</p>
+        ) : (
+          <div>
             {friends.map((f) => (
               <div key={f.id} className="flex items-center justify-between gap-2 py-2.5 border-b border-slate-50 last:border-0">
                 <div className="min-w-0">
