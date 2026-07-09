@@ -511,7 +511,6 @@ export default function RichR({ user, onSignOut }) {
     { id: "home", label: "Home", icon: Home },
     { id: "positions", label: "Positions", icon: Briefcase },
     { id: "research", label: "Research", icon: Search },
-    { id: "theses", label: "Theses", icon: BookOpen },
     { id: "insights", label: "Insights", icon: Activity },
     { id: "friends", label: "Friends", icon: Users },
   ];
@@ -556,9 +555,9 @@ export default function RichR({ user, onSignOut }) {
             companyInfo={data.companyInfo || {}} onSaveInfo={saveCompanyInfo}
             onUpsert={upsertHolding} onRemove={removeHolding} onSetPrice={setPrice} onLoadSample={loadSample} onClosePosition={closePosition} />
         )}
-        {tab === "theses" && <ThesesTab active={active} cur={cur} fx={data.fx || DEFAULT_FX} onVerdict={setVerdict} />}
         {tab === "insights" && (
           <InsightsTab active={active} totals={totals} cur={cur} fx={data.fx || DEFAULT_FX} say={say}
+            onVerdict={setVerdict}
             analysis={(data.analysis || {})[active.id]} onSave={saveAnalysis}
             news={(data.news || {})[active.id]} onSaveNews={saveNews} />
         )}
@@ -1528,7 +1527,7 @@ function GoalModal({ goal, cur, onClose, onSave }) {
       - concentration    top-1 / top-3 weight                    (exact)
     News view — the AI web-searches recent news relevant to the holdings and
     returns short summaries written in its own words, tagged by likely impact. */
-function InsightsTab({ active, totals, cur, fx, say, analysis, onSave, news, onSaveNews }) {
+function InsightsTab({ active, totals, cur, fx, say, analysis, onSave, news, onSaveNews, onVerdict }) {
   const [mode, setMode] = useState("risk");
   const [busy, setBusy] = useState(false);
   const [newsBusy, setNewsBusy] = useState(false);
@@ -1664,7 +1663,7 @@ function InsightsTab({ active, totals, cur, fx, say, analysis, onSave, news, onS
       <div className="bg-white rounded-3xl p-8 text-center shadow-sm border border-slate-100">
         <Activity size={24} className="mx-auto text-slate-300 mb-3" />
         <p className="font-semibold text-slate-600 mb-1">Nothing to analyze yet</p>
-        <p className="text-sm text-slate-400">Add positions first — then get your risk profile and a news scan for your holdings.</p>
+        <p className="text-sm text-slate-400">Add positions first — then get your risk profile, a news scan, and your theses in one place.</p>
       </div>
     );
 
@@ -1677,7 +1676,7 @@ function InsightsTab({ active, totals, cur, fx, say, analysis, onSave, news, onS
 
       {/* segmented control */}
       <div className="bg-slate-100 rounded-full p-1 flex">
-        {[["risk", "Risk profile"], ["news", "News for you"]].map(([id, label]) => (
+        {[["risk", "Risk profile"], ["news", "News for you"], ["theses", "Theses"]].map(([id, label]) => (
           <button key={id} onClick={() => setMode(id)}
             className={`flex-1 text-sm font-semibold py-2 rounded-full transition ${
               mode === id ? "bg-white text-slate-700 shadow-sm" : "text-slate-400"}`}>
@@ -1688,8 +1687,10 @@ function InsightsTab({ active, totals, cur, fx, say, analysis, onSave, news, onS
 
       {mode === "risk" ? (
         <RiskView analysis={analysis} busy={busy} onAnalyze={analyze} />
-      ) : (
+      ) : mode === "news" ? (
         <NewsView news={news} busy={newsBusy} onFetch={fetchNews} />
+      ) : (
+        <ThesesTab active={active} cur={cur} fx={fx} onVerdict={onVerdict} />
       )}
     </div>
   );
