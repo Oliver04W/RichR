@@ -254,6 +254,51 @@ export default function RichR({ user, onSignOut }) {
   const [toast, setToast] = useState("");
   const loaded = useRef(false);
 
+  /* ---- "X has added you!" banner ---- */
+  const [friendAlert, setFriendAlert] = useState(null); // { id, username, more }
+  const alertChecked = useRef(false);
+  useEffect(() => {
+    if (!data || alertChecked.current) return;
+    alertChecked.current = true;
+    (async () => {
+      try {
+        const { data: inc } = await supabase
+          .from("friends").select("user_id").eq("friend_id", user.id);
+        const incIds = (inc || []).map((r) => r.user_id);
+        if (!incIds.length) return;
+        const { data: out } = await supabase
+          .from("friends").select("friend_id").eq("user_id", user.id);
+        const outSet = new Set((out || []).map((r) => r.friend_id));
+        const seen = new Set(data.seenRequests || []);
+        const fresh = incIds.filter((id) => !outSet.has(id) && !seen.has(id));
+        if (!fresh.length) return;
+        const { data: p } = await supabase
+          .from("profiles").select("user_id, username").in("user_id", fresh);
+        const first = (p || []).find((x) => fresh.includes(x.user_id));
+        if (!first) return;
+        setFriendAlert({
+          id: first.user_id,
+          username: first.username || "someone",
+          more: fresh.length - 1,
+        });
+      } catch (_) { /* banner is best-effort — never block the app */ }
+    })();
+  }, [data]);
+
+  const dismissFriendAlert = () => {
+    if (friendAlert) patch((d) => ({ seenRequests: [...(d.seenRequests || []), friendAlert.id] }));
+    setFriendAlert(null);
+  };
+  const addBackFromAlert = async () => {
+    if (!friendAlert) return;
+    const { error } = await supabase.from("friends")
+      .insert({ user_id: user.id, friend_id: friendAlert.id });
+    if (error && error.code !== "23505") { say("Couldn't add back — try again."); return; }
+    say(`You and @${friendAlert.username} are now friends!`);
+    patch((d) => ({ seenRequests: [...(d.seenRequests || []), friendAlert.id] }));
+    setFriendAlert(null);
+  };
+
   const storageKey = dataKey(user.id);
   useEffect(() => {
     const d = loadData(storageKey);
@@ -535,6 +580,29 @@ export default function RichR({ user, onSignOut }) {
             cur={cur} onCurrency={(currency) => patch(() => ({ currency }))}
             onProfile={(profile) => patch(() => ({ profile }))} onPhilosophy={(philosophy) => patch(() => ({ philosophy }))} onSignOut={onSignOut} />
         </div>
+
+        {/* friend request banner */}
+        {friendAlert && (
+          <div className="mb-4 bg-white border border-emerald-200 rounded-2xl p-3 shadow-sm flex items-center gap-2">
+            <div className="w-8 h-8 rounded-full bg-emerald-50 flex items-center justify-center shrink-0">
+              <Users size={15} className="text-emerald-500" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-semibold text-slate-700 truncate">@{friendAlert.username} has added you!</div>
+              {friendAlert.more > 0 && (
+                <div className="text-[11px] text-slate-400">+{friendAlert.more} more in the Friends tab</div>
+              )}
+            </div>
+            <button onClick={addBackFromAlert}
+              className="bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-xs font-semibold px-3 py-1.5 rounded-full shadow shrink-0">
+              Add back
+            </button>
+            <button onClick={dismissFriendAlert}
+              className="w-6 h-6 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center shrink-0">
+              <X size={12} />
+            </button>
+          </div>
+        )}
 
         {tab === "home" && (
           <HomeTab
