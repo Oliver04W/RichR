@@ -561,7 +561,8 @@ export default function RichR({ user, onSignOut }) {
             analysis={(data.analysis || {})[active.id]} onSave={saveAnalysis}
             news={(data.news || {})[active.id]} onSaveNews={saveNews} />
         )}
-        {tab === "research" && <ResearchTab cur={cur} say={say} onUpsert={upsertHolding} />}
+        {tab === "research" && <ResearchTab cur={cur} say={say} onUpsert={upsertHolding}
+          companyInfo={data.companyInfo || {}} onSaveInfo={saveCompanyInfo} />}
         {tab === "friends" && <FriendsTab data={data} active={active} totals={totals} cur={cur} say={say} user={user} />}
       </div>
 
@@ -2423,6 +2424,71 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClosePosition, onClose })
   );
 }
 
+/* ================= COMPANY INFO (Research) ================= */
+/* "What it does" AI description for any searched instrument —
+   the same research holdings get in their detail sheet, now for
+   any company. Shares the companyInfo cache (keyed by ticker),
+   so a description generated here is already there if you later
+   buy the stock, and vice versa. Auto-loads once per ticker. */
+function CompanyInfoCard({ symbol, name, type, info, onSaveInfo }) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const ticker = (symbol || "").toUpperCase();
+
+  const fetchInfo = async () => {
+    setLoading(true); setError("");
+    try {
+      const isStock = !type || type === "Stock";
+      const prompt =
+        `In 2-3 plain, friendly sentences, explain what ${name || ticker} (${ticker}) ` +
+        (isStock
+          ? `does as a business: what it makes or sells, and who its customers are. `
+          : `is as a ${type}: what it tracks or holds and what an investor gets exposure to. `) +
+        `Write for someone new to investing. No numbers, no opinions on whether it's a good investment, no advice. ` +
+        `Respond with ONLY the description text, nothing else.`;
+      const res = await fetch("/api/openai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 1000,
+          messages: [{ role: "user", content: prompt }],
+        }),
+      });
+      const json = await res.json();
+      let text = "";
+      if (typeof json.content === "string") text = json.content;
+      else if (Array.isArray(json.content))
+        text = json.content.map((b) => (b && typeof b.text === "string" ? b.text : "")).join(" ");
+      text = text.trim();
+      if (!text) throw new Error("empty");
+      onSaveInfo(ticker, text.slice(0, 600));
+    } catch (e) {
+      setError("Couldn't load the description — try again.");
+    } finally { setLoading(false); }
+  };
+
+  useEffect(() => { if (!info && ticker) fetchInfo(); }, [ticker]);
+
+  return (
+    <div className="mt-4 border-t border-slate-100 pt-4">
+      <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1">What it does</div>
+      {loading ? (
+        <div className="text-sm text-slate-400 flex items-center gap-2 py-1">
+          <RefreshCw size={13} className="animate-spin" /> Looking it up…
+        </div>
+      ) : error ? (
+        <div className="text-sm">
+          <span className="text-rose-500">{error}</span>{" "}
+          <button onClick={fetchInfo} className="font-semibold text-slate-500 underline">Retry</button>
+        </div>
+      ) : info ? (
+        <p className="text-sm text-slate-600 leading-relaxed">{info.text}</p>
+      ) : null}
+    </div>
+  );
+}
+
 /* ================= AI THESIS (Research) ================= */
 /* AI thesis card. Generates a balanced bull/bear thesis for the
    selected instrument via /api/openai (same route as the other AI
@@ -2666,7 +2732,7 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
 /* Look up any stock on demand: search → live quote (via the get-quote
    edge function) → add to portfolio or watch. No seed_tickers bloat;
    each lookup fetches its own price when you open it. */
-function ResearchTab({ cur, say, onUpsert }) {
+function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo }) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
@@ -2785,6 +2851,9 @@ function ResearchTab({ cur, say, onUpsert }) {
           <div className="mt-4">
             <PriceChart symbol={sel.symbol} currency={(quote && quote.currency) || sel.currency} />
           </div>
+
+          <CompanyInfoCard key={"info-" + sel.symbol} symbol={sel.symbol} name={sel.name} type={sel.type}
+            info={(companyInfo || {})[(sel.symbol || "").toUpperCase()]} onSaveInfo={onSaveInfo} />
 
           <AiThesisCard key={sel.symbol} symbol={sel.symbol} name={sel.name} />
 
