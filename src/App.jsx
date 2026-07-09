@@ -21,9 +21,7 @@ function Splash() {
   return (
     <div className="min-h-screen bg-slate-50 flex items-center justify-center"
       style={{ fontFamily: "'Inter', system-ui, sans-serif" }}>
-      <div className="text-2xl font-bold text-slate-800">
-        Rich<span className="text-transparent bg-clip-text bg-gradient-to-r from-emerald-500 to-teal-500">R</span>
-      </div>
+      <img src="/logo.png" alt="RichR" className="w-20 h-20 object-contain animate-pulse" />
     </div>
   );
 }
@@ -72,8 +70,8 @@ function Login() {
       style={{ fontFamily: "'Inter', system-ui, sans-serif" }}>
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
-          <h1 className="text-4xl font-extrabold tracking-tight text-slate-800">
-            Rich<span className="text-transparent bg-clip-text bg-gradient-to-r from-emerald-500 to-teal-500">R</span>
+          <h1 className="text-4xl font-extrabold tracking-tight text-slate-800 flex items-baseline justify-center">
+            Rich<img src="/logo.png" alt="R" className="h-[2.2rem] w-auto inline-block translate-y-[2px]" />
           </h1>
           <p className="text-sm text-slate-400 font-medium mt-2">Grow your money with friends</p>
         </div>
