@@ -1410,7 +1410,7 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
       if (error) throw error;
       say("Shared! Your profile is on the board.");
       await loadAll();
-    } catch (e) { say("Couldn't publish — try again."); }
+    } catch (e) { say(`Couldn't publish — ${(e && e.message) ? e.message.slice(0, 120) : "try again."}`); }
     setBusy(false);
   };
 
