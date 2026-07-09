@@ -1327,6 +1327,13 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
   };
   useEffect(() => { loadAll(); }, []);
 
+  // Tap a friend -> open the same investor profile sheet as the leaderboard.
+  const openFriendProfile = (id, username) => {
+    const row = board.find((b) => b.userId === id);
+    if (row) setViewing(row);
+    else say(`@${username} hasn't shared their portfolio yet.`);
+  };
+
   // Add back someone who added you — one tap, no typing.
   const addBack = async (id, username) => {
     const { error } = await supabase.from("friends").insert({ user_id: user.id, friend_id: id });
@@ -1489,70 +1496,90 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
       </div>
 
       {/* friends list */}
-      <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
-        <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-3">
-          <Users size={16} className="text-emerald-500" /> Friends
-        </h3>
+      {(() => {
+        const loadingLists = friends === null || incoming === null;
+        const mutuals = (friends || []).filter((f) => f.mutual);
+        const incomingPending = (incoming || []).filter((r) => !r.mutual);
+        const outgoingPending = (friends || []).filter((f) => !f.mutual);
+        return (
+          <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+            <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-3">
+              <Users size={16} className="text-emerald-500" /> Your friends
+              {mutuals.length > 0 && <span className="text-xs font-semibold text-slate-400">· {mutuals.length}</span>}
+            </h3>
 
-        {/* rubric 1: people who have added you */}
-        <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1">
-          People who have added you{incoming && incoming.length > 0 ? ` · ${incoming.length}` : ""}
-        </div>
-        {incoming === null ? (
-          <p className="text-sm text-slate-400">Loading…</p>
-        ) : incoming.length === 0 ? (
-          <p className="text-sm text-slate-400">No one yet — share your username so friends can add you.</p>
-        ) : (
-          <div>
-            {incoming.map((r) => (
-              <div key={r.id} className="flex items-center justify-between gap-2 py-2.5 border-b border-slate-50 last:border-0">
-                <div className="min-w-0">
-                  <div className="text-sm font-semibold text-slate-700 truncate">@{r.username}</div>
-                  {r.mutual && (
-                    <div className="text-[11px] font-medium text-emerald-600 flex items-center gap-1">
-                      <Check size={10} /> Friends
-                    </div>
-                  )}
-                </div>
-                {!r.mutual && (
-                  <button onClick={() => addBack(r.id, r.username)}
-                    className="bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-xs font-semibold px-3 py-1.5 rounded-full shadow shrink-0">
-                    Add back
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* rubric 2: people you've added */}
-        <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1 mt-4 pt-3 border-t border-slate-100">
-          People you have added{friends && friends.length > 0 ? ` · ${friends.length}` : ""}
-        </div>
-        {friends === null ? (
-          <p className="text-sm text-slate-400">Loading…</p>
-        ) : friends.length === 0 ? (
-          <p className="text-sm text-slate-400">No friends yet — add them above with the username they set in RichR.</p>
-        ) : (
-          <div>
-            {friends.map((f) => (
-              <div key={f.id} className="flex items-center justify-between gap-2 py-2.5 border-b border-slate-50 last:border-0">
-                <div className="min-w-0">
-                  <div className="text-sm font-semibold text-slate-700 truncate">@{f.username}</div>
-                  <div className={`text-[11px] font-medium flex items-center gap-1 ${f.mutual ? "text-emerald-600" : "text-slate-400"}`}>
-                    {f.mutual ? <Check size={10} /> : <Clock size={10} />}
-                    {f.mutual ? "Friends" : "Hasn't added you back yet"}
+            {loadingLists ? (
+              <p className="text-sm text-slate-400">Loading…</p>
+            ) : (
+              <>
+                {/* rubric 1: mutual friends — tap to view profile */}
+                {mutuals.length === 0 ? (
+                  <p className="text-sm text-slate-400">No friends yet — when someone adds you back, they appear here.</p>
+                ) : (
+                  <div>
+                    {mutuals.map((f) => (
+                      <div key={f.id} className="flex items-center justify-between gap-2 py-2.5 border-b border-slate-50 last:border-0">
+                        <button onClick={() => openFriendProfile(f.id, f.username)}
+                          className="min-w-0 flex-1 text-left active:opacity-70">
+                          <div className="text-sm font-semibold text-slate-700 truncate">@{f.username}</div>
+                          <div className="text-[11px] font-medium text-emerald-600 flex items-center gap-1">
+                            <Check size={10} /> Friends · tap to view profile
+                          </div>
+                        </button>
+                        <button onClick={() => removeFriend(f.id, f.username)}
+                          className="text-xs font-semibold text-slate-400 bg-slate-100 px-3 py-1.5 rounded-full shrink-0">
+                          Unfriend
+                        </button>
+                      </div>
+                    ))}
                   </div>
-                </div>
-                <button onClick={() => removeFriend(f.id, f.username)}
-                  className="text-xs font-semibold text-slate-400 bg-slate-100 px-3 py-1.5 rounded-full shrink-0">
-                  Unfriend
-                </button>
-              </div>
-            ))}
+                )}
+
+                {/* rubric 2: added you, awaiting your add-back */}
+                {incomingPending.length > 0 && (
+                  <>
+                    <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1 mt-4 pt-3 border-t border-slate-100">
+                      People who have added you · {incomingPending.length}
+                    </div>
+                    {incomingPending.map((r) => (
+                      <div key={r.id} className="flex items-center justify-between gap-2 py-2.5 border-b border-slate-50 last:border-0">
+                        <span className="text-sm font-semibold text-slate-700 truncate">@{r.username}</span>
+                        <button onClick={() => addBack(r.id, r.username)}
+                          className="bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-xs font-semibold px-3 py-1.5 rounded-full shadow shrink-0">
+                          Add back
+                        </button>
+                      </div>
+                    ))}
+                  </>
+                )}
+
+                {/* rubric 3: you added them, awaiting their add-back */}
+                {outgoingPending.length > 0 && (
+                  <>
+                    <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1 mt-4 pt-3 border-t border-slate-100">
+                      People you have added · {outgoingPending.length}
+                    </div>
+                    {outgoingPending.map((f) => (
+                      <div key={f.id} className="flex items-center justify-between gap-2 py-2.5 border-b border-slate-50 last:border-0">
+                        <div className="min-w-0">
+                          <div className="text-sm font-semibold text-slate-700 truncate">@{f.username}</div>
+                          <div className="text-[11px] font-medium text-slate-400 flex items-center gap-1">
+                            <Clock size={10} /> Hasn't added you back yet
+                          </div>
+                        </div>
+                        <button onClick={() => removeFriend(f.id, f.username)}
+                          className="text-xs font-semibold text-slate-400 bg-slate-100 px-3 py-1.5 rounded-full shrink-0">
+                          Cancel
+                        </button>
+                      </div>
+                    ))}
+                  </>
+                )}
+              </>
+            )}
           </div>
-        )}
-      </div>
+        );
+      })()}
 
       <div className="flex items-center justify-between">
         <h2 className="font-bold text-lg text-slate-700 flex items-center gap-2"><Trophy size={18} className="text-amber-400" /> Leaderboard</h2>
