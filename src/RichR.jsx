@@ -1145,6 +1145,7 @@ function ThesesTab({ active, cur, fx, onVerdict }) {
 function FriendsTab({ data, active, totals, cur, say, user }) {
   const [board, setBoard] = useState(null);
   const [friends, setFriends] = useState(null);
+  const [requests, setRequests] = useState(null); // people who added you, not yet added back
   const [onBoard, setOnBoard] = useState(false);
   const [viewing, setViewing] = useState(null);
   const [addName, setAddName] = useState("");
@@ -1153,18 +1154,29 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
 
   const loadAll = async () => {
     try {
-      const { data: fr, error: fErr } = await supabase.from("friends").select("friend_id");
+      // People I added (explicit filter — don't rely on RLS to scope this).
+      const { data: fr, error: fErr } = await supabase
+        .from("friends").select("friend_id").eq("user_id", user.id);
       if (fErr) throw fErr;
       const ids = (fr || []).map((r) => r.friend_id);
+
+      // People who added ME (visible thanks to the incoming-select policy).
+      const { data: inc } = await supabase
+        .from("friends").select("user_id").eq("friend_id", user.id);
+      const incIds = (inc || []).map((r) => r.user_id);
+      const incSet = new Set(incIds);
+
+      // Usernames for everyone involved, one query.
+      const allIds = [...new Set([...ids, ...incIds])];
       let profs = [];
-      if (ids.length) {
-        const { data: p } = await supabase.from("profiles").select("user_id, username").in("user_id", ids);
+      if (allIds.length) {
+        const { data: p } = await supabase.from("profiles").select("user_id, username").in("user_id", allIds);
         profs = p || [];
       }
-      setFriends(ids.map((id) => ({
-        id,
-        username: (profs.find((p) => p.user_id === id) || {}).username || "unknown",
-      })));
+      const uname = (id) => (profs.find((p) => p.user_id === id) || {}).username || "unknown";
+
+      setFriends(ids.map((id) => ({ id, username: uname(id), mutual: incSet.has(id) })));
+      setRequests(incIds.filter((id) => !ids.includes(id)).map((id) => ({ id, username: uname(id) })));
       const { data: rows, error: bErr } = await supabase
         .from("leaderboard")
         .select("user_id, name, profile, portfolio, return_pct, holdings, top_holdings, realized_pct, avg_days, win_rate, philosophy")
@@ -1185,9 +1197,17 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
         philosophy: r.philosophy || "",
       })));
       setOnBoard((rows || []).some((r) => r.user_id === user.id));
-    } catch (e) { setBoard([]); setFriends([]); }
+    } catch (e) { setBoard([]); setFriends([]); setRequests([]); }
   };
   useEffect(() => { loadAll(); }, []);
+
+  // Add back someone who added you — one tap, no typing.
+  const addBack = async (id, username) => {
+    const { error } = await supabase.from("friends").insert({ user_id: user.id, friend_id: id });
+    if (error && error.code !== "23505") { say("Couldn't add back — try again."); return; }
+    say(`You and @${username} are now friends!`);
+    await loadAll();
+  };
 
   const addFriend = async () => {
     const u = addName.trim().toLowerCase().replace(/^@/, "");
@@ -1209,8 +1229,11 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
   };
 
   const removeFriend = async (id, username) => {
-    await supabase.from("friends").delete().eq("user_id", user.id).eq("friend_id", id);
-    say(`Removed @${username}.`);
+    // Unfriend removes BOTH directions: your row and theirs (the
+    // incoming-delete policy lets you remove yourself from their list).
+    await supabase.from("friends").delete()
+      .or(`and(user_id.eq.${user.id},friend_id.eq.${id}),and(user_id.eq.${id},friend_id.eq.${user.id})`);
+    say(`Unfriended @${username}.`);
     await loadAll();
   };
 
@@ -1313,6 +1336,22 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
             {adding ? "Adding…" : "Add"}
           </button>
         </div>
+        {requests && requests.length > 0 && (
+          <div className="mb-3 bg-emerald-50 border border-emerald-100 rounded-2xl p-3">
+            <div className="text-[11px] font-bold uppercase tracking-wide text-emerald-600 mb-2">Added you</div>
+            <div className="space-y-2">
+              {requests.map((r) => (
+                <div key={r.id} className="flex items-center justify-between gap-2">
+                  <span className="text-sm font-semibold text-slate-600 truncate">@{r.username}</span>
+                  <button onClick={() => addBack(r.id, r.username)}
+                    className="bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-xs font-semibold px-3 py-1.5 rounded-full shadow shrink-0">
+                    Add back
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         {friends === null ? (
           <p className="text-sm text-slate-400">Loading…</p>
         ) : friends.length === 0 ? (
@@ -1321,10 +1360,14 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
           <div className="flex flex-wrap gap-1.5">
             {friends.map((f) => (
               <span key={f.id}
-                className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600 bg-slate-100 pl-2.5 pr-1.5 py-1 rounded-full">
+                title={f.mutual ? "You're friends — they added you back" : "Hasn't added you back yet"}
+                className={`inline-flex items-center gap-1.5 text-xs font-semibold pl-2.5 pr-1.5 py-1 rounded-full ${
+                  f.mutual ? "text-emerald-700 bg-emerald-50" : "text-slate-600 bg-slate-100"}`}>
+                {f.mutual ? <Check size={10} className="text-emerald-500" /> : <Clock size={10} className="text-slate-400" />}
                 @{f.username}
                 <button onClick={() => removeFriend(f.id, f.username)}
-                  className="w-4 h-4 rounded-full bg-slate-200 text-slate-500 flex items-center justify-center">
+                  className={`w-4 h-4 rounded-full flex items-center justify-center ${
+                    f.mutual ? "bg-emerald-100 text-emerald-600" : "bg-slate-200 text-slate-500"}`}>
                   <X size={10} />
                 </button>
               </span>
