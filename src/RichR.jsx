@@ -1267,6 +1267,8 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
   const [busy, setBusy] = useState(false);
 
   const loadAll = async () => {
+    /* Friends + incoming — isolated so a leaderboard problem can never
+       wipe your connections (the old shared catch caused exactly that). */
     try {
       // People I added (explicit filter — don't rely on RLS to scope this).
       const { data: fr, error: fErr } = await supabase
@@ -1291,6 +1293,13 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
 
       setFriends(ids.map((id) => ({ id, username: uname(id), mutual: incSet.has(id) })));
       setIncoming(incIds.map((id) => ({ id, username: uname(id), mutual: ids.includes(id) })));
+    } catch (e) {
+      console.error("RichR friends load failed:", e);
+      setFriends([]); setIncoming([]);
+    }
+
+    /* Leaderboard — isolated. If this fails, only the board is empty. */
+    try {
       const { data: rows, error: bErr } = await supabase
         .from("leaderboard")
         .select("user_id, name, profile, portfolio, return_pct, holdings, top_holdings, realized_pct, avg_days, win_rate, philosophy")
@@ -1311,7 +1320,10 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
         philosophy: r.philosophy || "",
       })));
       setOnBoard((rows || []).some((r) => r.user_id === user.id));
-    } catch (e) { setBoard([]); setFriends([]); setIncoming([]); }
+    } catch (e) {
+      console.error("RichR leaderboard load failed:", e);
+      setBoard([]);
+    }
   };
   useEffect(() => { loadAll(); }, []);
 
