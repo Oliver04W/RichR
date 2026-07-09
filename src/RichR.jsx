@@ -297,6 +297,8 @@ export default function RichR({ user, onSignOut }) {
     return { cost, value, pl, plPct: cost ? (pl / cost) * 100 : 0 };
   }, [active, cur, data]);
 
+  const [showHistory, setShowHistory] = useState(false);
+
   const chartData = useMemo(() => {
     if (!data || !active)
       return [{ label: "Cost", value: 0 }, { label: "Now", value: 0 }];
@@ -752,7 +754,7 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
         {pricesAt > 0 && (
           <p className="text-[11px] text-slate-400 mb-1">Prices updated {new Date(pricesAt).toLocaleTimeString()}</p>
         )}
-        <div className="h-40 -mx-2">
+        <div className="h-40 -mx-2 cursor-pointer active:opacity-80" onClick={() => setShowHistory(true)}>
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={chartData} margin={{ top: 8, right: 10, left: 10, bottom: 0 }}>
               <defs>
@@ -775,6 +777,10 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
           {fx && fx.at ? `live FX rates (updated ${new Date(fx.at).toLocaleString()})` : "approximate FX rates — tap Update prices for live rates"}.
         </p>
       </div>
+
+      <PortfolioHistorySheet open={showHistory} onClose={() => setShowHistory(false)}
+        holdings={active.holdings} cur={cur}
+        liveValue={totals.value} liveCost={totals.cost} hex={th.hex} />
 
       {/* quick stats row */}
       <div className="grid grid-cols-3 gap-3">
@@ -2417,6 +2423,245 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClosePosition, onClose })
   );
 }
 
+/* ================= AI THESIS (Research) ================= */
+/* AI thesis card. Generates a balanced bull/bear thesis for the
+   selected instrument via /api/openai (same route as the other AI
+   features). Runs on demand only — nothing until the user taps. */
+function AiThesisCard({ symbol, name }) {
+  const [thesis, setThesis] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const generate = async () => {
+    setLoading(true); setErr(null); setThesis(null);
+    try {
+      const prompt =
+        `Write a concise, balanced investment thesis on ${name || symbol} (ticker: ${symbol}) ` +
+        `for a personal research tool. Be specific (numbers, segments, competitors), not generic. ` +
+        `Respond with ONLY JSON, no other text: ` +
+        `{"company":"full name","one_liner":"what it does in one sentence",` +
+        `"bull_case":["3-5 short bullets FOR owning it"],` +
+        `"bear_case":["3-5 short bullets AGAINST owning it"],` +
+        `"key_risks":["2-4 short bullets: biggest specific risks"],` +
+        `"catalysts":["2-4 short bullets: upcoming events/drivers to watch"],` +
+        `"verdict":"2-3 sentences. No buy/sell recommendation; describe what kind of investor this fits and what the debate hinges on."}`;
+      const res = await fetch("/api/openai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 1200,
+          messages: [{ role: "user", content: prompt }],
+        }),
+      });
+      const json = await res.json();
+      const text = (json.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+      const match = text.replace(/```json|```/g, "").match(/\{[\s\S]*\}/);
+      if (!match) throw new Error("The AI returned an unexpected format — try again.");
+      setThesis(JSON.parse(match[0]));
+    } catch (e) {
+      setErr(e && e.message ? e.message : "Could not generate a thesis — try again.");
+    }
+    setLoading(false);
+  };
+
+  const Section = ({ title, items, tone }) => {
+    if (!items || !items.length) return null;
+    const dot = tone === "bull" ? "bg-emerald-500" : tone === "bear" ? "bg-rose-500" : "bg-slate-400";
+    return (
+      <div className="mt-3">
+        <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400">{title}</div>
+        <ul className="mt-1 space-y-1">
+          {items.map((it, i) => (
+            <li key={i} className="text-sm text-slate-600 flex gap-2">
+              <span className={`mt-1.5 w-1.5 h-1.5 rounded-full shrink-0 ${dot}`} />
+              <span>{it}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  };
+
+  return (
+    <div className="mt-4 border-t border-slate-100 pt-4">
+      {!thesis && !loading && (
+        <button onClick={generate}
+          className="w-full bg-slate-100 text-slate-600 text-sm font-semibold py-2.5 rounded-full flex items-center justify-center gap-1.5">
+          <Sparkles size={15} className="text-emerald-500" />
+          {err ? "Try again" : "Generate AI thesis"}
+        </button>
+      )}
+      {err && !loading && <div className="text-xs text-rose-500 mt-2 text-center">{err}</div>}
+      {loading && (
+        <div className="text-sm text-slate-400 flex items-center justify-center gap-2 py-2">
+          <RefreshCw size={14} className="animate-spin" /> Writing thesis… this can take ~20 seconds
+        </div>
+      )}
+      {thesis && (
+        <div>
+          <div className="flex items-center gap-1.5">
+            <Sparkles size={14} className="text-emerald-500" />
+            <span className="text-sm font-bold text-slate-700">AI thesis</span>
+          </div>
+          {thesis.one_liner && <p className="text-sm text-slate-500 mt-1">{thesis.one_liner}</p>}
+          <Section title="Bull case" items={thesis.bull_case} tone="bull" />
+          <Section title="Bear case" items={thesis.bear_case} tone="bear" />
+          <Section title="Key risks" items={thesis.key_risks} />
+          <Section title="Catalysts to watch" items={thesis.catalysts} />
+          {thesis.verdict && (
+            <p className="text-sm text-slate-600 mt-3 bg-slate-50 rounded-xl px-3 py-2">{thesis.verdict}</p>
+          )}
+          <p className="text-[10px] text-slate-300 mt-2">
+            AI-generated, may contain errors or be out of date. Not investment advice.
+          </p>
+          <button onClick={generate}
+            className="mt-2 text-xs font-semibold text-slate-400 flex items-center gap-1">
+            <RefreshCw size={11} /> Regenerate
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ================= PORTFOLIO HISTORY SHEET ================= */
+/* Full-screen portfolio history with 1D/1W/1M/6M/1Y horizons.
+   Fetches an accurate reconstructed series from the
+   portfolio-history edge function, and appends the LIVE current
+   value as the last point — the tip moves with each refresh. */
+const PH_RANGES = [
+  { id: "1d",  label: "1D",  sub: "Today" },
+  { id: "1w",  label: "1W",  sub: "Past week" },
+  { id: "1mo", label: "1M",  sub: "Past month" },
+  { id: "6mo", label: "6M",  sub: "Past 6 months" },
+  { id: "1y",  label: "1Y",  sub: "Past year" },
+];
+
+function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCost, hex }) {
+  const [range, setRange] = useState("1d");
+  const [pts, setPts] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let dead = false;
+    (async () => {
+      setLoading(true); setErr(null);
+      try {
+        const body = {
+          display: cur,
+          range,
+          holdings: (holdings || []).map((h) => ({
+            ticker: h.ticker, shares: Number(h.shares) || 0,
+            buyPrice: Number(h.buyPrice) || 0, buyDate: h.buyDate || null,
+            sellDate: h.sellDate || null, currency: h.currency || cur,
+          })),
+        };
+        const { data, error } = await supabase.functions.invoke("portfolio-history", { body });
+        if (dead) return;
+        if (error || !data || !data.ok || !Array.isArray(data.points) || !data.points.length) {
+          setErr((data && data.error) || "Could not load history."); setPts(null);
+        } else {
+          setPts(data.points);
+        }
+      } catch (e) { if (!dead) { setErr("Could not load history."); setPts(null); } }
+      if (!dead) setLoading(false);
+    })();
+    return () => { dead = true; };
+  }, [open, range, cur, holdings]);
+
+  if (!open) return null;
+
+  const intraday = range === "1d" || range === "1w";
+  const fmtTick = (t) => {
+    const d = new Date(t);
+    if (range === "1d") return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    if (range === "1w") return d.toLocaleDateString([], { weekday: "short" });
+    return d.toLocaleDateString([], { month: "short", day: "numeric" });
+  };
+
+  const chart = (pts || []).map((p) => ({ t: p.t, value: p.value, cost: p.cost }));
+  if (chart.length && liveValue > 0) {
+    chart.push({ t: new Date().toISOString(), value: Math.round(liveValue * 100) / 100, cost: liveCost });
+  }
+
+  const first = chart.length ? chart[0].value : 0;
+  const last = chart.length ? chart[chart.length - 1].value : 0;
+  const diff = last - first;
+  const diffPct = first ? (diff / first) * 100 : 0;
+  const up = diff >= 0;
+  const sub = (PH_RANGES.find((r) => r.id === range) || {}).sub || "";
+
+  return (
+    <div className="fixed inset-0 z-[80] bg-slate-50 overflow-y-auto">
+      <div className="max-w-md mx-auto p-4 pb-10">
+        <div className="flex items-center gap-2 mb-3">
+          <button onClick={onClose} className="p-2 -ml-2 text-slate-500"><ChevronLeft size={22} /></button>
+          <h2 className="font-bold text-lg text-slate-700">Portfolio history</h2>
+        </div>
+
+        <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+          <div className="text-2xl font-bold text-slate-800">{money(last, cur)}</div>
+          <div className={`text-sm font-semibold flex items-center gap-1 mt-0.5 ${up ? "text-emerald-600" : "text-rose-500"}`}>
+            {up ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
+            {up ? "+" : ""}{money(diff, cur)} ({up ? "+" : ""}{diffPct.toFixed(2)}%)
+            <span className="text-slate-400 font-normal ml-1">{sub}</span>
+          </div>
+
+          <div className="h-64 -mx-2 mt-4">
+            {loading ? (
+              <div className="h-full flex items-center justify-center text-sm text-slate-400">
+                <RefreshCw size={15} className="animate-spin mr-2" /> Building accurate history…
+              </div>
+            ) : err ? (
+              <div className="h-full flex items-center justify-center text-sm text-rose-500 text-center px-6">{err}</div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={chart} margin={{ top: 8, right: 10, left: 10, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="phg" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={up ? "#10b981" : "#f43f5e"} stopOpacity={0.25} />
+                      <stop offset="100%" stopColor={up ? "#10b981" : "#f43f5e"} stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <XAxis dataKey="t" tickFormatter={fmtTick} minTickGap={40}
+                    tick={{ fill: "#94a3b8", fontSize: 10 }} axisLine={false} tickLine={false} />
+                  <YAxis hide domain={["auto", "auto"]} />
+                  {!intraday && chart.length > 0 && (
+                    <ReferenceLine y={chart[chart.length - 1].cost} stroke="#cbd5e1" strokeDasharray="4 4" />
+                  )}
+                  <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid #e2e8f0", fontSize: 12 }}
+                    labelFormatter={(t) => new Date(t).toLocaleString()}
+                    formatter={(v, k) => [money(v, cur), k === "value" ? "Value" : "Invested"]} />
+                  <Area type="monotone" dataKey="value" stroke={up ? "#10b981" : "#f43f5e"}
+                    strokeWidth={2.5} fill="url(#phg)" isAnimationActive={false} />
+                </AreaChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1.5 mt-3">
+            {PH_RANGES.map((r) => (
+              <button key={r.id} onClick={() => setRange(r.id)}
+                className={`flex-1 text-xs font-bold py-2 rounded-full transition ${
+                  range === r.id ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-500"}`}>
+                {r.label}
+              </button>
+            ))}
+          </div>
+
+          <p className="text-[10px] text-slate-300 mt-3">
+            Reconstructed from official daily closes and intraday bars, converted at historical FX.
+            Excludes dividends and fees. The last point is your live value.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ================= RESEARCH ================= */
 /* Look up any stock on demand: search → live quote (via the get-quote
    edge function) → add to portfolio or watch. No seed_tickers bloat;
@@ -2540,6 +2785,8 @@ function ResearchTab({ cur, say, onUpsert }) {
           <div className="mt-4">
             <PriceChart symbol={sel.symbol} currency={(quote && quote.currency) || sel.currency} />
           </div>
+
+          <AiThesisCard key={sel.symbol} symbol={sel.symbol} name={sel.name} />
 
           <div className="mt-4 flex items-center gap-2">
             <button onClick={() => startAdd(sel)}
