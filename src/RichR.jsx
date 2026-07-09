@@ -527,7 +527,7 @@ export default function RichR({ user, onSignOut }) {
             <h1 className="text-2xl font-extrabold tracking-tight">
               Rich<span className="text-transparent bg-clip-text bg-gradient-to-r from-emerald-500 to-teal-500">R</span>
             </h1>
-            <p className="text-xs text-slate-400 font-medium">Grow your money with friends · build 29</p>
+            <p className="text-xs text-slate-400 font-medium">Grow your money with friends</p>
           </div>
           <NamePill data={data} user={user} say={say}
             onName={(userName) => patch(() => ({ userName }))}
@@ -1366,7 +1366,7 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
       {/* friends manager */}
       <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
         <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-1">
-          <Users size={16} className="text-emerald-500" /> Your friends
+          <Plus size={16} className="text-emerald-500" /> Add friends
         </h3>
         {!data.username && (
           <p className="text-xs text-amber-600 font-medium mb-2">
@@ -1410,28 +1410,6 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
             </div>
           </div>
         )}
-        {friends === null ? (
-          <p className="text-sm text-slate-400">Loading…</p>
-        ) : friends.length === 0 ? (
-          <p className="text-sm text-slate-400">No friends yet — ask them for the username they set in RichR.</p>
-        ) : (
-          <div className="flex flex-wrap gap-1.5">
-            {friends.map((f) => (
-              <span key={f.id}
-                title={f.mutual ? "You're friends — they added you back" : "Hasn't added you back yet"}
-                className={`inline-flex items-center gap-1.5 text-xs font-semibold pl-2.5 pr-1.5 py-1 rounded-full ${
-                  f.mutual ? "text-emerald-700 bg-emerald-50" : "text-slate-600 bg-slate-100"}`}>
-                {f.mutual ? <Check size={10} className="text-emerald-500" /> : <Clock size={10} className="text-slate-400" />}
-                @{f.username}
-                <button onClick={() => removeFriend(f.id, f.username)}
-                  className={`w-4 h-4 rounded-full flex items-center justify-center ${
-                    f.mutual ? "bg-emerald-100 text-emerald-600" : "bg-slate-200 text-slate-500"}`}>
-                  <X size={10} />
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
         {data.username && (
           <div className="flex items-center justify-between gap-3 mt-4 pt-3 border-t border-slate-100">
             <div className="min-w-0">
@@ -1442,6 +1420,39 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
               className={`w-11 h-6 rounded-full p-0.5 shrink-0 transition ${!searchable ? "bg-emerald-500" : "bg-slate-200"}`}>
               <span className={`block w-5 h-5 bg-white rounded-full shadow transform transition ${!searchable ? "translate-x-5" : ""}`} />
             </button>
+          </div>
+        )}
+      </div>
+
+      {/* your friends list */}
+      <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+        <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-1">
+          <Users size={16} className="text-emerald-500" /> Your friends
+          {friends && friends.length > 0 && (
+            <span className="text-xs font-semibold text-slate-400">· {friends.length}</span>
+          )}
+        </h3>
+        {friends === null ? (
+          <p className="text-sm text-slate-400 mt-1">Loading…</p>
+        ) : friends.length === 0 ? (
+          <p className="text-sm text-slate-400 mt-1">No friends yet — add them above with the username they set in RichR.</p>
+        ) : (
+          <div className="mt-1">
+            {friends.map((f) => (
+              <div key={f.id} className="flex items-center justify-between gap-2 py-2.5 border-b border-slate-50 last:border-0">
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-slate-700 truncate">@{f.username}</div>
+                  <div className={`text-[11px] font-medium flex items-center gap-1 ${f.mutual ? "text-emerald-600" : "text-slate-400"}`}>
+                    {f.mutual ? <Check size={10} /> : <Clock size={10} />}
+                    {f.mutual ? "Friends" : "Hasn't added you back yet"}
+                  </div>
+                </div>
+                <button onClick={() => removeFriend(f.id, f.username)}
+                  className="text-xs font-semibold text-slate-400 bg-slate-100 px-3 py-1.5 rounded-full shrink-0">
+                  Unfriend
+                </button>
+              </div>
+            ))}
           </div>
         )}
       </div>
