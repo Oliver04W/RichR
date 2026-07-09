@@ -569,8 +569,8 @@ export default function RichR({ user, onSignOut }) {
         {/* header */}
         <div className="flex items-center justify-between mb-5">
           <div>
-            <h1 className="text-2xl font-extrabold tracking-tight">
-              Rich<span className="text-transparent bg-clip-text bg-gradient-to-r from-emerald-500 to-teal-500">R</span>
+            <h1 className="text-2xl font-extrabold tracking-tight flex items-baseline">
+              Rich<img src="/logo.png" alt="R" className="h-[1.35rem] w-auto inline-block translate-y-[1px]" />
             </h1>
             <p className="text-xs text-slate-400 font-medium">Grow your money with friends</p>
           </div>
