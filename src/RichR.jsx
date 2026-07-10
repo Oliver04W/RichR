@@ -1,8 +1,9 @@
+
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   Plus, RefreshCw, Trash2, Users, BookOpen, Home, Briefcase, Check, X,
   Clock, HelpCircle, Pencil, Trophy, Share2, TrendingUp, TrendingDown,
-  ChevronDown, ChevronLeft, Target, Sparkles, Flag, Activity, Calendar, Camera, Upload, Search, Star, ExternalLink
+  ChevronDown, ChevronLeft, Target, Sparkles, Flag, Activity, Calendar, Camera, Upload, Search, Star, ExternalLink, User
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine
@@ -274,7 +275,8 @@ const perfTheme = (plPct) => {
 /* ================================================================== */
 export default function RichR({ user, onSignOut }) {
   const [data, setData] = useState(null);
-  const [tab, setTab] = useState("home");
+  const [tab, setTab] = useState("portfolio");
+  const [sub, setSub] = useState("overview"); // Portfolio tab sections: overview | holdings | analysis
   const [refreshing, setRefreshing] = useState(false);
   const [toast, setToast] = useState("");
   const loaded = useRef(false);
@@ -647,11 +649,15 @@ export default function RichR({ user, onSignOut }) {
     patch((d) => ({ news: { ...(d.news || {}), [d.activeId]: n } }));
 
   const tabs = [
-    { id: "home", label: "Home", icon: Home },
-    { id: "positions", label: "Positions", icon: Briefcase },
+    { id: "portfolio", label: "Portfolio", icon: Briefcase },
     { id: "research", label: "Research", icon: Search },
-    { id: "insights", label: "Analysis", icon: Activity },
     { id: "friends", label: "Friends", icon: Users },
+    { id: "profile", label: "Profile", icon: User },
+  ];
+  const SUBS = [
+    { id: "overview", label: "Overview" },
+    { id: "holdings", label: "Holdings" },
+    { id: "analysis", label: "Analysis" },
   ];
 
   return (
@@ -668,11 +674,11 @@ export default function RichR({ user, onSignOut }) {
             </h1>
             <p className="text-xs text-slate-400 font-medium">Grow your money with friends</p>
           </div>
-          <NamePill data={data} user={user} say={say}
-            onName={(userName) => patch(() => ({ userName }))}
-            onUsername={(username) => patch(() => ({ username }))}
-            cur={cur} onCurrency={(currency) => patch(() => ({ currency }))}
-            onProfile={(profile) => patch(() => ({ profile }))} onPhilosophy={(philosophy) => patch(() => ({ philosophy }))} onSignOut={onSignOut} />
+          <button onClick={() => setTab("profile")}
+            className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-3.5 py-2 text-sm font-medium text-slate-600 shadow-sm">
+            {profileOf(data.profile) && <span className="text-base leading-none">{profileOf(data.profile).mascot}</span>}
+            {data.userName || "Set up profile"}
+          </button>
         </div>
 
         {/* friend request banner */}
@@ -698,28 +704,40 @@ export default function RichR({ user, onSignOut }) {
           </div>
         )}
 
-        {tab === "home" && (
+        {tab === "portfolio" && (
+          <div className="mb-4 bg-slate-200/60 rounded-full p-1 flex">
+            {SUBS.map((s) => (
+              <button key={s.id} onClick={() => setSub(s.id)}
+                className={`flex-1 text-[13px] font-semibold py-1.5 rounded-full transition ${
+                  sub === s.id ? "bg-white text-slate-700 shadow-sm" : "text-slate-500"}`}>
+                {s.label}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {tab === "portfolio" && sub === "overview" && (
           <HomeTab
             data={data} active={active} cur={cur} totals={totals} chartData={chartData}
             refreshing={refreshing} onRefresh={refreshPrices}
             onSwitch={(id) => patch(() => ({ activeId: id }))}
             onAddPortfolio={addPortfolio} onDeletePortfolio={deletePortfolio}
             onRename={(name) => patchActive(() => ({ name }))}
-            goPositions={() => setTab("positions")} onLoadSample={loadSample}
+            goPositions={() => setSub("holdings")} onLoadSample={loadSample}
             goals={data.goals || []} allValue={allValue} fx={data.fx || DEFAULT_FX}
             autoRefresh={!!data.autoRefresh} onToggleAuto={() => patch((d) => ({ autoRefresh: !d.autoRefresh }))}
             pricesAt={data.pricesAt || 0}
             onAddGoal={addGoal} onUpdateGoal={updateGoal} onRemoveGoal={removeGoal}
           />
         )}
-        {tab === "positions" && (
+        {tab === "portfolio" && sub === "holdings" && (
           <PositionsTab active={active} cur={cur} fx={data.fx || DEFAULT_FX}
             companyInfo={data.companyInfo || {}} onSaveInfo={saveCompanyInfo}
             onUpsert={upsertHolding} onRemove={removeHolding} onSetPrice={setPrice} onLoadSample={loadSample} onClosePosition={closePosition}
             watchlist={data.watchlist || []} onRemoveWatch={removeWatch} onSetWatchPrice={setWatchPrice}
             goResearch={() => setTab("research")} />
         )}
-        {tab === "insights" && (
+        {tab === "portfolio" && sub === "analysis" && (
           <InsightsTab active={active} totals={totals} cur={cur} fx={data.fx || DEFAULT_FX} say={say}
             onVerdict={setVerdict}
             analysis={(data.analysis || {})[active.id]} onSave={saveAnalysis}
@@ -729,6 +747,15 @@ export default function RichR({ user, onSignOut }) {
           companyInfo={data.companyInfo || {}} onSaveInfo={saveCompanyInfo}
           watchlist={data.watchlist || []} onWatch={addWatch} onUnwatch={removeWatchByTicker} />}
         {tab === "friends" && <FriendsTab data={data} active={active} totals={totals} cur={cur} say={say} user={user} />}
+        {tab === "profile" && (
+          <ProfileTab data={data} user={user} say={say}
+            onName={(userName) => patch(() => ({ userName }))}
+            onUsername={(username) => patch(() => ({ username }))}
+            cur={cur} onCurrency={(currency) => patch(() => ({ currency }))}
+            onProfile={(profile) => patch(() => ({ profile }))}
+            onPhilosophy={(philosophy) => patch(() => ({ philosophy }))}
+            onSignOut={onSignOut} />
+        )}
       </div>
 
       {/* toast */}
@@ -758,9 +785,8 @@ export default function RichR({ user, onSignOut }) {
   );
 }
 
-/* ================= header pill ================= */
-function NamePill({ data, user, say, onName, onUsername, cur, onCurrency, onProfile, onPhilosophy, onSignOut }) {
-  const [open, setOpen] = useState(false);
+/* ================= PROFILE ================= */
+function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onProfile, onPhilosophy, onSignOut }) {
   const prof = profileOf(data.profile);
 
   const claimUsername = async (raw) => {
@@ -775,58 +801,73 @@ function NamePill({ data, user, say, onName, onUsername, cur, onCurrency, onProf
     onUsername(u);
     say(`You're @${u} — friends can now add you.`);
   };
+
   return (
-    <div className="relative">
-      <button onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-3.5 py-2 text-sm font-medium text-slate-600 shadow-sm">
-        {prof && <span className="text-base leading-none">{prof.mascot}</span>}
-        {data.userName || "Set name"} <ChevronDown size={14} className="text-slate-400" />
-      </button>
-      {open && (
-        <div className="absolute right-0 mt-2 w-80 bg-white rounded-2xl shadow-xl border border-slate-100 p-4 z-50 max-h-[70vh] overflow-y-auto">
-          <label className="block text-xs font-semibold text-slate-400 mb-1.5">YOUR NAME</label>
-          <input defaultValue={data.userName} placeholder="e.g. John"
-            onBlur={(e) => onName(e.target.value.trim())}
-            onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
-            className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm mb-3" />
-          <label className="block text-xs font-semibold text-slate-400 mb-1.5">USERNAME — SO FRIENDS CAN ADD YOU</label>
-          <input defaultValue={data.username || ""} placeholder="e.g. scrooge_mcduck"
-            onBlur={(e) => claimUsername(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
-            className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm mb-1 lowercase" />
-          <p className="text-[10px] text-slate-400 mb-3">3–20 characters: a–z, 0–9 and _. Unique across RichR.</p>
-          <label className="block text-xs font-semibold text-slate-400 mb-1.5">CURRENCY</label>
-          <select value={cur} onChange={(e) => onCurrency(e.target.value)}
-            className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm bg-white mb-3">
-            {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code}</option>)}
-          </select>
-          <label className="block text-xs font-semibold text-slate-400 mb-1.5">WHAT KIND OF INVESTOR ARE YOU?</label>
-          <div className="grid grid-cols-2 gap-2">
-            {PROFILES.map((p) => {
-              const on = data.profile === p.id;
-              return (
-                <button key={p.id} onClick={() => onProfile(on ? "" : p.id)}
-                  className={`text-left rounded-xl border p-2.5 transition ${
-                    on ? "border-emerald-400 bg-emerald-50" : "border-slate-200 bg-white"}`}>
-                  <div className="text-xl leading-none mb-1">{p.mascot}</div>
-                  <div className={`text-xs font-semibold ${on ? "text-emerald-700" : "text-slate-600"}`}>{p.label}</div>
-                  <div className="text-[10px] text-slate-400 leading-snug mt-0.5">{p.tag}</div>
-                </button>
-              );
-            })}
+    <div className="space-y-4">
+      {/* identity card */}
+      <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-12 h-12 rounded-full bg-emerald-50 flex items-center justify-center text-2xl">
+            {prof ? prof.mascot : "🙂"}
           </div>
-          <label className="block text-xs font-semibold text-slate-400 mb-1.5 mt-3">INVESTING PHILOSOPHY — SHOWN ON YOUR PROFILE</label>
-          <textarea defaultValue={data.philosophy || ""} placeholder="e.g. Concentrated bets on AI infrastructure and defense. Hold winners, cut theses that break."
-            onBlur={(e) => onPhilosophy(e.target.value.trim().slice(0, 280))}
-            rows={3} maxLength={280}
-            className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm resize-none" />
-          <p className="text-[10px] text-slate-400 mb-1">Up to 280 characters. Shared with friends when you tap Share.</p>
-          <button onClick={() => setOpen(false)}
-            className="mt-3 w-full bg-slate-100 rounded-xl py-2 text-sm font-semibold text-slate-600">Done</button>
-          <button onClick={onSignOut}
-            className="mt-2 w-full bg-rose-50 rounded-xl py-2 text-sm font-semibold text-rose-500">Sign out</button>
+          <div className="min-w-0">
+            <div className="font-bold text-slate-700 truncate">{data.userName || "Set your name"}</div>
+            <div className="text-xs text-slate-400 truncate">
+              {data.username ? `@${data.username}` : "No username yet"}
+            </div>
+          </div>
         </div>
-      )}
+        <label className="block text-xs font-semibold text-slate-400 mb-1.5">YOUR NAME</label>
+        <input defaultValue={data.userName} placeholder="e.g. John"
+          onBlur={(e) => onName(e.target.value.trim())}
+          onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+          className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm mb-3" />
+        <label className="block text-xs font-semibold text-slate-400 mb-1.5">USERNAME — SO FRIENDS CAN ADD YOU</label>
+        <input defaultValue={data.username || ""} placeholder="e.g. scrooge_mcduck"
+          onBlur={(e) => claimUsername(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+          className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm mb-1 lowercase" />
+        <p className="text-[10px] text-slate-400">3–20 characters: a–z, 0–9 and _. Unique across RichR.</p>
+      </div>
+
+      {/* preferences card */}
+      <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+        <label className="block text-xs font-semibold text-slate-400 mb-1.5">CURRENCY</label>
+        <select value={cur} onChange={(e) => onCurrency(e.target.value)}
+          className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm bg-white mb-4">
+          {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code}</option>)}
+        </select>
+        <label className="block text-xs font-semibold text-slate-400 mb-1.5">WHAT KIND OF INVESTOR ARE YOU?</label>
+        <div className="grid grid-cols-2 gap-2">
+          {PROFILES.map((p) => {
+            const on = data.profile === p.id;
+            return (
+              <button key={p.id} onClick={() => onProfile(on ? "" : p.id)}
+                className={`text-left rounded-xl border p-2.5 transition ${
+                  on ? "border-emerald-400 bg-emerald-50" : "border-slate-200 bg-white"}`}>
+                <div className="text-xl leading-none mb-1">{p.mascot}</div>
+                <div className={`text-xs font-semibold ${on ? "text-emerald-700" : "text-slate-600"}`}>{p.label}</div>
+                <div className="text-[10px] text-slate-400 leading-snug mt-0.5">{p.tag}</div>
+              </button>
+            );
+          })}
+        </div>
+        <label className="block text-xs font-semibold text-slate-400 mb-1.5 mt-4">INVESTING PHILOSOPHY — SHOWN ON YOUR PROFILE</label>
+        <textarea defaultValue={data.philosophy || ""} placeholder="e.g. Concentrated bets on AI infrastructure and defense. Hold winners, cut theses that break."
+          onBlur={(e) => onPhilosophy(e.target.value.trim().slice(0, 280))}
+          rows={3} maxLength={280}
+          className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm resize-none" />
+        <p className="text-[10px] text-slate-400 mt-1">Up to 280 characters. Shared with friends when you tap Share.</p>
+      </div>
+
+      {/* account card */}
+      <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+        <div className="text-xs text-slate-400 mb-3">
+          Signed in{user && user.email ? ` as ${user.email}` : ""}. Your portfolio syncs to your account and follows you across devices.
+        </div>
+        <button onClick={onSignOut}
+          className="w-full bg-rose-50 rounded-xl py-2.5 text-sm font-semibold text-rose-500">Sign out</button>
+      </div>
     </div>
   );
 }
