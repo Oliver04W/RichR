@@ -650,7 +650,7 @@ export default function RichR({ user, onSignOut }) {
     { id: "home", label: "Home", icon: Home },
     { id: "positions", label: "Positions", icon: Briefcase },
     { id: "research", label: "Research", icon: Search },
-    { id: "insights", label: "Insights", icon: Activity },
+    { id: "insights", label: "Analysis", icon: Activity },
     { id: "friends", label: "Friends", icon: Users },
   ];
 
@@ -2213,7 +2213,7 @@ function InsightsTab({ active, totals, cur, fx, say, analysis, onSave, news, onS
   return (
     <div className="space-y-4">
       <div>
-        <h2 className="font-bold text-lg text-slate-700">Portfolio insights</h2>
+        <h2 className="font-bold text-lg text-slate-700">Portfolio analysis</h2>
         <p className="text-sm text-slate-400">“{active.name}”</p>
       </div>
 
