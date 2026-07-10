@@ -1619,11 +1619,39 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
         ticker: h.ticker,
         pct: totalVal > 0 ? Number(((holdingValue(h, cur, fx) / totalVal) * 100).toFixed(1)) : 0,
       }));
+    /* Fair leaderboard number: TIME-WEIGHTED return (YTD), computed
+       server-side from real price history. Adding money or buying more
+       can't inflate it — each day's return is measured after stripping
+       that day's cash flow. Falls back to the simple cost-based return
+       only if the performance service is unavailable. */
+    let returnPct = Number(totals.plPct.toFixed(2));
+    let twrUsed = false;
+    try {
+      const { data: perf, error: pe } = await supabase.functions.invoke("portfolio-performance", {
+        body: {
+          display: cur,
+          holdings: active.holdings.map((h) => ({
+            ticker: h.ticker, shares: h.shares, buyPrice: h.buyPrice,
+            buyDate: h.buyDate || null, currency: h.currency || cur,
+          })),
+          closed: (active.closed || []).map((h) => ({
+            ticker: h.ticker, shares: h.shares, buyPrice: h.buyPrice,
+            buyDate: h.buyDate || null, sellPrice: h.sellPrice,
+            sellDate: h.sellDate || null, currency: h.currency || cur,
+          })),
+        },
+      });
+      const t = (!pe && perf && perf.ok)
+        ? (perf.twrYtd != null ? perf.twrYtd : perf.twrAll)
+        : null;
+      if (t != null && isFinite(t)) { returnPct = Number(Number(t).toFixed(2)); twrUsed = true; }
+    } catch (_) { /* fall back to simple return */ }
+
     const entry = {
       name: data.userName.trim(),
       profile: data.profile || "",
       portfolio: active.name,
-      returnPct: Number(totals.plPct.toFixed(2)),
+      returnPct,
       holdings: active.holdings.length,
       topHoldings,
       at: Date.now(),
@@ -1645,7 +1673,9 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
         updated_at: new Date().toISOString(),
       });
       if (error) throw error;
-      say("Shared! Your profile is on the board.");
+      say(twrUsed
+        ? "Shared! Your time-weighted return is on the board."
+        : "Shared! (Performance service unreachable — used simple return.)");
       await loadAll();
     } catch (e) { say(`Couldn't publish — ${(e && e.message) ? e.message.slice(0, 120) : "try again."}`); }
     setBusy(false);
@@ -1671,7 +1701,7 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
       <div className="rounded-3xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white p-6 shadow-lg shadow-emerald-200">
         <div className="flex items-center gap-2 font-bold"><Share2 size={17} /> Share your progress</div>
         <p className="text-sm text-emerald-50 mt-1.5 leading-relaxed">
-          Publish “{active.name}” to your friends — your return %, position count and top 10 holdings (with their portfolio weight) show on their leaderboard. Amounts and theses stay private. Unshare anytime.
+          Publish “{active.name}” to your friends — your time-weighted return % (YTD, so adding money doesn’t inflate it), position count and top 10 holdings (with their portfolio weight) show on their leaderboard. Amounts and theses stay private. Unshare anytime.
         </p>
         <div className="mt-4 flex items-center gap-2">
           <button onClick={publish} disabled={busy}
