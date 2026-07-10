@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   Plus, RefreshCw, Trash2, Users, BookOpen, Home, Briefcase, Check, X,
   Clock, HelpCircle, Pencil, Trophy, Share2, TrendingUp, TrendingDown,
-  ChevronDown, ChevronLeft, Target, Sparkles, Flag, Activity, Calendar, Camera, Upload, Search, Eye
+  ChevronDown, ChevronLeft, Target, Sparkles, Flag, Activity, Calendar, Camera, Upload, Search, Star
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine
@@ -381,7 +381,10 @@ export default function RichR({ user, onSignOut }) {
   const busyRef = useRef(false);
   const refreshPrices = async (silent = false) => {
     if (busyRef.current || !active) return;
-    const tickers = [...new Set(active.holdings.map((h) => h.ticker).filter(Boolean))];
+    const tickers = [...new Set([
+      ...active.holdings.map((h) => h.ticker),
+      ...(data.watchlist || []).map((w) => w.ticker),
+    ].filter(Boolean))];
     if (!tickers.length) { if (!silent) say("Add a position first."); return; }
     busyRef.current = true;
     setRefreshing(true);
@@ -447,6 +450,15 @@ export default function RichR({ user, onSignOut }) {
         return {
           ...d, snapshots: snaps, fx: newFx, pricesAt: Date.now(),
           portfolios: d.portfolios.map((p) => (p.id === active.id ? { ...p, holdings: updated } : p)),
+          watchlist: (d.watchlist || []).map((w) => {
+            const row = priceMap[String(w.ticker || "").toUpperCase()];
+            if (row && Number(row.price) > 0) {
+              const pCur = row.currency && newFx.rates[String(row.currency).toUpperCase()]
+                ? String(row.currency).toUpperCase() : w.currency;
+              return { ...w, currentPrice: Number(row.price), currency: pCur || w.currency || cur };
+            }
+            return w;
+          }),
         };
       });
       failsRef.current = 0;
@@ -539,6 +551,22 @@ export default function RichR({ user, onSignOut }) {
     say("Sample positions added — replace them with your own.");
   };
 
+  /* --- watchlist (concept portfolio — assets you're keen on but don't own yet) --- */
+  const addWatch = (item) => {
+    watchTicker(item.ticker);
+    patch((d) => {
+      const wl = d.watchlist || [];
+      if (wl.some((w) => w.ticker === item.ticker)) return {};
+      return { watchlist: [...wl, item] };
+    });
+  };
+  const removeWatch = (id) =>
+    patch((d) => ({ watchlist: (d.watchlist || []).filter((w) => w.id !== id) }));
+  const removeWatchByTicker = (t) =>
+    patch((d) => ({ watchlist: (d.watchlist || []).filter((w) => w.ticker !== String(t || "").toUpperCase()) }));
+  const setWatchPrice = (id, currentPrice) =>
+    patch((d) => ({ watchlist: (d.watchlist || []).map((w) => (w.id === id ? { ...w, currentPrice } : w)) }));
+
   /* --- goals --- */
   const addGoal = (g) => patch((d) => ({ goals: [...(d.goals || []), g] }));
   const updateGoal = (g) => patch((d) => ({ goals: (d.goals || []).map((x) => (x.id === g.id ? g : x)) }));
@@ -621,7 +649,9 @@ export default function RichR({ user, onSignOut }) {
         {tab === "positions" && (
           <PositionsTab active={active} cur={cur} fx={data.fx || DEFAULT_FX}
             companyInfo={data.companyInfo || {}} onSaveInfo={saveCompanyInfo}
-            onUpsert={upsertHolding} onRemove={removeHolding} onSetPrice={setPrice} onLoadSample={loadSample} onClosePosition={closePosition} />
+            onUpsert={upsertHolding} onRemove={removeHolding} onSetPrice={setPrice} onLoadSample={loadSample} onClosePosition={closePosition}
+            watchlist={data.watchlist || []} onRemoveWatch={removeWatch} onSetWatchPrice={setWatchPrice}
+            goResearch={() => setTab("research")} />
         )}
         {tab === "insights" && (
           <InsightsTab active={active} totals={totals} cur={cur} fx={data.fx || DEFAULT_FX} say={say}
@@ -630,7 +660,8 @@ export default function RichR({ user, onSignOut }) {
             news={(data.news || {})[active.id]} onSaveNews={saveNews} />
         )}
         {tab === "research" && <ResearchTab cur={cur} say={say} onUpsert={upsertHolding}
-          companyInfo={data.companyInfo || {}} onSaveInfo={saveCompanyInfo} />}
+          companyInfo={data.companyInfo || {}} onSaveInfo={saveCompanyInfo}
+          watchlist={data.watchlist || []} onWatch={addWatch} onUnwatch={removeWatchByTicker} />}
         {tab === "friends" && <FriendsTab data={data} active={active} totals={totals} cur={cur} say={say} user={user} />}
       </div>
 
@@ -894,27 +925,54 @@ function StatCard({ label, value, tone = "text-slate-700" }) {
 }
 
 /* ================= POSITIONS ================= */
-function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRemove, onSetPrice, onLoadSample, onClosePosition }) {
+function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRemove, onSetPrice, onLoadSample, onClosePosition, watchlist, onRemoveWatch, onSetWatchPrice, goResearch }) {
   const [editing, setEditing] = useState(null);
   const [importing, setImporting] = useState(false);
   const [detail, setDetail] = useState(null);
+  const [view, setView] = useState("holdings"); // "holdings" | "watchlist"
+  const [buying, setBuying] = useState(null);   // watchlist item being converted to a position
+
+  const wl = watchlist || [];
+
+  /* concept portfolio: equal-weight average of "since added" returns */
+  const concept = useMemo(() => {
+    const rets = wl
+      .filter((w) => w.addedPrice > 0 && w.currentPrice > 0)
+      .map((w) => ((w.currentPrice - w.addedPrice) / w.addedPrice) * 100);
+    if (!rets.length) return null;
+    return rets.reduce((a, b) => a + b, 0) / rets.length;
+  }, [wl]);
 
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <h2 className="font-bold text-lg text-slate-700">Positions</h2>
-        <div className="flex gap-2">
-          <button onClick={() => setImporting(true)}
-            className="flex items-center gap-1.5 bg-white border border-slate-200 text-slate-600 text-sm font-semibold px-3.5 py-2 rounded-full shadow-sm">
-            <Camera size={15} /> Import
-          </button>
-          <button onClick={() => setEditing("new")}
-            className="flex items-center gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold px-4 py-2 rounded-full shadow">
-            <Plus size={15} /> Add
-          </button>
-        </div>
+        {view === "holdings" && (
+          <div className="flex gap-2">
+            <button onClick={() => setImporting(true)}
+              className="flex items-center gap-1.5 bg-white border border-slate-200 text-slate-600 text-sm font-semibold px-3.5 py-2 rounded-full shadow-sm">
+              <Camera size={15} /> Import
+            </button>
+            <button onClick={() => setEditing("new")}
+              className="flex items-center gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold px-4 py-2 rounded-full shadow">
+              <Plus size={15} /> Add
+            </button>
+          </div>
+        )}
       </div>
 
+      {/* holdings / watchlist switcher */}
+      <div className="bg-slate-100 rounded-2xl p-1 flex">
+        {[["holdings", "Holdings"], ["watchlist", wl.length ? `Watchlist (${wl.length})` : "Watchlist"]].map(([id, lbl]) => (
+          <button key={id} onClick={() => setView(id)}
+            className={`flex-1 text-sm font-semibold py-2 rounded-xl transition ${
+              view === id ? "bg-white text-slate-700 shadow-sm" : "text-slate-400"}`}>
+            {lbl}
+          </button>
+        ))}
+      </div>
+
+      {view === "holdings" && (<>
       {active.holdings.length === 0 ? (
         <div className="bg-white rounded-3xl p-8 text-center shadow-sm border border-slate-100">
           <p className="font-semibold text-slate-600 mb-1">Nothing here yet</p>
@@ -959,6 +1017,40 @@ function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRe
           </div>
         </div>
       )}
+      </>)}
+
+      {view === "watchlist" && (<>
+      {wl.length === 0 ? (
+        <div className="bg-white rounded-3xl p-8 text-center shadow-sm border border-slate-100">
+          <Star size={24} className="mx-auto text-amber-400 mb-3" />
+          <p className="font-semibold text-slate-600 mb-1">Your watchlist is empty</p>
+          <p className="text-sm text-slate-400 mb-4">Find assets you're keen on in Research and tap Watch — they'll show up here as a concept portfolio you can track before buying.</p>
+          <button onClick={goResearch}
+            className="flex items-center gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold px-4 py-2.5 rounded-full shadow mx-auto">
+            <Search size={15} /> Go to Research
+          </button>
+        </div>
+      ) : (<>
+        {concept != null && (
+          <div className="bg-white rounded-3xl p-4 shadow-sm border border-slate-100 flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-slate-400">CONCEPT PORTFOLIO</div>
+              <div className="text-[11px] text-slate-400 mt-0.5">If you'd bought equal amounts when you added each</div>
+            </div>
+            <div className={`text-xl font-extrabold shrink-0 ${concept >= 0 ? "text-emerald-600" : "text-rose-500"}`}>
+              {pct(concept)}
+            </div>
+          </div>
+        )}
+        {wl.slice().sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0)).map((w) => (
+          <WatchCard key={w.id} w={w} cur={cur}
+            onBuy={() => setBuying(w)}
+            onRemove={() => onRemoveWatch(w.id)}
+            onSetPrice={onSetWatchPrice} />
+        ))}
+        <p className="text-[11px] text-slate-400 text-center pt-1">Watchlist prices refresh together with your positions.</p>
+      </>)}
+      </>)}
 
       {importing && (
         <ImportModal cur={cur} onClose={() => setImporting(false)}
@@ -979,6 +1071,85 @@ function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRe
           onClose={() => setEditing(null)}
           onSave={(h) => { onUpsert(h); setEditing(null); }} />
       )}
+
+      {buying && (
+        <PositionModal cur={cur} title="Buy — new position"
+          holding={{
+            id: uid(), ticker: buying.ticker, name: buying.name || buying.ticker, domain: "",
+            type: buying.type || "Stock", currency: buying.currency || cur,
+            shares: "", buyPrice: buying.currentPrice > 0 ? buying.currentPrice : "",
+            buyDate: new Date().toISOString().slice(0, 10),
+            currentPrice: buying.currentPrice || 0, thesis: "", verdict: "open",
+          }}
+          onClose={() => setBuying(null)}
+          onSave={(h) => { onUpsert(h); onRemoveWatch(buying.id); setBuying(null); }} />
+      )}
+    </div>
+  );
+}
+
+/* one watched asset — tracks performance since you added it */
+function WatchCard({ w, cur, onBuy, onRemove, onSetPrice }) {
+  const [editPrice, setEditPrice] = useState(false);
+  const wc = w.currency || cur;
+  const cp = w.currentPrice > 0 ? w.currentPrice : 0;
+  const sincePct = w.addedPrice > 0 && cp > 0 ? ((cp - w.addedPrice) / w.addedPrice) * 100 : null;
+  const up = (sincePct || 0) >= 0;
+  const days = w.addedAt ? Math.max(0, Math.floor((Date.now() - w.addedAt) / 86400000)) : 0;
+
+  return (
+    <div className="bg-white rounded-3xl p-4 shadow-sm border border-slate-100">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-3 min-w-0">
+          <Logo h={w} />
+          <div className="min-w-0">
+            <div className="font-semibold text-slate-700 truncate">{w.name || w.ticker}</div>
+            <div className="text-xs text-slate-400 font-medium">
+              {w.ticker} · {w.type || "Stock"}
+              {wc !== cur && <span className="ml-1 text-[10px] font-bold text-sky-600 bg-sky-50 px-1.5 py-0.5 rounded-full">{wc}</span>}
+              {" "}· watching {days}d
+            </div>
+            <button onClick={() => setEditPrice(true)}
+              className={`text-xs font-semibold mt-0.5 underline decoration-dotted ${
+                cp > 0 && w.addedPrice > 0
+                  ? (cp > w.addedPrice ? "text-emerald-600" : cp < w.addedPrice ? "text-rose-500" : "text-slate-400")
+                  : "text-slate-400"}`}>
+              {cp > 0 ? `now ${money(cp, wc)}` : "set price"}
+            </button>
+            {w.addedPrice > 0 && (
+              <div className="text-[11px] text-slate-400 mt-0.5">added at {money(w.addedPrice, wc)}</div>
+            )}
+            {editPrice && (
+              <div className="mt-1.5">
+                <input autoFocus type="number" defaultValue={w.currentPrice || ""}
+                  placeholder={`Price in ${wc}`}
+                  onBlur={(e) => { const v = parseFloat(e.target.value); if (v > 0) onSetPrice(w.id, v); setEditPrice(false); }}
+                  onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+                  className="border border-slate-200 rounded-xl px-2.5 py-1.5 text-sm w-32" />
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="text-right shrink-0">
+          {sincePct != null ? (
+            <>
+              <div className={`text-lg font-extrabold ${up ? "text-emerald-600" : "text-rose-500"}`}>{pct(sincePct)}</div>
+              <div className="text-[10px] font-semibold text-slate-400">SINCE ADDED</div>
+            </>
+          ) : (
+            <div className="text-xs text-slate-400">no price yet</div>
+          )}
+          <div className="flex gap-1.5 justify-end mt-2">
+            <button onClick={onBuy}
+              className="h-8 px-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-xs font-semibold flex items-center gap-1 shadow">
+              <Plus size={12} /> Buy
+            </button>
+            <button onClick={onRemove} className="w-8 h-8 rounded-xl bg-rose-50 flex items-center justify-center text-rose-400">
+              <Trash2 size={13} />
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1043,7 +1214,7 @@ function PositionCard({ h, cur, fx, onOpen, onEdit, onRemove, onSetPrice }) {
   );
 }
 
-function PositionModal({ holding, cur, onClose, onSave }) {
+function PositionModal({ holding, cur, onClose, onSave, title }) {
   const [f, setF] = useState(
     holding || { id: uid(), ticker: "", name: "", domain: "", type: "Stock", currency: cur, shares: "", buyPrice: "", buyDate: new Date().toISOString().slice(0, 10), currentPrice: 0, thesis: "", verdict: "open" }
   );
@@ -1090,7 +1261,7 @@ function PositionModal({ holding, cur, onClose, onSave }) {
       <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto overscroll-contain"
         onClick={(e) => e.stopPropagation()}>
         <div className="p-5 border-b border-slate-100 flex items-center justify-between">
-          <h3 className="font-bold text-lg text-slate-700">{holding ? "Edit position" : "New position"}</h3>
+          <h3 className="font-bold text-lg text-slate-700">{title || (holding ? "Edit position" : "New position")}</h3>
           <button onClick={onClose} className="w-8 h-8 rounded-xl bg-slate-100 flex items-center justify-center text-slate-500">
             <X size={15} />
           </button>
@@ -2980,7 +3151,7 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
 /* Look up any stock on demand: search → live quote (via the get-quote
    edge function) → add to portfolio or watch. No seed_tickers bloat;
    each lookup fetches its own price when you open it. */
-function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo }) {
+function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo, watchlist, onWatch, onUnwatch }) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
@@ -2989,6 +3160,10 @@ function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo }) {
   const [loadingQuote, setLoadingQuote] = useState(false);
   const [adding, setAdding] = useState(null);   // prefilled holding for the modal
   const timer = useRef(null);
+
+  const inWatchlist = sel
+    ? (watchlist || []).some((w) => w.ticker === String(sel.symbol || "").toUpperCase())
+    : false;
 
   const search = (raw) => {
     setQ(raw);
@@ -3016,9 +3191,22 @@ function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo }) {
     setLoadingQuote(false);
   };
 
-  const watch = async (r) => {
-    await watchTicker(r.symbol);
-    say(`Watching ${r.symbol} — it'll refresh with your prices.`);
+  const watch = (r) => {
+    const t = String(r.symbol || "").toUpperCase();
+    if (inWatchlist) {
+      onUnwatch(t);
+      say(`${t} removed from your watchlist.`);
+      return;
+    }
+    onWatch({
+      id: uid(), ticker: t, name: r.name || t, domain: "",
+      type: r.type || "Stock",
+      currency: (quote && quote.currency) || r.currency || cur,
+      addedAt: Date.now(),
+      addedPrice: (quote && quote.price) || 0,
+      currentPrice: (quote && quote.price) || 0,
+    });
+    say(`${t} added to your watchlist — track it under Positions.`);
   };
 
   const startAdd = (r) => {
@@ -3111,8 +3299,9 @@ function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo }) {
               <Plus size={15} /> Add to portfolio
             </button>
             <button onClick={() => watch(sel)}
-              className="bg-slate-100 text-slate-600 text-sm font-semibold px-4 py-2.5 rounded-full flex items-center gap-1.5">
-              <Eye size={15} /> Watch
+              className={`text-sm font-semibold px-4 py-2.5 rounded-full flex items-center gap-1.5 ${
+                inWatchlist ? "bg-emerald-50 text-emerald-600 border border-emerald-200" : "bg-slate-100 text-slate-600"}`}>
+              {inWatchlist ? <Check size={15} /> : <Star size={15} />} {inWatchlist ? "Watching" : "Watch"}
             </button>
           </div>
         </div>
