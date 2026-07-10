@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   Plus, RefreshCw, Trash2, Users, BookOpen, Home, Briefcase, Check, X,
   Clock, HelpCircle, Pencil, Trophy, Share2, TrendingUp, TrendingDown,
-  ChevronDown, ChevronLeft, Target, Sparkles, Flag, Activity, Calendar, Camera, Upload, Search, Star
+  ChevronDown, ChevronLeft, Target, Sparkles, Flag, Activity, Calendar, Camera, Upload, Search, Star, ExternalLink
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine
@@ -2035,41 +2035,68 @@ function InsightsTab({ active, totals, cur, fx, say, analysis, onSave, news, onS
     if (!active.holdings.length) { say("Add positions first."); return; }
     setNewsBusy(true);
     try {
-      const list = active.holdings.map((h) => `${h.ticker} (${h.name})`).join(", ");
-      const prompt =
-        `You are a portfolio news scanner. My holdings are: ${list}. ` +
-        `Use web search to find the most important recent news (last ~7 days) that could materially affect these specific holdings — ` +
-        `earnings, guidance changes, analyst moves, regulation, sector or macro events that clearly touch them. ` +
-        `Pick only genuinely relevant items, max 6, ranked by importance to this portfolio. ` +
-        `For each item write a headline-style title and a 1-2 sentence summary ENTIRELY IN YOUR OWN WORDS — do not copy article text or headlines verbatim. ` +
-        `Respond with ONLY JSON, no other text: ` +
-        `{"items":[{"tickers":["XXX"],"title":"...","summary":"...","impact":"positive|negative|mixed","source":"publication name","when":"e.g. 2 days ago"}]}`;
-      const res = await fetch("/api/openai", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 1000,
-          messages: [{ role: "user", content: prompt }],
-          tools: [{ type: "web_search_20250305", name: "web_search" }],
-        }),
+      /* 1) Real articles with links from the portfolio-news edge function
+            (Finnhub company news for US names + Yahoo news for all). */
+      const { data: nd, error: ne } = await supabase.functions.invoke("portfolio-news", {
+        body: { tickers: active.holdings.map((h) => h.ticker), days: 7 },
       });
-      const json = await res.json();
-      const text = (json.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
-      const match = text.replace(/```json|```/g, "").match(/\{[\s\S]*\}/);
-      if (!match) throw new Error("no json");
-      const ai = JSON.parse(match[0]);
-      const items = (ai.items || [])
-        .filter((i) => i && i.title && i.summary)
-        .slice(0, 6)
-        .map((i) => ({
-          tickers: Array.isArray(i.tickers) ? i.tickers.map((t) => String(t).toUpperCase()).slice(0, 4) : [],
-          title: String(i.title).slice(0, 140),
-          summary: String(i.summary).slice(0, 320),
-          impact: ["positive", "negative", "mixed"].includes(i.impact) ? i.impact : "mixed",
-          source: i.source ? String(i.source).slice(0, 60) : "",
-          when: i.when ? String(i.when).slice(0, 40) : "",
-        }));
+      const articles = (!ne && nd && nd.ok && Array.isArray(nd.articles)) ? nd.articles : [];
+      if (!articles.length) throw new Error((nd && nd.error) || "no articles");
+
+      /* 2) AI ranks + tags the REAL headlines — links stay intact. */
+      const list = active.holdings.map((h) => `${h.ticker} (${h.name})`).join(", ");
+      const feed = articles.slice(0, 30)
+        .map((a, i) => `${i} | ${a.tickers.join(",")} | ${a.source} | ${a.when} | ${a.title}`)
+        .join("\n");
+      const prompt =
+        `My holdings: ${list}.\n` +
+        `Below is a numbered feed of real, recent headlines about them:\n${feed}\n\n` +
+        `Pick at most 6 items most likely to materially affect this portfolio — earnings, guidance, ` +
+        `analyst moves, regulation, major sector/macro news. Skip fluff, listicles and near-duplicates. ` +
+        `For each pick, write a 1-2 sentence takeaway ENTIRELY IN YOUR OWN WORDS (do not copy the headline) ` +
+        `and tag the likely impact on my portfolio. ` +
+        `Respond with ONLY JSON, no other text: ` +
+        `{"items":[{"index":0,"impact":"positive|negative|mixed","summary":"..."}]}`;
+
+      let picked = null;
+      try {
+        const res = await fetch("/api/openai", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "claude-sonnet-4-6",
+            max_tokens: 900,
+            messages: [{ role: "user", content: prompt }],
+          }),
+        });
+        const json = await res.json();
+        const text = (json.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+        const m = text.replace(/```json|```/g, "").match(/\{[\s\S]*\}/);
+        if (m) picked = (JSON.parse(m[0]).items || []);
+      } catch (_) { /* AI ranking is optional — fall back below */ }
+
+      /* 3) Build cards. Fallback: 6 most recent raw headlines. */
+      const chosen = (Array.isArray(picked) && picked.length)
+        ? picked
+        : articles.slice(0, 6).map((_, i) => ({ index: i, impact: "mixed", summary: "" }));
+
+      const items = chosen
+        .map((p) => {
+          const a = articles[Number(p.index)];
+          if (!a) return null;
+          return {
+            tickers: (a.tickers || []).slice(0, 4),
+            title: String(a.title).slice(0, 160),
+            summary: String(p.summary || "").slice(0, 320),
+            impact: ["positive", "negative", "mixed"].includes(p.impact) ? p.impact : "mixed",
+            source: a.source || "",
+            when: a.when || "",
+            url: a.url || "",
+          };
+        })
+        .filter(Boolean)
+        .slice(0, 6);
+
       if (!items.length) throw new Error("empty");
       onSaveNews({ at: Date.now(), items });
       say(`Found ${items.length} relevant stories.`);
@@ -2206,17 +2233,17 @@ function NewsView({ news, busy, onFetch }) {
       {!news ? (
         <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100">
           <p className="text-sm text-slate-500 leading-relaxed">
-            Tap <span className="font-semibold">Scan news</span> and the app searches the web for recent stories that
-            could move your holdings — earnings, guidance, analyst moves, regulation, macro events — and summarizes
-            the most important ones, tagged by likely impact.
+            Tap <span className="font-semibold">Scan news</span> and the app pulls recent articles about your
+            holdings from financial news sources, then highlights the ones most likely to move your portfolio —
+            each with a link to the original story.
           </p>
         </div>
       ) : (
         <>
           {news.items.map((n, i) => {
             const imp = IMPACT[n.impact] || IMPACT.mixed;
-            return (
-              <div key={i} className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+            const card = (
+              <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100 active:opacity-80 transition">
                 <div className="flex items-center gap-1.5 flex-wrap mb-2">
                   <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-full ${imp.chip}`}>
                     <imp.icon size={11} /> {imp.label}
@@ -2226,18 +2253,32 @@ function NewsView({ news, busy, onFetch }) {
                   ))}
                 </div>
                 <h3 className="font-bold text-slate-700 leading-snug">{n.title}</h3>
-                <p className="text-sm text-slate-500 leading-relaxed mt-1.5">{n.summary}</p>
-                {(n.source || n.when) && (
-                  <div className="text-[11px] text-slate-400 font-medium mt-2.5">
-                    {[n.source, n.when].filter(Boolean).join(" · ")}
-                  </div>
+                {n.summary && (
+                  <p className="text-sm text-slate-500 leading-relaxed mt-1.5">{n.summary}</p>
                 )}
+                <div className="flex items-center justify-between mt-2.5">
+                  <span className="text-[11px] text-slate-400 font-medium">
+                    {[n.source, n.when].filter(Boolean).join(" · ")}
+                  </span>
+                  {n.url && (
+                    <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600">
+                      Read at {n.source || "source"} <ExternalLink size={11} />
+                    </span>
+                  )}
+                </div>
               </div>
+            );
+            return n.url ? (
+              <a key={i} href={n.url} target="_blank" rel="noopener noreferrer" className="block">
+                {card}
+              </a>
+            ) : (
+              <div key={i}>{card}</div>
             );
           })}
           <p className="text-[11px] text-slate-400 leading-relaxed">
-            AI-selected and AI-summarized from web sources — always verify important news with the original outlet before
-            acting on it. Not investment advice.
+            Headlines come from financial news feeds; the impact tag and takeaway are AI-generated — tap through
+            and verify with the original outlet before acting. Not investment advice.
           </p>
         </>
       )}
