@@ -688,12 +688,12 @@ function NamePill({ data, user, say, onName, onUsername, cur, onCurrency, onProf
       {open && (
         <div className="absolute right-0 mt-2 w-80 bg-white rounded-2xl shadow-xl border border-slate-100 p-4 z-50 max-h-[70vh] overflow-y-auto">
           <label className="block text-xs font-semibold text-slate-400 mb-1.5">YOUR NAME</label>
-          <input defaultValue={data.userName} placeholder="e.g. Alex"
+          <input defaultValue={data.userName} placeholder="e.g. John"
             onBlur={(e) => onName(e.target.value.trim())}
             onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
             className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm mb-3" />
           <label className="block text-xs font-semibold text-slate-400 mb-1.5">USERNAME — SO FRIENDS CAN ADD YOU</label>
-          <input defaultValue={data.username || ""} placeholder="e.g. oliver04"
+          <input defaultValue={data.username || ""} placeholder="e.g. scrooge_mcduck"
             onBlur={(e) => claimUsername(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
             className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm mb-1 lowercase" />
