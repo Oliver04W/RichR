@@ -147,17 +147,42 @@ const SAMPLE = [
   { ticker: "VOO", name: "Vanguard S&P 500 ETF", type: "ETF", currency: "USD", shares: 8, buyPrice: 480, thesis: "Low-cost broad-market core position to anchor the portfolio." },
 ];
 
-/* ---------- storage (on this device, per signed-in account) ---------- */
+/* ---------- storage (cloud-first via Supabase, localStorage as offline cache) ---------- */
+/* The whole app state lives in one document per user:
+     - Source of truth: public.user_data (JSONB, protected by RLS)
+     - localStorage keeps a copy so the app opens instantly and works offline
+   Every saved copy carries a _ts timestamp; on load the newer of
+   cloud vs. local wins, so no edit is ever silently rolled back. */
 const dataKey = (userId) => `richr:data:${userId}`;
-function loadData(key) {
+
+function loadLocal(key) {
   try {
     const raw = localStorage.getItem(key);
     if (raw) return JSON.parse(raw);
   } catch (e) { /* first run */ }
-  return seed();
+  return null;
 }
-function saveData(key, d) {
+function saveLocal(key, d) {
   try { localStorage.setItem(key, JSON.stringify(d)); } catch (e) { console.error(e); }
+}
+/* returns the document, null (signed in but no cloud row yet),
+   or undefined (cloud unreachable — offline mode) */
+async function loadCloud(userId) {
+  try {
+    const { data: row, error } = await supabase
+      .from("user_data").select("data").eq("user_id", userId).maybeSingle();
+    if (error) throw error;
+    return row ? row.data : null;
+  } catch (e) { return undefined; }
+}
+async function saveCloud(userId, d) {
+  try {
+    const { error } = await supabase.from("user_data").upsert(
+      { user_id: userId, data: d, updated_at: new Date().toISOString() },
+      { onConflict: "user_id" },
+    );
+    return !error;
+  } catch (e) { return false; }
 }
 
 /* ---------- price pipeline ---------- */
@@ -300,14 +325,55 @@ export default function RichR({ user, onSignOut }) {
   };
 
   const storageKey = dataKey(user.id);
+  const cloudOk = useRef(false);
+
+  /* ---- initial load: newest of cloud vs. local cache wins ---- */
   useEffect(() => {
-    const d = loadData(storageKey);
-    if (!d.userName && user.user_metadata && user.user_metadata.full_name)
-      d.userName = user.user_metadata.full_name;
-    setData(d);
-    loaded.current = true;
+    let cancelled = false;
+    (async () => {
+      const local = loadLocal(storageKey);
+      const cloud = await loadCloud(user.id);
+      let d;
+      if (cloud === undefined) {
+        // offline / cloud unreachable — run on the local cache for now
+        d = local || seed();
+        cloudOk.current = false;
+      } else if (cloud === null) {
+        // first cloud-era login on this account: migrate whatever this
+        // device has (or start fresh) up to Supabase
+        d = local || seed();
+        cloudOk.current = true;
+        saveCloud(user.id, { ...d, _ts: Date.now() });
+      } else {
+        // both exist — keep whichever copy was saved most recently
+        const newerLocal = local && (local._ts || 0) > (cloud._ts || 0);
+        d = newerLocal ? local : cloud;
+        cloudOk.current = true;
+        if (newerLocal) saveCloud(user.id, local);
+        else saveLocal(storageKey, cloud);
+      }
+      if (cancelled) return;
+      if (!d.userName && user.user_metadata && user.user_metadata.full_name)
+        d.userName = user.user_metadata.full_name;
+      setData(d);
+      loaded.current = true;
+    })();
+    return () => { cancelled = true; };
   }, [storageKey]);
-  useEffect(() => { if (loaded.current && data) saveData(storageKey, data); }, [data, storageKey]);
+
+  /* ---- write-through: localStorage immediately, cloud debounced ---- */
+  const cloudTimer = useRef(null);
+  useEffect(() => {
+    if (!loaded.current || !data) return;
+    const stamped = { ...data, _ts: Date.now() };
+    saveLocal(storageKey, stamped);
+    if (cloudTimer.current) clearTimeout(cloudTimer.current);
+    cloudTimer.current = setTimeout(async () => {
+      const ok = await saveCloud(user.id, stamped);
+      if (ok) cloudOk.current = true;
+    }, 1200);
+    return () => { if (cloudTimer.current) clearTimeout(cloudTimer.current); };
+  }, [data, storageKey]);
 
   // pull my claimed username from Supabase so it survives devices
   useEffect(() => {
