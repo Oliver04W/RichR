@@ -3664,7 +3664,134 @@ const OK_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 const isCsvFile = (f) =>
   ["text/csv", "text/plain", "text/tab-separated-values"].includes(f.type) || /\.(csv|txt|tsv)$/i.test(f.name);
 
-function ImportModal({ cur, onClose, onImport }) {
+/* ---------- CSV import (no AI needed) ----------
+   Reads a broker export or our own template on-device. Delimiter and
+   number format are detected; headers are matched in English, Swedish and
+   Finnish. Returns { rows, unmapped } — rows ready for the review table,
+   or an empty list with the header names when nothing could be mapped. */
+const CSV_TEMPLATE = "ticker,name,shares,buy_price,currency,buy_date\nAAPL,Apple,10,180.5,USD,2025-03-14\nNOVO-B.CO,Novo Nordisk,25,620,DKK,2024-11-02\nVOO,Vanguard S&P 500 ETF,8,480,USD,\n";
+const CSV_HEADERS = {
+  ticker:   ["ticker", "symbol", "kod", "tunnus", "code", "isin", "instrument code"],
+  name:     ["name", "namn", "nimi", "security", "instrument", "värdepapper", "vardepapper", "arvopaperi", "description", "asset", "holding", "product", "företag", "yhtiö", "osake", "aktie", "sijoitus", "kohde", "fond", "rahasto"],
+  shares:   ["shares", "quantity", "qty", "antal", "määrä", "maara", "units", "amount", "position", "kpl", "lukumäärä", "no. of shares", "number of shares", "holdings"],
+  buyPrice: ["buy price", "buy_price", "avg price", "average price", "avg cost", "average cost", "cost per share", "purchase price", "gav", "snittkurs", "inköpskurs", "hankintahinta", "keskihinta", "ostohinta", "avg. price", "entry price"],
+  totalCost:["total cost", "cost basis", "anskaffningsvärde", "anskaffningsvarde", "hankinta-arvo", "hankintaarvo", "purchase value", "invested", "cost", "book value", "kostnad"],
+  currentPrice: ["current price", "price", "last", "last price", "senast", "kurs", "hinta", "market price", "viimeisin", "close"],
+  currency: ["currency", "valuta", "valuutta", "ccy", "cur"],
+  buyDate:  ["buy date", "buy_date", "date", "purchase date", "köpdatum", "ostopäivä", "trade date", "datum", "päivä"],
+  type:     ["type", "typ", "tyyppi", "asset type", "instrument type", "kind"],
+};
+const parseCsvNumber = (v) => {
+  if (v == null) return NaN;
+  let t = String(v).replace(/[\s\u00a0']/g, "").replace(/[€$£kr]/gi, "").trim();
+  if (!t) return NaN;
+  // "1.234,56" → 1234.56 ; "1,234.56" → 1234.56 ; "12,5" → 12.5
+  if (/,\d{1,2}$/.test(t) && !/\.\d{1,2}$/.test(t)) t = t.replace(/\./g, "").replace(",", ".");
+  else t = t.replace(/,/g, "");
+  const n = Number(t);
+  return isFinite(n) ? n : NaN;
+};
+function parseCsvText(text) {
+  const src = String(text || "").replace(/^\ufeff/, "");
+  const firstLine = src.split(/\r?\n/).find((l) => l.trim()) || "";
+  const delim = [";", "\t", ","].map((d) => [d, (firstLine.match(new RegExp(d === "\t" ? "\t" : `\\${d}`, "g")) || []).length]).sort((a, b) => b[1] - a[1])[0][0];
+  const out = []; let row = [], cell = "", q = false;
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (q) { if (ch === '"') { if (src[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += ch; }
+    else if (ch === '"') q = true;
+    else if (ch === delim) { row.push(cell); cell = ""; }
+    else if (ch === "\n" || ch === "\r") { if (ch === "\r" && src[i + 1] === "\n") i++; row.push(cell); out.push(row); row = []; cell = ""; }
+    else cell += ch;
+  }
+  if (cell.length || row.length) { row.push(cell); out.push(row); }
+  return out.filter((r) => r.some((c) => String(c).trim() !== ""));
+}
+function parseHoldingsCsv(text, cur) {
+  const table = parseCsvText(text);
+  if (table.length < 2) return { rows: [], unmapped: [] };
+  // header row = the first row with ≥2 recognisable headers (some exports have a title line first)
+  const norm = (h) => String(h || "").toLowerCase().replace(/[_\-]+/g, " ").replace(/\s+/g, " ").trim();
+  const matchHeader = (h) => {
+    const n = norm(h);
+    for (const [k, alts] of Object.entries(CSV_HEADERS)) if (alts.some((a) => n === a)) return k;
+    for (const [k, alts] of Object.entries(CSV_HEADERS)) if (alts.some((a) => n.includes(a))) return k;
+    return null;
+  };
+  let hi = -1, map = null;
+  for (let i = 0; i < Math.min(5, table.length); i++) {
+    const m = table[i].map(matchHeader);
+    const seen = {};
+    m.forEach((k, idx) => { if (k && seen[k] === undefined) seen[k] = idx; });
+    if (Object.keys(seen).length >= 2 && (seen.shares !== undefined)) { hi = i; map = seen; break; }
+  }
+  if (hi < 0) return { rows: [], unmapped: table[0].map(String) };
+  const get = (r, k) => (map[k] !== undefined ? r[map[k]] : undefined);
+  const rows = [];
+  for (const r of table.slice(hi + 1)) {
+    const shares = parseCsvNumber(get(r, "shares"));
+    const ticker = String(get(r, "ticker") || "").trim().toUpperCase();
+    const name = String(get(r, "name") || "").trim();
+    if (!(shares > 0) || (!ticker && !name)) continue;
+    let buyPrice = parseCsvNumber(get(r, "buyPrice"));
+    const totalCost = parseCsvNumber(get(r, "totalCost"));
+    if (!(buyPrice > 0) && totalCost > 0) buyPrice = totalCost / shares;
+    const currentPrice = parseCsvNumber(get(r, "currentPrice"));
+    const currency = String(get(r, "currency") || "").trim().toUpperCase();
+    const rawDate = String(get(r, "buyDate") || "").trim();
+    let buyDate = "";
+    if (rawDate) {
+      const iso = rawDate.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      const eu = rawDate.match(/^(\d{1,2})[./](\d{1,2})[./](\d{4})/);
+      if (iso) buyDate = `${iso[1]}-${iso[2]}-${iso[3]}`;
+      else if (eu) buyDate = `${eu[3]}-${eu[2].padStart(2, "0")}-${eu[1].padStart(2, "0")}`;
+    }
+    const t = String(get(r, "type") || "").toLowerCase();
+    const type = /etf|fund|fond|rahasto/.test(t) ? "ETF" : /crypto|krypto/.test(t) ? "Crypto" : "Stock";
+    rows.push({ ticker: ticker.slice(0, 12), name: name.slice(0, 60), shares, buyPrice: buyPrice > 0 ? buyPrice : "", currentPrice: currentPrice > 0 ? currentPrice : 0,
+      currency: CURRENCIES.some((c) => c.code === currency) ? currency : cur, buyDate, type: TYPES.includes(type) ? type : "Stock" });
+  }
+  return { rows, unmapped: rows.length ? [] : table[hi].map(String) };
+}
+
+function ImportModal({ cur, onClose, onImport, initialMode = "shot" }) {
+  const [mode, setMode] = useState(initialMode); // shot | csv
+  const csvRef = useRef(null);
+  const [csvNote, setCsvNote] = useState("");
+
+  /* CSV path: parse on-device; if the headers can't be mapped, offer the
+     AI reader (the same one screenshots use) as a fallback. */
+  const handleCsv = async (fileList) => {
+    const f = Array.from(fileList || [])[0];
+    if (!f) return;
+    setStage("parsing"); setProgress({ done: 0, total: 1 });
+    try {
+      const text = await toText(f);
+      const { rows: parsed, unmapped } = parseHoldingsCsv(text, cur);
+      if (!parsed.length) {
+        setCsvNote(unmapped.length ? `Couldn't recognise the columns (${unmapped.slice(0, 6).join(", ")}${unmapped.length > 6 ? "…" : ""}).` : "The file looks empty.");
+        setErrMsg("I couldn't map this CSV's columns myself. You can let the AI read it instead (works with most broker exports), or use the template below.");
+        setStage("csv-fallback"); pendingCsv.current = f;
+        return;
+      }
+      const found = parsed.slice(0, 200).map((h) => ({
+        key: uid(), include: true, ticker: h.ticker, name: h.name, domain: "", type: h.type, currency: h.currency,
+        shares: h.shares, buyPrice: h.buyPrice, currentPrice: h.currentPrice, buyDate: h.buyDate,
+        note: !h.buyPrice ? "No buy price in file — enter it." : "",
+      }));
+      setCsvNote(`Read ${found.length} row${found.length === 1 ? "" : "s"} from ${f.name} on your device — nothing was uploaded.`);
+      setRows(found); setStage("review");
+    } catch (e) {
+      setErrMsg(`Couldn't read the file: ${String((e && e.message) || e)}`); setStage("error");
+    }
+  };
+  const pendingCsv = useRef(null);
+  const downloadTemplate = () => {
+    const blob = new Blob([CSV_TEMPLATE], { type: "text/csv" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "richr-portfolio-template.csv"; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  };
+
   const [stage, setStage] = useState("pick");   // pick | parsing | review | error
   const [rows, setRows] = useState([]);
   const [errMsg, setErrMsg] = useState("");
@@ -3891,7 +4018,7 @@ function ImportModal({ cur, onClose, onImport }) {
       currency: r.currency || cur,
       shares: Number(r.shares),
       buyPrice: Number(r.buyPrice),
-      buyDate: today,
+      buyDate: r.buyDate || today,
       currentPrice: Number(r.currentPrice) || 0,
       thesis: "",
       verdict: "open",
@@ -3905,22 +4032,71 @@ function ImportModal({ cur, onClose, onImport }) {
       <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto overscroll-contain flex flex-col"
         onClick={(e) => e.stopPropagation()}>
         <div className="p-5 border-b border-slate-100 flex items-center justify-between shrink-0">
-          <h3 className="font-bold text-lg text-slate-700">Import from screenshot</h3>
+          <h3 className="font-bold text-lg text-slate-700">Import holdings</h3>
           <button onClick={onClose} className="w-8 h-8 rounded-xl bg-slate-100 flex items-center justify-center text-slate-500">
             <X size={15} />
           </button>
         </div>
 
         {stage === "pick" && (
+          <div className="px-6 pt-4">
+            <div className="bg-slate-100 rounded-2xl p-1 flex">
+              {[["shot", "Screenshot"], ["csv", "CSV file"]].map(([id, lbl]) => (
+                <button key={id} onClick={() => setMode(id)}
+                  className={`flex-1 text-sm font-semibold py-2 rounded-xl transition ${mode === id ? "bg-white text-slate-700 shadow-sm" : "text-slate-400"}`}>{lbl}</button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {stage === "pick" && mode === "csv" && (
+          <div className="p-6">
+            <button onClick={() => csvRef.current && csvRef.current.click()}
+              className="w-full border-2 border-dashed border-slate-200 rounded-2xl p-8 text-center hover:border-emerald-300 transition">
+              <Upload size={26} className="mx-auto text-emerald-500 mb-3" />
+              <p className="font-semibold text-slate-600 text-sm">Choose a CSV export</p>
+              <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
+                Nordnet, Avanza, Interactive Brokers, Degiro, OP, Nordea… or our template. Read on your device — the file is never uploaded.
+                Columns recognised: ticker/symbol, name, shares/antal/määrä, buy price/GAV/hankintahinta (or total cost), current price, currency, buy date.
+              </p>
+            </button>
+            <input ref={csvRef} type="file" accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values" className="hidden" onChange={(e) => handleCsv(e.target.files)} />
+            <div className="mt-4 flex items-center justify-between gap-3 bg-slate-50 rounded-2xl px-4 py-3">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-slate-700">Starting from scratch?</div>
+                <p className="text-[11px] text-slate-400">Download the template, fill it in a spreadsheet, upload it here.</p>
+              </div>
+              <button onClick={downloadTemplate} className="text-xs font-semibold text-emerald-700 bg-emerald-50 px-3 py-2 rounded-xl shrink-0">Template.csv</button>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-4 leading-relaxed">
+              Tip: in Nordnet/Avanza open your holdings, choose Export → CSV. Semicolons and “1 234,56” numbers are fine.
+            </p>
+          </div>
+        )}
+
+        {stage === "csv-fallback" && (
+          <div className="p-6 text-center">
+            <p className="font-semibold text-slate-600 text-sm mb-1.5">Columns not recognised</p>
+            <p className="text-xs text-slate-500 mb-1">{csvNote}</p>
+            <p className="text-sm text-slate-400 mb-4 leading-relaxed">{errMsg}</p>
+            <div className="flex gap-2 justify-center flex-wrap">
+              <button onClick={() => { const f = pendingCsv.current; pendingCsv.current = null; setStage("pick"); if (f) handleFiles([f]); }}
+                className="bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold px-4 py-2.5 rounded-full shadow">Let AI read it</button>
+              <button onClick={downloadTemplate} className="bg-slate-100 text-slate-600 text-sm font-semibold px-4 py-2.5 rounded-full">Get the template</button>
+              <button onClick={() => setStage("pick")} className="bg-slate-100 text-slate-600 text-sm font-semibold px-4 py-2.5 rounded-full">Back</button>
+            </div>
+          </div>
+        )}
+
+        {stage === "pick" && mode === "shot" && (
           <div className="p-6">
             <button onClick={() => fileRef.current && fileRef.current.click()}
               className="w-full border-2 border-dashed border-slate-200 rounded-2xl p-8 text-center hover:border-emerald-300 transition">
               <Upload size={26} className="mx-auto text-emerald-500 mb-3" />
-              <p className="font-semibold text-slate-600 text-sm">Choose screenshots or a CSV export</p>
+              <p className="font-semibold text-slate-600 text-sm">Choose screenshots</p>
               <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
                 Screenshots of your holdings from any bank app (OP, Nordnet, Nordea, Avanza…) — up to 10 images.
-                Scrolled, overlapping screenshots are fine: duplicates are merged automatically. You can also pick a CSV
-                export from your broker.
+                Scrolled, overlapping screenshots are fine: duplicates are merged automatically.
               </p>
             </button>
             <input ref={fileRef} type="file"
@@ -3986,6 +4162,7 @@ function ImportModal({ cur, onClose, onImport }) {
         {stage === "review" && (
           <>
             <div className="p-5 space-y-3 overflow-y-auto">
+              {csvNote && <p className="text-xs text-emerald-700 bg-emerald-50 rounded-xl px-3 py-2">{csvNote}</p>}
               <p className="text-sm text-slate-400 leading-relaxed">
                 Found {rows.length} holding{rows.length === 1 ? "" : "s"}. Check the numbers — screenshot reading isn't
                 perfect. Buy price is required (it's how returns are calculated); fill it in if your screenshot didn't show it.
