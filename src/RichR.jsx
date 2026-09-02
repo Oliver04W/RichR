@@ -200,6 +200,24 @@ const watchTicker = async (t) => {
 };
 
 /* ---------- formatting ---------- */
+/* One locale for every date in the UI. The copy is English, so dates are
+   too — otherwise a Swedish/Finnish browser shows "7 juli" next to English
+   labels. Numbers keep the browser locale (€1 234,56 is fine). */
+const DATE_LOCALE = "en-GB";
+const fmtDate = (t, opts) => new Date(t).toLocaleDateString(DATE_LOCALE, opts || { day: "numeric", month: "short" });
+const fmtTime = (t, opts) => new Date(t).toLocaleTimeString(DATE_LOCALE, opts || { hour: "2-digit", minute: "2-digit" });
+const fmtDateTime = (t) => `${fmtDate(t)} ${fmtTime(t)}`;
+/* How old is the newest price row we've seen? Weekends are quiet, so
+   anything under ~26h is "fresh"; beyond that we say so, in plain words. */
+const priceStaleness = (at) => {
+  if (!at) return { stale: false, label: "", age: "", title: "" };
+  const ms = Date.now() - at;
+  const h = ms / 3600000;
+  if (h < 26) return { stale: false, label: "", age: "", title: `Prices as of ${fmtDateTime(at)}` };
+  const d = Math.floor(h / 24);
+  const age = d >= 2 ? `${d} days` : `${Math.round(h)} hours`;
+  return { stale: true, label: `Prices ${age} old`, age, title: `Newest price is from ${fmtDateTime(at)}` };
+};
 const sym = (cur) => (CURRENCIES.find((c) => c.code === cur) || CURRENCIES[0]).sym;
 const money = (n, cur) => {
   const v = Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -416,6 +434,34 @@ export default function RichR({ user, onSignOut }) {
     setFriendAlert(null);
   };
 
+  /* ---- "X wants to see your portfolio" banner (nudges table) ----
+     A friend who can't see your board yet can nudge you once a day.
+     Shown until you share or dismiss; dismiss deletes the row. */
+  const [nudge, setNudge] = useState(null); // { fromId, username, more }
+  const nudgeChecked = useRef(false);
+  useEffect(() => {
+    if (!data || nudgeChecked.current) return;
+    nudgeChecked.current = true;
+    (async () => {
+      try {
+        const { data: rows } = await supabase
+          .from("nudges").select("from_id, created_at").eq("to_id", user.id)
+          .order("created_at", { ascending: false });
+        if (!rows || !rows.length) return;
+        const { data: p } = await supabase
+          .from("profiles").select("user_id, username").in("user_id", rows.map((r) => r.from_id));
+        const first = rows[0];
+        const prof = (p || []).find((x) => x.user_id === first.from_id);
+        setNudge({ fromId: first.from_id, username: (prof && prof.username) || "a friend", more: rows.length - 1 });
+      } catch (_) { /* best-effort */ }
+    })();
+  }, [data]);
+  const dismissNudge = async () => {
+    if (!nudge) return;
+    setNudge(null);
+    try { await supabase.from("nudges").delete().eq("to_id", user.id); } catch (_) {}
+  };
+
   const storageKey = dataKey(user.id);
   const cloudOk = useRef(false);
 
@@ -509,7 +555,7 @@ export default function RichR({ user, onSignOut }) {
     snaps.forEach((s) => byDay.set(new Date(s.t).toDateString(), s));
     const daily = [...byDay.values()].sort((a, b) => a.t - b.t);
     const pts = daily.map((s) => ({
-      label: new Date(s.t).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+      label: fmtDate(s.t),
       value: Math.round(s.value),
     }));
     if (!pts.length)
@@ -574,10 +620,14 @@ export default function RichR({ user, onSignOut }) {
       });
 
       let hit = 0;
+      // newest server-side update among the rows we actually use
+      let priceDataAt = 0;
       const updated = active.holdings.map((h) => {
         const row = priceMap[h.ticker.toUpperCase()];
         if (row && Number(row.price) > 0) {
           hit++;
+          const at = row.updated_at ? new Date(row.updated_at).getTime() : 0;
+          if (at > priceDataAt) priceDataAt = at;
           const pCur = row.currency && newFx.rates[String(row.currency).toUpperCase()]
             ? String(row.currency).toUpperCase() : h.currency;
           return { ...h, currentPrice: Number(row.price), currency: pCur || h.currency || cur };
@@ -606,7 +656,7 @@ export default function RichR({ user, onSignOut }) {
         }
         snaps[active.id] = arr.slice(-40);
         return {
-          ...d, snapshots: snaps, fx: newFx, pricesAt: Date.now(),
+          ...d, snapshots: snaps, fx: newFx, pricesAt: Date.now(), priceDataAt: priceDataAt || d.priceDataAt || 0,
           portfolios: d.portfolios.map((p) => (p.id === active.id ? { ...p, holdings: updated } : p)),
           watchlist: (d.watchlist || []).map((w) => {
             const row = priceMap[String(w.ticker || "").toUpperCase()];
@@ -705,8 +755,9 @@ export default function RichR({ user, onSignOut }) {
     patchActive((p) => ({ holdings: p.holdings.map((h) => (h.id === id ? { ...h, currentPrice } : h)) }));
   const loadSample = () => {
     const today = new Date().toISOString().slice(0, 10);
-    SAMPLE.forEach((s) => upsertHolding({ id: uid(), ...s, buyDate: today, currentPrice: 0, verdict: "open" }));
-    say("Sample positions added — replace them with your own.");
+    // `sample: true` marks these so the Friends tab refuses to publish them.
+    SAMPLE.forEach((s) => upsertHolding({ id: uid(), ...s, buyDate: today, currentPrice: 0, verdict: "open", sample: true }));
+    say("Sample positions added — replace them with your own before sharing.");
   };
 
   /* --- watchlist (concept portfolio — assets you're keen on but don't own yet) --- */
@@ -755,7 +806,10 @@ export default function RichR({ user, onSignOut }) {
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
         @keyframes spin { to { transform: rotate(360deg); } }`}</style>
 
-      <div className="max-w-md mx-auto px-4 pb-28 pt-6">
+      {/* Phone-width everywhere, except the Overview on a big screen, which
+          spreads into two columns (see HomeTab). */}
+      <div className={`mx-auto px-4 pb-28 pt-6 transition-[max-width] ${
+        tab === "portfolio" && sub === "overview" && active.holdings.length > 0 ? "max-w-md lg:max-w-5xl" : "max-w-md"}`}>
         {/* header */}
         <div className="flex items-center justify-between mb-5">
           <div>
@@ -794,8 +848,29 @@ export default function RichR({ user, onSignOut }) {
           </div>
         )}
 
+        {/* nudge banner — a friend wants to see your portfolio */}
+        {nudge && !friendAlert && (
+          <div className="mb-4 bg-white border border-amber-200 rounded-2xl p-3 shadow-sm flex items-center gap-2">
+            <div className="w-8 h-8 rounded-full bg-amber-50 flex items-center justify-center shrink-0">
+              <Trophy size={15} className="text-amber-500" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-semibold text-slate-700 truncate">@{nudge.username} wants to see your portfolio</div>
+              <div className="text-[11px] text-slate-400">{nudge.more > 0 ? `+${nudge.more} more · ` : ""}Share to join the leaderboard</div>
+            </div>
+            <button onClick={() => { setTab("friends"); dismissNudge(); }}
+              className="bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-xs font-semibold px-3 py-1.5 rounded-full shadow shrink-0">
+              Share
+            </button>
+            <button onClick={dismissNudge}
+              className="w-6 h-6 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center shrink-0">
+              <X size={12} />
+            </button>
+          </div>
+        )}
+
         {tab === "portfolio" && (
-          <div className="mb-4 bg-slate-200/60 rounded-full p-1 flex">
+          <div className="mb-4 bg-slate-200/60 rounded-full p-1 flex lg:max-w-md">
             {SUBS.map((s) => (
               <button key={s.id} onClick={() => setSub(s.id)}
                 className={`flex-1 text-[13px] font-semibold py-1.5 rounded-full transition ${
@@ -816,7 +891,7 @@ export default function RichR({ user, onSignOut }) {
             goPositions={() => setSub("holdings")} onLoadSample={loadSample}
             goals={data.goals || []} allValue={allValue} fx={data.fx || DEFAULT_FX}
             autoRefresh={!!data.autoRefresh} onToggleAuto={() => patch((d) => ({ autoRefresh: !d.autoRefresh }))}
-            pricesAt={data.pricesAt || 0}
+            pricesAt={data.pricesAt || 0} priceDataAt={data.priceDataAt || 0}
             onAddGoal={addGoal} onUpdateGoal={updateGoal} onRemoveGoal={removeGoal}
           />
         )}
@@ -1036,35 +1111,95 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
 }
 
 /* ================= HOME ================= */
-function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, onAddGoal, onUpdateGoal, onRemoveGoal }) {
+function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, priceDataAt, onAddGoal, onUpdateGoal, onRemoveGoal }) {
   const [renaming, setRenaming] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const up = totals.pl >= 0;
   const flat = Math.abs(totals.plPct) <= 0.005;
   const th = perfTheme(totals.plPct);
+  const empty = active.holdings.length === 0;
   // progress toward "growth" — like LightR's progress toward goal weight
   const progress = totals.cost > 0 ? Math.min(100, Math.max(0, 50 + (totals.plPct / 2))) : 50;
+  /* Price freshness comes from the server's updated_at on the price rows
+     (priceDataAt), not from when this device last fetched. Older than a
+     day and the pill turns amber with the real age instead of a cheerful
+     "Live" — a stale number is worse than no number. */
+  const staleness = priceStaleness(priceDataAt);
+
+  /* Portfolio switcher — shared by both the empty and the full layout. */
+  const switcher = (
+    <div className="flex items-center gap-2 overflow-x-auto pb-1">
+      {data.portfolios.map((p) => {
+        const on = p.id === active.id;
+        return (
+          <button key={p.id} onClick={() => onSwitch(p.id)}
+            className={`whitespace-nowrap px-3.5 py-1.5 rounded-full text-sm font-medium border ${
+              on ? "bg-emerald-500 text-white border-emerald-500" : "bg-white text-slate-500 border-slate-200"}`}>
+            {p.name}
+          </button>
+        );
+      })}
+      <button onClick={onAddPortfolio}
+        className="w-8 h-8 shrink-0 rounded-full border border-dashed border-slate-300 text-slate-400 flex items-center justify-center">
+        <Plus size={15} />
+      </button>
+    </div>
+  );
+
+  /* No holdings yet: skip the €0 hero, the empty chart and the zero
+     stat tiles — a first-time user should see one clear next step. */
+  if (empty) {
+    return (
+      <div className="space-y-4 lg:max-w-md lg:mx-auto">
+        {switcher}
+        <div className="rounded-3xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white p-6 shadow-lg shadow-emerald-200">
+          <div className="flex items-center justify-between">
+            {renaming ? (
+              <input autoFocus defaultValue={active.name}
+                onBlur={(e) => { onRename(e.target.value.trim() || active.name); setRenaming(false); }}
+                onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+                className="bg-white/20 rounded-lg px-2 py-1 text-sm font-semibold text-white placeholder-white/60 w-40" />
+            ) : (
+              <button onClick={() => setRenaming(true)} className="text-sm font-semibold text-white/90 flex items-center gap-1.5">
+                {active.name} <Pencil size={12} className="opacity-70" />
+              </button>
+            )}
+            {data.portfolios.length > 1 && (
+              <button onClick={onDeletePortfolio} className="text-white/70"><Trash2 size={15} /></button>
+            )}
+          </div>
+          <div className="w-12 h-12 mt-5 rounded-2xl bg-white/20 flex items-center justify-center mb-3">
+            <Sparkles size={22} />
+          </div>
+          <h3 className="font-bold text-xl">Start your journey</h3>
+          <p className="text-sm text-emerald-50 mt-1 mb-5 leading-relaxed">
+            Add your first position and write down why you bought it. Prices update live, and once you have a few positions you can share your progress with friends.
+          </p>
+          <div className="flex gap-2 flex-wrap">
+            <button onClick={goPositions}
+              className="bg-white text-emerald-600 text-sm font-semibold px-5 py-2.5 rounded-full shadow">
+              Add a position
+            </button>
+            <button onClick={onLoadSample}
+              className="bg-emerald-700/40 text-white text-sm font-semibold px-5 py-2.5 rounded-full">
+              Try sample data
+            </button>
+          </div>
+          <p className="text-[11px] text-emerald-100 mt-3">Sample data is clearly marked and can't be shared to the leaderboard — replace it with real positions when you're ready.</p>
+        </div>
+        <GoalsSection goals={goals} allValue={allValue} cur={cur}
+          onAdd={onAddGoal} onUpdate={onUpdateGoal} onRemove={onRemoveGoal} />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
-      {/* portfolio switcher */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-1">
-        {data.portfolios.map((p) => {
-          const on = p.id === active.id;
-          return (
-            <button key={p.id} onClick={() => onSwitch(p.id)}
-              className={`whitespace-nowrap px-3.5 py-1.5 rounded-full text-sm font-medium border ${
-                on ? "bg-emerald-500 text-white border-emerald-500" : "bg-white text-slate-500 border-slate-200"}`}>
-              {p.name}
-            </button>
-          );
-        })}
-        <button onClick={onAddPortfolio}
-          className="w-8 h-8 shrink-0 rounded-full border border-dashed border-slate-300 text-slate-400 flex items-center justify-center">
-          <Plus size={15} />
-        </button>
-      </div>
+      {switcher}
 
+      {/* On wide screens: hero + stats on the left, chart + goals on the right. */}
+      <div className="space-y-4 lg:grid lg:grid-cols-2 lg:gap-5 lg:space-y-0 lg:items-start">
+      <div className="space-y-4">
       {/* hero card — gradient follows performance: green up, red down, grey flat */}
       <div className={`rounded-3xl ${th.grad} text-white p-6 shadow-lg ${th.shadow}`}>
         <div className="flex items-center justify-between">
@@ -1101,16 +1236,26 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
         </div>
       </div>
 
+      {/* quick stats row */}
+      <div className="grid grid-cols-3 gap-3">
+        <StatCard label="Positions" value={active.holdings.length} />
+        <StatCard label="Invested" value={moneyShort(totals.cost, cur)} />
+        <StatCard label="Return" value={pct(totals.plPct)} tone={th.stat} />
+      </div>
+      </div>{/* /left column */}
+
+      <div className="space-y-4">
       {/* chart card */}
       <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
         <div className="flex items-center justify-between mb-1 gap-2 flex-wrap">
           <h3 className="font-bold text-slate-700">Your progress</h3>
           <div className="flex items-center gap-2">
-            <button onClick={onToggleAuto}
+            <button onClick={onToggleAuto} title={staleness.title}
               className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border transition ${
-                autoRefresh ? "bg-emerald-500 text-white border-emerald-500" : "bg-white text-slate-400 border-slate-200"}`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${autoRefresh ? "bg-white animate-pulse" : "bg-slate-300"}`} />
-              {autoRefresh ? "Live · 30s" : "Live off"}
+                staleness.stale ? "bg-amber-50 text-amber-700 border-amber-200"
+                  : autoRefresh ? "bg-emerald-500 text-white border-emerald-500" : "bg-white text-slate-400 border-slate-200"}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${staleness.stale ? "bg-amber-400" : autoRefresh ? "bg-white animate-pulse" : "bg-slate-300"}`} />
+              {staleness.stale ? staleness.label : autoRefresh ? "Live · 30s" : "Live off"}
             </button>
             <button onClick={() => onRefresh(false)} disabled={refreshing}
               className={`flex items-center gap-1.5 text-sm font-semibold px-3 py-1.5 rounded-full disabled:opacity-60 ${th.chip}`}>
@@ -1119,9 +1264,15 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
             </button>
           </div>
         </div>
-        {pricesAt > 0 && (
-          <p className="text-[11px] text-slate-400 mb-1">Prices updated {new Date(pricesAt).toLocaleTimeString()}</p>
-        )}
+        {priceDataAt > 0 ? (
+          <p className={`text-[11px] mb-1 ${staleness.stale ? "text-amber-600" : "text-slate-400"}`}>
+            {staleness.stale
+              ? `Prices are ${staleness.age} old (${fmtDateTime(priceDataAt)}) — tap Update.`
+              : `Prices as of ${fmtTime(priceDataAt)}`}
+          </p>
+        ) : pricesAt > 0 ? (
+          <p className="text-[11px] text-slate-400 mb-1">Prices fetched {fmtTime(pricesAt)}</p>
+        ) : null}
         <div className="h-40 -mx-2 cursor-pointer active:opacity-80" onClick={() => setShowHistory(true)}>
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={chartData} margin={{ top: 8, right: 10, left: 10, bottom: 0 }}>
@@ -1142,7 +1293,7 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
         </div>
         <p className="text-xs text-slate-400 mt-1">
           Each price update adds a point. Dashed line is what you invested. Foreign holdings converted at{" "}
-          {fx && fx.at ? `live FX rates (updated ${new Date(fx.at).toLocaleString()})` : "approximate FX rates — tap Update prices for live rates"}.
+          {fx && fx.at ? `live FX rates (updated ${fmtDateTime(fx.at)})` : "approximate FX rates — tap Update prices for live rates"}.
         </p>
       </div>
 
@@ -1150,37 +1301,11 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
         holdings={active.holdings} cur={cur}
         liveValue={totals.value} liveCost={totals.cost} hex={th.hex} />
 
-      {/* quick stats row */}
-      <div className="grid grid-cols-3 gap-3">
-        <StatCard label="Positions" value={active.holdings.length} />
-        <StatCard label="Invested" value={moneyShort(totals.cost, cur)} />
-        <StatCard label="Return" value={pct(totals.plPct)} tone={th.stat} />
-      </div>
-
       {/* goals */}
       <GoalsSection goals={goals} allValue={allValue} cur={cur}
         onAdd={onAddGoal} onUpdate={onUpdateGoal} onRemove={onRemoveGoal} />
-
-      {/* empty-state nudge */}
-      {active.holdings.length === 0 && (
-        <div className="bg-white rounded-3xl p-6 text-center shadow-sm border border-slate-100">
-          <div className="w-12 h-12 mx-auto rounded-2xl bg-emerald-50 flex items-center justify-center mb-3">
-            <Sparkles size={22} className="text-emerald-500" />
-          </div>
-          <h3 className="font-bold text-slate-700 mb-1">Start your journey</h3>
-          <p className="text-sm text-slate-400 mb-4">Add your first position and write down why you bought it.</p>
-          <div className="flex gap-2 justify-center">
-            <button onClick={goPositions}
-              className="bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold px-4 py-2.5 rounded-full shadow">
-              Add a position
-            </button>
-            <button onClick={onLoadSample}
-              className="bg-slate-100 text-slate-600 text-sm font-semibold px-4 py-2.5 rounded-full">
-              Try sample data
-            </button>
-          </div>
-        </div>
-      )}
+      </div>{/* /right column */}
+      </div>{/* /grid */}
     </div>
   );
 }
@@ -1257,12 +1382,24 @@ function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRe
             </button>
           </div>
         </div>
-      ) : (
-        byValueDesc(active.holdings, cur, fx).map((h) => (
+      ) : (<>
+        {active.holdings.some((h) => h.sample) && (
+          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3.5 flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-amber-800">Sample positions</div>
+              <p className="text-[11px] text-amber-700 leading-snug">These aren't real — edit one to keep it, or clear them and add your own. Sample data can't be shared with friends.</p>
+            </div>
+            <button onClick={() => active.holdings.filter((h) => h.sample).forEach((h) => onRemove(h.id))}
+              className="shrink-0 bg-white border border-amber-200 text-amber-800 text-xs font-semibold px-3 py-1.5 rounded-full">
+              Clear
+            </button>
+          </div>
+        )}
+        {byValueDesc(active.holdings, cur, fx).map((h) => (
           <PositionCard key={h.id} h={h} cur={cur} fx={fx} onOpen={() => setDetail(h)}
             onEdit={() => setEditing(h)} onRemove={() => onRemove(h.id)} onSetPrice={onSetPrice} />
-        ))
-      )}
+        ))}
+      </>)}
 
       {(active.closed && active.closed.length > 0) && (
         <div className="pt-2">
@@ -1520,7 +1657,9 @@ function PositionModal({ holding, cur, onClose, onSave, title }) {
   const valid = f.ticker.trim() && Number(f.shares) > 0 && Number(f.buyPrice) > 0;
   const save = () => {
     if (!valid) return;
-    onSave({ ...f, ticker: f.ticker.trim().toUpperCase(), name: f.name.trim() || f.ticker.trim().toUpperCase(),
+    // Editing and saving a sample position makes it yours — drop the flag.
+    const { sample, ...rest } = f;
+    onSave({ ...rest, ticker: f.ticker.trim().toUpperCase(), name: f.name.trim() || f.ticker.trim().toUpperCase(),
       currency: f.currency || cur, shares: Number(f.shares), buyPrice: Number(f.buyPrice), currentPrice: Number(f.currentPrice) || 0 });
   };
   const label = "block text-xs font-semibold text-slate-400 mb-1.5";
@@ -1807,6 +1946,24 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing }) {
     } finally { setAdding(false); }
   };
 
+  /* Outgoing nudges: friend id -> when I last nudged (for the 24h cooldown). */
+  const [nudged, setNudged] = useState({});
+  useEffect(() => {
+    (async () => {
+      const { data: rows } = await supabase.from("nudges").select("to_id, created_at").eq("from_id", user.id);
+      const m = {};
+      (rows || []).forEach((r) => { m[r.to_id] = new Date(r.created_at).getTime(); });
+      setNudged(m);
+    })();
+  }, []);
+  const nudgeFriend = async (id, username) => {
+    const { error } = await supabase.from("nudges")
+      .upsert({ from_id: user.id, to_id: id, created_at: new Date().toISOString() }, { onConflict: "from_id,to_id" });
+    if (error) { say("Couldn't send the nudge — try again."); return; }
+    setNudged((m) => ({ ...m, [id]: Date.now() }));
+    say(`Nudged @${username} — they'll see it next time they open RichR.`);
+  };
+
   const removeFriend = async (id, username) => {
     // Unfriend removes BOTH directions: your row and theirs (the
     // incoming-delete policy lets you remove yourself from their list).
@@ -1842,8 +1999,12 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing }) {
     setBusy(false);
   };
 
-  const friendIds = new Set([user.id, ...((friends || []).map((f) => f.id))]);
+  /* The board shows you + MUTUAL friends only (the database enforces the
+     same rule, so a one-way add never exposes anyone's numbers). */
+  const friendIds = new Set([user.id, ...((friends || []).filter((f) => f.mutual).map((f) => f.id))]);
   const shown = board === null ? null : board.filter((r) => friendIds.has(r.userId));
+  const hasSample = active.holdings.some((h) => h.sample);
+  const canShare = active.holdings.length > 0 && !hasSample;
 
   return (
     <div className="space-y-4">
@@ -1865,8 +2026,15 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing }) {
           </div>
           <span className="text-xs font-semibold shrink-0 ml-2 flex items-center gap-0.5">Edit <ChevronRight size={14} /></span>
         </button>
+        {!canShare && (
+          <p className="mt-3 text-[11px] text-emerald-100 bg-emerald-700/30 rounded-xl px-3 py-2">
+            {hasSample
+              ? "You still have sample positions — clear or replace them in Portfolio › Holdings before sharing."
+              : "Add a position in the Portfolio tab first — there's nothing to share yet."}
+          </p>
+        )}
         <div className="mt-3 flex items-center gap-2">
-          <button onClick={publish} disabled={busy}
+          <button onClick={publish} disabled={busy || !canShare}
             className="bg-white text-emerald-600 font-semibold text-sm px-5 py-2.5 rounded-full shadow disabled:opacity-60">
             {busy ? "Working…" : onBoard ? "Update share" : "Share now"}
           </button>
@@ -1946,21 +2114,39 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing }) {
                   <p className="text-sm text-slate-400">No friends yet — when someone adds you back, they appear here.</p>
                 ) : (
                   <div>
-                    {mutuals.map((f) => (
-                      <div key={f.id} className="flex items-center justify-between gap-2 py-2.5 border-b border-slate-50 last:border-0">
-                        <button onClick={() => openFriendProfile(f.id, f.username)}
-                          className="min-w-0 flex-1 text-left active:opacity-70">
-                          <div className="text-sm font-semibold text-slate-700 truncate">@{f.username}</div>
-                          <div className="text-[11px] font-medium text-emerald-600 flex items-center gap-1">
-                            <Check size={10} /> Friends · tap to view profile
-                          </div>
-                        </button>
-                        <button onClick={() => removeFriend(f.id, f.username)}
-                          className="text-xs font-semibold text-slate-400 bg-slate-100 px-3 py-1.5 rounded-full shrink-0">
-                          Unfriend
-                        </button>
-                      </div>
-                    ))}
+                    {mutuals.map((f) => {
+                      const sharing = !!(board && board.some((b) => b.userId === f.id));
+                      const nudgedAt = nudged[f.id] || 0;
+                      const nudgedRecently = Date.now() - nudgedAt < 24 * 3600000;
+                      return (
+                        <div key={f.id} className="flex items-center justify-between gap-2 py-2.5 border-b border-slate-50 last:border-0">
+                          <button onClick={() => openFriendProfile(f.id, f.username)}
+                            className="min-w-0 flex-1 text-left active:opacity-70">
+                            <div className="text-sm font-semibold text-slate-700 truncate">@{f.username}</div>
+                            {sharing ? (
+                              <div className="text-[11px] font-medium text-emerald-600 flex items-center gap-1">
+                                <Check size={10} /> Sharing · tap to view profile
+                              </div>
+                            ) : (
+                              <div className="text-[11px] font-medium text-slate-400 flex items-center gap-1">
+                                <Lock size={10} /> Not sharing yet
+                              </div>
+                            )}
+                          </button>
+                          {!sharing && (
+                            <button onClick={() => nudgeFriend(f.id, f.username)} disabled={nudgedRecently}
+                              className={`text-xs font-semibold px-3 py-1.5 rounded-full shrink-0 ${
+                                nudgedRecently ? "bg-amber-50 text-amber-500" : "bg-amber-100 text-amber-700"}`}>
+                              {nudgedRecently ? "Nudged" : "Nudge"}
+                            </button>
+                          )}
+                          <button onClick={() => removeFriend(f.id, f.username)}
+                            className="text-xs font-semibold text-slate-400 bg-slate-100 px-3 py-1.5 rounded-full shrink-0">
+                            Unfriend
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
 
@@ -2024,7 +2210,7 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing }) {
           <Trophy size={24} className="mx-auto text-amber-300 mb-3" />
           <p className="font-semibold text-slate-600 mb-1">No shared returns yet</p>
           <p className="text-sm text-slate-400">
-            Add friends above, and make sure you (and they) have tapped Share.
+            Add friends above, tap Share, and nudge friends who haven't shared yet.
           </p>
         </div>
       ) : (
@@ -2067,7 +2253,7 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing }) {
         </div>
       )}
       <p className="text-[11px] text-slate-400 leading-relaxed">
-        Your leaderboard shows only you and the friends you've added — there's no public list. Tap anyone to see their profile.
+        Your leaderboard shows only you and your mutual friends — there's no public list, and the database enforces it. Tap anyone to see their profile.
         Everyone picks what they share (Profile › What friends can see); a lock means that person keeps their return % private.
         Amounts, buy prices and theses always stay on your device.
       </p>
@@ -2115,7 +2301,7 @@ function GoalsSection({ goals, allValue, cur, onAdd, onUpdate, onRemove }) {
                     {g.note && <p className="text-xs text-slate-400 mt-1 leading-relaxed">{g.note}</p>}
                     {g.targetDate && (
                       <div className="text-[11px] text-slate-400 font-medium mt-1 flex items-center gap-1">
-                        <Calendar size={11} /> by {new Date(g.targetDate).toLocaleDateString(undefined, { year: "numeric", month: "short" })}
+                        <Calendar size={11} /> by {fmtDate(g.targetDate, { year: "numeric", month: "short" })}
                       </div>
                     )}
                   </div>
@@ -2463,7 +2649,7 @@ function RiskView({ analysis, busy, onAnalyze }) {
           </div>
 
           <p className="text-[11px] text-slate-400 leading-relaxed">
-            Last updated {new Date(analysis.at).toLocaleString()}. Betas and volatilities are AI-retrieved estimates from
+            Last updated {fmtDateTime(analysis.at)}. Betas and volatilities are AI-retrieved estimates from
             public data ({analysis.coverage}% of portfolio covered); portfolio σ uses an average-correlation approximation
             (ρ = 0.55), not a full covariance matrix. Educational estimates only — not investment advice.
           </p>
@@ -2485,7 +2671,7 @@ function NewsView({ news, busy, onFetch }) {
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-sm text-slate-400">
-          {news ? `Scanned ${new Date(news.at).toLocaleString()}` : "News affecting your holdings"}
+          {news ? `Scanned ${fmtDateTime(news.at)}` : "News affecting your holdings"}
         </p>
         <button onClick={onFetch} disabled={busy}
           className="flex items-center gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold px-4 py-2 rounded-full shadow disabled:opacity-60">
@@ -3367,9 +3553,9 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
   const intraday = range === "1d" || range === "1w";
   const fmtTick = (t) => {
     const d = new Date(t);
-    if (range === "1d") return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    if (range === "1w") return d.toLocaleDateString([], { weekday: "short" });
-    return d.toLocaleDateString([], { month: "short", day: "numeric" });
+    if (range === "1d") return fmtTime(d);
+    if (range === "1w") return fmtDate(d, { weekday: "short" });
+    return fmtDate(d);
   };
 
   const chart = (pts || []).map((p) => ({ t: p.t, value: p.value, cost: p.cost }));
@@ -3423,7 +3609,7 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
                     <ReferenceLine y={chart[chart.length - 1].cost} stroke="#cbd5e1" strokeDasharray="4 4" />
                   )}
                   <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid #e2e8f0", fontSize: 12 }}
-                    labelFormatter={(t) => new Date(t).toLocaleString()}
+                    labelFormatter={(t) => fmtDateTime(t)}
                     formatter={(v, k) => [money(v, cur), k === "value" ? "Value" : "Invested"]} />
                   <Area type="monotone" dataKey="value" stroke={up ? "#10b981" : "#f43f5e"}
                     strokeWidth={2.5} fill="url(#phg)" isAnimationActive={false} />
@@ -3694,7 +3880,7 @@ function PriceChart({ symbol, currency }) {
               <XAxis dataKey="t" hide />
               <YAxis domain={["auto", "auto"]} hide />
               <Tooltip
-                labelFormatter={(t) => new Date(t).toLocaleString([], (range === "1d" || range === "5d")
+                labelFormatter={(t) => new Date(t).toLocaleString(DATE_LOCALE, (range === "1d" || range === "5d")
                   ? { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }
                   : { year: "numeric", month: "short", day: "numeric" })}
                 formatter={(v) => [money(v, currency), "Close"]}
