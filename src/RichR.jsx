@@ -1268,7 +1268,7 @@ export default function RichR({ user, onSignOut }) {
       )}
 
       {/* bottom tab bar */}
-      <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 z-40">
+      <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 z-40" style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}>
         <div className="max-w-md mx-auto flex">
           {tabs.map((t) => {
             const on = tab === t.id;
@@ -1644,6 +1644,13 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
         {!data.onboardingDismissed && (
           <OnboardingCard user={user} active={active} data={data} onImport={goImport} onAddManually={goPositions} goFriends={goFriends} onDismiss={onDismissOnboarding} />
         )}
+        <section>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="section-title">What's happening on RichR</h3>
+            <button onClick={goFriends} className="text-xs font-semibold text-emerald-700">Friends →</button>
+          </div>
+          <HomeFeed user={user} onOpenTicker={onOpenTicker} goFriends={goFriends} goCommunities={goCommunities} boardRanks={data.boardRanks || null} />
+        </section>
         <GoalsSection goals={goals} allValue={allValue} cur={cur}
           onAdd={onAddGoal} onUpdate={onUpdateGoal} onRemove={onRemoveGoal} />
       </div>
@@ -1714,7 +1721,7 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
           <h3 className="section-title">Feed</h3>
           <button onClick={goFriends} className="text-xs font-semibold text-emerald-700">Leaderboard →</button>
         </div>
-        <HomeFeed user={user} onOpenTicker={onOpenTicker} goFriends={goFriends} goCommunities={goCommunities}
+        <HomeFeed user={user} onOpenTicker={onOpenTicker} goFriends={goFriends} goCommunities={goCommunities} boardRanks={data.boardRanks || null}
           rankMove={(() => { const br = data.boardRanks; if (!br || !br.cur || !br.prev) return null; const to = br.cur[user.id], from = br.prev[user.id]; return to && from && to !== from ? { from, to, up: to < from } : null; })()} />
       </section>
 
@@ -6930,7 +6937,7 @@ function CallsList({ userId, calls: given = null, limit = 8, title = "CALLS", on
 }
 
 /* ---------- Home feed: friends, communities, sentiment, rankings — one stream ---------- */
-function HomeFeed({ user, onOpenTicker, goFriends, goCommunities, rankMove = null }) {
+function HomeFeed({ user, onOpenTicker, goFriends, goCommunities, rankMove = null, boardRanks = null }) {
   const [items, setItems] = useState(null);
   const [trending, setTrending] = useState([]);
   const [top, setTop] = useState(null);
@@ -6960,7 +6967,33 @@ function HomeFeed({ user, onOpenTicker, goFriends, goCommunities, rankMove = nul
       if (dead) return;
       const gn = {}; (gs || []).forEach((g) => { gn[g.id] = g.name; }); setGroupNames(gn);
       setTop(Array.isArray(ts) ? ts : []);
+      /* Friends' leaderboard moves (from the last two rankings we saw). */
+      const rankItems = [];
+      if (boardRanks && boardRanks.cur && boardRanks.prev && boardRanks.at) {
+        Object.keys(boardRanks.cur).forEach((id) => {
+          const to = boardRanks.cur[id], from = boardRanks.prev[id];
+          if (id !== user.id && from && to && from !== to) rankItems.push({ t: "rank", id: "r" + id, user_id: id, ticker: null, created_at: boardRanks.at, from, to });
+        });
+      }
+      /* Never a dead feed: when friends are quiet, blend in what's happening on RichR. */
+      let extra = [];
+      const friendCount = (ev || []).length + (cs || []).length + (ps || []).length + (gp || []).length;
+      if (who && friendCount < 6) {
+        const g = (t, sel) => supabase.from(t).select(sel).gte("created_at", sinceIso).neq("user_id", user.id).order("created_at", { ascending: false }).limit(30);
+        const [{ data: gcs }, { data: gps }] = await Promise.all([
+          g("stock_calls", "id, user_id, ticker, vote, reason, created_at, reaffirmed"),
+          g("stock_posts", "id, user_id, ticker, body, parent_id, created_at"),
+        ]);
+        if (dead) return;
+        const notFriend = (x) => !who.includes(x.user_id);
+        extra = [
+          ...latestCalls((gcs || []).filter((c) => !c.reaffirmed && notFriend(c))).map((c) => ({ t: "call", id: "gc" + c.id, user_id: c.user_id, ticker: c.ticker, created_at: c.created_at, c, global: true })),
+          ...(gps || []).filter((p) => !p.parent_id && notFriend(p)).map((p) => ({ t: "post", id: "gp" + p.id, user_id: p.user_id, ticker: p.ticker, created_at: p.created_at, p, global: true })),
+        ];
+      }
       const all = [
+        ...rankItems,
+        ...extra,
         ...(ev || []).map((e) => ({ t: "event", id: "e" + e.id, user_id: e.user_id, ticker: e.ticker, created_at: e.created_at, e })),
         ...latestCalls((cs || []).filter((c) => !c.reaffirmed)).map((c) => ({ t: "call", id: "c" + c.id, user_id: c.user_id, ticker: c.ticker, created_at: c.created_at, c })),
         ...(ps || []).filter((p) => !p.parent_id).map((p) => ({ t: "post", id: "p" + p.id, user_id: p.user_id, ticker: p.ticker, created_at: p.created_at, p })),
@@ -6982,6 +7015,7 @@ function HomeFeed({ user, onOpenTicker, goFriends, goCommunities, rankMove = nul
   if (items === null) return <Skeleton lines={4} />;
 
   const line = (x) => {
+    if (x.t === "rank") return <>moved <b>#{x.from} → #{x.to}</b> on your leaderboard{x.to < x.from ? " ↑" : " ↓"}</>;
     if (x.t === "event") return <>{eventText(x.e)}</>;
     if (x.t === "call") return <>{VOTE_META[x.c.vote].dot} rated <b>{x.c.ticker}</b> a <b>{VOTE_META[x.c.vote].label}</b>{x.c.reason ? <span className="text-slate-500"> — “{x.c.reason}”</span> : ""}</>;
     if (x.t === "post") return <>on <b>{x.p.ticker}</b>: <span className="text-slate-600">{x.p.body.length > 160 ? x.p.body.slice(0, 160) + "…" : x.p.body}</span></>;
@@ -7049,9 +7083,13 @@ function HomeFeed({ user, onOpenTicker, goFriends, goCommunities, rankMove = nul
 
       {/* the stream */}
       {items.length === 0 ? (
-        <div className="card text-sm text-slate-500">
-          {scope === "community" ? "It's quiet on RichR right now — vote on a stock or post to a community to get things going." : "Your friends have been quiet this fortnight."}{" "}
-          <button onClick={goFriends} className="font-semibold text-emerald-700">{scope === "community" ? "Add friends →" : "See friends →"}</button>
+        <div className="card">
+          <div className="text-sm font-semibold text-slate-800">Be the first to say something</div>
+          <p className="text-sm text-slate-500 mt-1">Vote Buy / Hold / Sell on a stock you own, post a take, or ask your community a question — it'll show up here for everyone who follows you.</p>
+          <div className="flex gap-2 mt-3 flex-wrap">
+            <button onClick={() => onOpenTicker && top && top[0] ? onOpenTicker(top[0].ticker) : goFriends()} className="btn-primary text-xs h-9">Vote on a stock</button>
+            <button onClick={goFriends} className="btn-secondary text-xs h-9">Add friends</button>
+          </div>
         </div>
       ) : (
         <div className="card divide-y divide-slate-100 py-1">
@@ -7061,13 +7099,14 @@ function HomeFeed({ user, onOpenTicker, goFriends, goCommunities, rankMove = nul
               <div key={x.id} className="py-3 flex items-start gap-2.5">
                 <Avatar name={x.user_id === me ? (SOCIAL_ME.username || "you") : (names[x.user_id] || "?")} size={30} />
                 <div className="flex-1 min-w-0">
-                  <div className="text-[13px] text-slate-700 leading-snug"><span className="font-bold text-slate-900">{who(x.user_id)}</span> {line(x)}</div>
+                  <div className="text-[13px] text-slate-700 leading-snug"><span className="font-bold text-slate-900">{who(x.user_id)}</span> {line(x)}{x.global && <span className="ml-1.5 text-[9px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded-full align-middle">RichR</span>}</div>
                   {poll && <div className="mt-2 bg-slate-50 rounded-xl p-3"><SentimentMini ticker={x.g.card.ticker} name={x.g.card.name} onOpenTicker={onOpenTicker} headline={false} /></div>}
                   {x.t === "group" && x.g.body && x.g.card && <div className="text-[13px] text-slate-600 mt-1">“{x.g.body}”</div>}
                   <div className="text-[10px] text-slate-400 mt-1 flex items-center gap-2">
                     <span>{timeAgo(x.created_at)}</span>
                     {x.ticker && <button onClick={() => onOpenTicker && onOpenTicker(x.ticker)} className="font-semibold text-emerald-700">open {x.ticker}</button>}
                     {x.t === "group" && goCommunities && <button onClick={goCommunities} className="font-semibold text-slate-500">reply in community</button>}
+                    {x.t === "rank" && <button onClick={goFriends} className="font-semibold text-slate-500">leaderboard</button>}
                   </div>
                 </div>
               </div>
@@ -7871,7 +7910,7 @@ function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpe
       </div>}
 
       {/* composer */}
-      {section === "chat" && <div className="sticky bottom-[4.5rem] z-30 bg-white border-t border-slate-200 px-3 pt-2 pb-2">
+      {section === "chat" && <div className="sticky z-30 bg-white border-t border-slate-200 px-3 pt-2 pb-2" style={{ bottom: "calc(4.25rem + env(safe-area-inset-bottom, 0px))" }}>
         {replyTo && (
           <div className="flex items-center justify-between text-[11px] text-slate-500 bg-slate-50 rounded-xl px-2.5 py-1.5 mb-2">
             <span className="truncate">Replying to <b>@{uname(replyTo.user_id)}</b>: {replyTo.card ? `shared ${replyTo.card.kind === "performance" ? "their performance" : replyTo.card.ticker}` : replyTo.position ? `shared ${replyTo.position.ticker}` : replyTo.body}</span>
