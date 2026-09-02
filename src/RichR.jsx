@@ -507,9 +507,23 @@ async function publishBoard({ data, active, totals, cur, user }) {
       if (crossed.length) events.push({ kind: "milestone", ticker: null, from_pct: was, to_pct: crossed[crossed.length - 1] });
     }
   }
+  // 30-point sparkline of cash-flow-adjusted % change (last ~6 weeks) for the
+  // portfolio card friends see — no amounts, just the shape.
+  let spark = null;
+  if (share.returnPct) {
+    try {
+      const { portfolio } = await loadDailySeries(active.holdings, cur, DEFAULT_BENCH.symbol);
+      const live = (portfolio || []).filter((p) => p.value > 0).slice(-30);
+      if (live.length >= 5) {
+        const a = live[0];
+        spark = live.map((p) => Number(((((p.value - a.value) - ((p.cost || 0) - (a.cost || 0))) / a.value) * 100).toFixed(2)));
+      }
+    } catch (_) {}
+  }
   const row = {
     user_id: user.id,
     name: data.userName.trim(),
+    spark,
     score: scoreRes && scoreRes.score != null ? scoreRes.score : null,
     score_parts: scoreRes && scoreRes.score != null ? scoreRes.parts : null,
     profile: share.badge ? (data.profile || "") : "",
@@ -1143,6 +1157,7 @@ export default function RichR({ user, onSignOut }) {
             user={user} goFriends={() => setTab("friends")}
             onDismissOnboarding={() => patch(() => ({ onboardingDismissed: true }))}
             onOpenProfile={openProfile}
+            onRankLog={(rankLog) => patch(() => ({ rankLog }))}
           />
         )}
         {tab === "portfolio" && sub === "holdings" && (
@@ -1218,6 +1233,39 @@ export default function RichR({ user, onSignOut }) {
 
 /* ================= PROFILE ================= */
 const TAB_LABEL = { portfolio: "Home", research: "Discover", groups: "Groups", friends: "Friends", profile: "Profile" };
+
+function OwnPortfolioCard({ user, data, active, cur }) {
+  const [row, setRow] = useState(null);
+  const [rank, setRank] = useState({ rank: null, n: null });
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      const [{ data: me }, { data: out }, { data: inc }, { data: board }] = await Promise.all([
+        supabase.from("leaderboard").select("return_pct, top_holdings, score, spark").eq("user_id", user.id).maybeSingle(),
+        supabase.from("friends").select("friend_id").eq("user_id", user.id),
+        supabase.from("friends").select("user_id").eq("friend_id", user.id),
+        supabase.from("leaderboard").select("user_id, return_pct"),
+      ]);
+      if (dead) return;
+      setRow(me || {});
+      const incSet = new Set((inc || []).map((r) => r.user_id));
+      const mutual = new Set((out || []).map((r) => r.friend_id).filter((id) => incSet.has(id)));
+      const rets = (board || []).filter((b) => mutual.has(b.user_id) && b.return_pct != null).map((b) => Number(b.return_pct));
+      if (me && me.return_pct != null && rets.length) {
+        const all = [...rets, Number(me.return_pct)].sort((a, b) => b - a);
+        setRank({ rank: all.indexOf(Number(me.return_pct)) + 1, n: rets.length + 1 });
+      }
+    })();
+    return () => { dead = true; };
+  }, [user.id]);
+  const prof = profileOf(data.profile);
+  if (row === null) return <Skeleton lines={2} />;
+  return (
+    <PortfolioCard name={data.userName} username={data.username} mascot={prof ? prof.mascot : "🙂"} style={prof ? prof.label : ""}
+      ytd={row.return_pct != null ? Number(row.return_pct) : null} rank={rank.rank} n={rank.n}
+      top={Array.isArray(row.top_holdings) ? row.top_holdings : []} spark={row.spark} score={row.score} />
+  );
+}
 
 function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onProfile, onPhilosophy, onShare, active, totals, onBack, backLabel, onSignOut }) {
   const prof = profileOf(data.profile);
@@ -1296,6 +1344,9 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
         </button>
         <span className="text-[11px] text-slate-400">Changes save automatically</span>
       </div>
+
+      {/* your RichR card — what friends see */}
+      <OwnPortfolioCard user={user} data={data} active={active} cur={cur} />
 
       {/* identity card */}
       <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
@@ -1440,7 +1491,7 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
 }
 
 /* ================= HOME ================= */
-function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, goImport, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, priceDataAt, onAddGoal, onUpdateGoal, onRemoveGoal, onBenchmark, onScoreLog, user, goFriends, onDismissOnboarding, onOpenProfile }) {
+function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, goImport, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, priceDataAt, onAddGoal, onUpdateGoal, onRemoveGoal, onBenchmark, onScoreLog, user, goFriends, onDismissOnboarding, onOpenProfile, onRankLog }) {
   const [ytd, setYtd] = useState({ m: null, b: null });
   const [social, setSocial] = useState(null); // { mine, friendsAvg, rank, n, shared, friendsCount }
   const [streak, setStreak] = useState(0);
@@ -1546,7 +1597,7 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
   })();
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-10">
       <IdentityStrip data={data} active={active} cur={cur} fx={fx} social={social} streak={streak} onProfile={onOpenProfile} />
       {data.portfolios.length > 1 && switcher}
       {/* ===== anchor: the number, then performance, then the graph ===== */}
@@ -1569,9 +1620,9 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
           </div>
           <div className="flex items-center gap-1.5">
             <button onClick={onToggleAuto} title={staleness.title}
-              className={`flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full border transition ${
+              className={`h-7 flex items-center gap-1.5 text-[10px] font-semibold px-2.5 rounded-full border transition ${
                 staleness.stale ? "bg-amber-50 text-amber-700 border-amber-200"
-                  : autoRefresh ? "bg-white text-emerald-700 border-emerald-200" : "bg-white text-slate-400 border-slate-200"}`}>
+                  : autoRefresh ? "bg-white text-slate-500 border-slate-200" : "bg-white text-slate-400 border-slate-200"}`}>
               <span className={`w-1.5 h-1.5 rounded-full ${staleness.stale ? "bg-amber-400" : autoRefresh ? "bg-emerald-500 animate-pulse" : "bg-slate-300"}`} />
               {staleness.stale ? staleness.label : autoRefresh ? "Live" : "Live off"}
             </button>
@@ -1582,11 +1633,11 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
           </div>
         </div>
 
-        <div className="mt-2 num-hero text-slate-900">{money(totals.value, cur)}</div>
-        <div className={`mt-2 flex items-center gap-1.5 text-base font-semibold tabular-nums ${flat ? "text-slate-500" : up ? "text-emerald-600" : "text-rose-500"}`}>
-          {flat ? <Activity size={16} /> : up ? <TrendingUp size={16} /> : <TrendingDown size={16} />}
-          {up ? "+" : ""}{money(totals.pl, cur)} ({pct(totals.plPct)})
-          <span className="text-slate-400 font-medium text-sm">all time</span>
+        <div className="mt-3 num-hero text-slate-900">{money(totals.value, cur)}</div>
+        <div className={`mt-2.5 flex items-baseline gap-2 tabular-nums ${flat ? "text-slate-500" : up ? "text-emerald-600" : "text-rose-500"}`}>
+          <span className="text-2xl font-extrabold">{pct(totals.plPct)}</span>
+          <span className="text-base font-semibold">{up ? "+" : ""}{money(totals.pl, cur)}</span>
+          <span className="text-xs font-medium text-slate-400 ml-0.5">all time</span>
         </div>
         {(staleness.stale) && (
           <p className="text-[11px] text-amber-600 mt-1">Prices are {staleness.age} old — tap ↻ to update.</p>
@@ -1598,31 +1649,15 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
         </div>
       </section>
 
-      {/* ===== the three facts, as text not boxes ===== */}
-      <section className="grid grid-cols-3 gap-4 border-t border-slate-100 pt-5">
-        <div>
-          <div className="section-title">Performance</div>
-          <div className={`mt-1 text-lg font-bold tabular-nums ${ytd.m == null ? "text-slate-300" : ytd.m >= 0 ? "text-emerald-600" : "text-rose-500"}`}>{ytd.m != null ? pct(ytd.m) : "—"}</div>
-          <div className="text-[11px] text-slate-400">YTD{ytd.b != null ? ` · ${benchOf(data).short} ${pct(ytd.b)}` : ""}</div>
-        </div>
-        <button onClick={goFriends} className="text-left">
-          <div className="section-title">Ranking</div>
-          <div className="mt-1 text-lg font-bold text-slate-800 tabular-nums">
-            {social && social.rank != null ? `#${social.rank} of ${social.n}` : "—"}
+      {/* ===== standing among friends — the RichR bit ===== */}
+      <section className="border-t border-slate-100 pt-6">
+        <Standing social={social} ytd={ytd} benchLabel={benchOf(data).short} avatars={social && social.avatars} onClick={goFriends} />
+        {best && (
+          <div className="mt-4 text-sm text-slate-500">
+            Best performer <span className="font-semibold text-slate-800">{best.h.ticker}</span>{" "}
+            <span className={`font-semibold tabular-nums ${best.r >= 0 ? "text-emerald-600" : "text-rose-500"}`}>{pct(best.r)}</span>
           </div>
-          <div className="text-[11px] text-slate-400">
-            {social && social.rank != null ? "friends this year" : social && social.friendsCount === 0 ? "add friends to rank" : social && !social.shared ? "share to get ranked" : "friends"}
-          </div>
-        </button>
-        <div>
-          <div className="section-title">Best performer</div>
-          {best ? (
-            <>
-              <div className="mt-1 text-lg font-bold text-slate-800 truncate">{best.h.ticker}</div>
-              <div className={`text-[11px] font-semibold tabular-nums ${best.r >= 0 ? "text-emerald-600" : "text-rose-500"}`}>{pct(best.r)}</div>
-            </>
-          ) : <div className="mt-1 text-lg font-bold text-slate-300">—</div>}
-        </div>
+        )}
       </section>
 
       {!data.onboardingDismissed && (
@@ -1646,7 +1681,19 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
               onYtd={(m, b) => setYtd({ m, b })} bare />
           </section>
           <FriendsBenchmark user={user} myYtd={ytd.m} benchYtd={ytd.b} benchLabel={benchOf(data).label} onGoFriends={goFriends}
-            onSummary={setSocial} hidden />
+            onSummary={(sm) => {
+              // rank change vs the last rank recorded on a previous day
+              const today = new Date().toISOString().slice(0, 10);
+              const log = data.rankLog || [];
+              const prev = [...log].reverse().find((e) => e.d !== today);
+              const rankDelta = sm.rank != null && prev && prev.rank != null ? prev.rank - sm.rank : null;
+              setSocial({ ...sm, rankDelta });
+              if (sm.rank != null && onRankLog) {
+                const last = log[log.length - 1];
+                if (!last || last.d !== today) onRankLog([...log, { d: today, rank: sm.rank }].slice(-60));
+                else if (last.rank !== sm.rank) onRankLog([...log.slice(0, -1), { d: today, rank: sm.rank }]);
+              }
+            }} hidden />
         </div>
 
         <div className="space-y-8">
@@ -1703,6 +1750,120 @@ function IdentityStrip({ data, active, cur, fx, social, streak, onProfile }) {
           {data.username ? `@${data.username}` : "no username yet"}
           {top.length ? " · " + top.map((h) => `${h.ticker} ${total > 0 ? Math.round((holdingValue(h, cur, fx) / total) * 100) : 0}%`).join(" · ") : ""}
         </div>
+      </div>
+    </button>
+  );
+}
+
+/* Tiny inline sparkline (SVG) for the portfolio card. */
+function Sparkline({ points, width = 120, height = 32, up = true }) {
+  const pts = (points || []).filter((v) => typeof v === "number" && isFinite(v));
+  if (pts.length < 2) return <div style={{ width, height }} />;
+  const min = Math.min(...pts), max = Math.max(...pts), span = max - min || 1;
+  const d = pts.map((v, i) => `${(i / (pts.length - 1)) * width},${height - 2 - ((v - min) / span) * (height - 4)}`).join(" ");
+  const col = up ? "#059669" : "#f43f5e";
+  return (
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="shrink-0">
+      <polyline points={d} fill="none" stroke={col} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
+const MEDAL = (rank) => (rank === 1 ? "🥇" : rank === 2 ? "🥈" : rank === 3 ? "🥉" : null);
+
+/* ===== The RichR Portfolio Card =====
+   One signature component: who, how they're doing, where they stand, what
+   they hold, and the shape of the last few weeks. Percentages only. Used
+   on your Profile, friends' profiles, the public page and the share image. */
+function PortfolioCard({ name, username, mascot, ytd, rank, n, top, spark, score, style, streak, compact = false, onClick }) {
+  const up = (ytd || 0) >= 0;
+  const medal = MEDAL(rank);
+  const Wrapper = onClick ? "button" : "div";
+  return (
+    <Wrapper onClick={onClick} className={`w-full text-left bg-white rounded-2xl border border-slate-100 ${compact ? "p-4" : "p-5"} relative overflow-hidden`}>
+      <div className="flex items-start gap-3">
+        <div className="w-12 h-12 rounded-full bg-slate-50 flex items-center justify-center text-2xl shrink-0">{mascot || "👤"}</div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="font-bold text-slate-900 truncate">{name || (username ? `@${username}` : "Investor")}</div>
+            {streak >= 2 && <span className="text-[10px] font-bold text-orange-700 bg-orange-50 px-1.5 py-0.5 rounded">🔥 {streak}-wk streak</span>}
+          </div>
+          <div className="text-xs text-slate-400 truncate">{username ? `@${username}` : ""}{style ? ` · ${style}` : ""}</div>
+        </div>
+        <Sparkline points={spark} up={up} width={compact ? 84 : 110} height={compact ? 28 : 36} />
+      </div>
+
+      <div className={`mt-3 flex items-end justify-between gap-3`}>
+        <div>
+          <div className={`${compact ? "text-2xl" : "text-3xl"} font-extrabold tabular-nums leading-none ${ytd == null ? "text-slate-300" : up ? "text-emerald-600" : "text-rose-500"}`}>
+            {ytd != null ? pct(ytd) : "—"} <span className="text-sm font-semibold text-slate-400">YTD {ytd != null ? (up ? "↗" : "↘") : ""}</span>
+          </div>
+          <div className="mt-1.5 text-sm font-semibold text-slate-700 flex items-center gap-1.5">
+            {rank != null ? (<><span>{medal || `#${rank}`}</span> {medal ? `#${rank}` : ""} among {n != null ? n : ""} friends</>) : <span className="text-slate-400">not ranked yet</span>}
+          </div>
+        </div>
+        {score != null && (
+          <div className="text-right">
+            <div className={`text-lg font-extrabold tabular-nums ${scoreTone(score)}`}>{score}</div>
+            <div className="text-[10px] font-semibold text-slate-400">RichR Score</div>
+          </div>
+        )}
+      </div>
+
+      {Array.isArray(top) && top.length > 0 && (
+        <div className="mt-3 inline-flex items-center gap-1 text-[12px] font-mono font-semibold text-slate-600 bg-slate-50 rounded-lg px-2.5 py-1.5 max-w-full overflow-hidden">
+          {top.slice(0, 3).map((h, i) => (
+            <span key={h.ticker} className="whitespace-nowrap">{i > 0 && <span className="text-slate-300 mx-1">·</span>}{h.ticker} {Math.round(h.pct)}%</span>
+          ))}
+        </div>
+      )}
+    </Wrapper>
+  );
+}
+
+/* ===== Standing: the social block on Home =====
+   "#2 among friends ↑1 · +18.7% YTD · You · Friends · S&P 500" */
+function Standing({ social, ytd, benchLabel, avatars, onClick }) {
+  const rank = social && social.rank;
+  const delta = social && social.rankDelta;
+  const medal = MEDAL(rank);
+  return (
+    <button onClick={onClick} className="w-full text-left">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-xl font-extrabold text-slate-900 flex items-center gap-2">
+            {rank != null ? (
+              <>
+                <span>{medal || "🏅"}</span>
+                <span>#{rank} among friends</span>
+                {delta != null && delta !== 0 && (
+                  <span className={`text-sm font-bold ${delta > 0 ? "text-emerald-600" : "text-rose-500"}`}>{delta > 0 ? "↑" : "↓"}{Math.abs(delta)}</span>
+                )}
+              </>
+            ) : (
+              <span className="text-slate-400 text-base font-semibold">
+                {social && social.friendsCount === 0 ? "Add friends to get ranked" : social && !social.shared ? "Share to get ranked" : "Comparing with friends…"}
+              </span>
+            )}
+          </div>
+          <div className={`text-lg font-bold tabular-nums ${ytd.m == null ? "text-slate-300" : ytd.m >= 0 ? "text-emerald-600" : "text-rose-500"}`}>
+            {ytd.m != null ? pct(ytd.m) : "—"} <span className="text-xs font-semibold text-slate-400">YTD</span>
+          </div>
+        </div>
+        {avatars && avatars.length > 0 && (
+          <div className="flex -space-x-2 shrink-0">
+            {avatars.slice(0, 4).map((a, i) => (
+              <div key={i} className="w-8 h-8 rounded-full bg-white border-2 border-white shadow-sm flex items-center justify-center text-base" style={{ background: "#f8fafc" }}>{a}</div>
+            ))}
+            {avatars.length > 4 && <div className="w-8 h-8 rounded-full bg-slate-100 border-2 border-white text-[10px] font-bold text-slate-500 flex items-center justify-center">+{avatars.length - 4}</div>}
+          </div>
+        )}
+      </div>
+      <div className="mt-2 inline-flex items-center gap-1 text-[12px] font-mono font-semibold text-slate-600 bg-slate-50 rounded-lg px-2.5 py-1.5 tabular-nums">
+        <span>You {(social && social.mine != null) ? pct(social.mine) : ytd.m != null ? pct(ytd.m) : "—"}</span>
+        <span className="text-slate-300 mx-1">·</span>
+        <span>Friends {social && social.friendsAvg != null ? pct(social.friendsAvg) : "—"}</span>
+        <span className="text-slate-300 mx-1">·</span>
+        <span>{benchLabel} {ytd.b != null ? pct(ytd.b) : "—"}</span>
       </div>
     </button>
   );
@@ -2150,13 +2311,13 @@ function FriendsBenchmark({ user, myYtd, benchYtd, benchLabel, onGoFriends, onSu
         const [{ data: out }, { data: inc }, { data: board }] = await Promise.all([
           supabase.from("friends").select("friend_id").eq("user_id", user.id),
           supabase.from("friends").select("user_id").eq("friend_id", user.id),
-          supabase.from("leaderboard").select("user_id, name, return_pct"),
+          supabase.from("leaderboard").select("user_id, name, return_pct, profile"),
         ]);
         if (dead) return;
         const incSet = new Set((inc || []).map((r) => r.user_id));
         const mutual = new Set((out || []).map((r) => r.friend_id).filter((id) => incSet.has(id)));
         const rs = (board || []).filter((b) => b.return_pct != null && (mutual.has(b.user_id) || b.user_id === user.id))
-          .map((b) => ({ userId: b.user_id, name: b.name, ret: Number(b.return_pct) }));
+          .map((b) => ({ userId: b.user_id, name: b.name, ret: Number(b.return_pct), mascot: (profileOf(b.profile) || {}).mascot || "🙂" }));
         setRows(rs);
       } catch (e) { if (!dead) setRows([]); }
     })();
@@ -2173,7 +2334,7 @@ function FriendsBenchmark({ user, myYtd, benchYtd, benchLabel, onGoFriends, onSu
     rank = all.indexOf(mine) + 1;
   }
   useEffect(() => {
-    if (rows && onSummary) onSummary({ mine, friendsAvg, rank, n: friends.length + 1, shared: !!meRow, friendsCount: friends.length });
+    if (rows && onSummary) onSummary({ mine, friendsAvg, rank, n: friends.length + 1, shared: !!meRow, friendsCount: friends.length, avatars: friends.map((f) => f.mascot) });
   }, [rows, mine, friendsAvg, rank]);
   if (rows === null || hidden) return null;
   const Cell = ({ label, v, tone, hint }) => (
@@ -2876,7 +3037,7 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpe
     try {
       const { data: rows, error: bErr } = await supabase
         .from("leaderboard")
-        .select("user_id, name, profile, portfolio, return_pct, holdings, top_holdings, realized_pct, avg_days, win_rate, philosophy, score, score_parts")
+        .select("user_id, name, profile, portfolio, return_pct, holdings, top_holdings, realized_pct, avg_days, win_rate, philosophy, score, score_parts, spark")
         .order("return_pct", { ascending: false, nullsFirst: false })
         .limit(100);
       if (bErr) throw bErr;
@@ -2896,6 +3057,7 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpe
         philosophy: r.philosophy || "",
         score: r.score != null ? Number(r.score) : null,
         scoreParts: r.score_parts || null,
+        spark: Array.isArray(r.spark) ? r.spark : null,
       })));
       setOnBoard((rows || []).some((r) => r.user_id === user.id));
     } catch (e) {
@@ -3237,7 +3399,7 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpe
               : i === 0 ? "bg-amber-100 text-amber-600" : i === 1 ? "bg-slate-200 text-slate-500" : i === 2 ? "bg-orange-100 text-orange-500" : "bg-slate-100 text-slate-400";
             const sub = [prof ? prof.label : null, r.portfolio || null, r.holdings != null ? `${r.holdings} positions` : null].filter(Boolean).join(" · ");
             return (
-              <div key={r.userId} onClick={() => setViewing(r)}
+              <div key={r.userId} onClick={() => setViewing({ ...r, rank: hasReturn ? i + 1 : null, rankN: shown.filter((x) => x.returnPct != null).length })}
                 className={`bg-white rounded-2xl p-4 flex items-center gap-3 shadow-sm border cursor-pointer active:bg-slate-50 ${me ? "border-emerald-300" : "border-slate-100"}`}>
                 <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-sm ${medal}`}>{hasReturn ? i + 1 : "–"}</div>
                 <div className="flex-1 min-w-0">
@@ -5266,15 +5428,9 @@ function ProfileSheet({ r, me, onClose }) {
           </button>
         </div>
         <div className="flex-1 overflow-y-auto overscroll-contain p-5 space-y-4">
-          <div className="flex items-center gap-3">
-            <div className="w-12 h-12 rounded-2xl bg-slate-100 flex items-center justify-center text-2xl">{prof ? prof.mascot : "👤"}</div>
-            <div className="min-w-0">
-              <div className="font-bold text-lg text-slate-700 truncate">
-                {r.name} {me && <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-full ml-1">YOU</span>}
-              </div>
-              <div className="text-xs text-slate-400">{prof ? prof.label : "Investor"}{r.portfolio ? ` · ${r.portfolio}` : ""}</div>
-            </div>
-          </div>
+          <PortfolioCard name={r.name} mascot={prof ? prof.mascot : "👤"} style={prof ? prof.label : "Investor"}
+            ytd={r.returnPct} rank={r.rank} n={r.rankN} top={r.topHoldings || []} spark={r.spark} score={r.score} />
+          {me && <div className="text-[10px] font-bold text-emerald-600">THIS IS YOU — what friends see</div>}
 
           {r.philosophy && (
             <div>
@@ -6091,7 +6247,7 @@ function MembersSheet({ group, members, names, user, isOwner, mutuals, onAdd, on
 /* Draws an "investing card" on a canvas — percentages only — and hands it
    to the phone's share sheet (WhatsApp, Instagram, Discord…) or downloads
    it. Everything is computed on-device from what the user already shares. */
-async function buildShareCardBlob({ username, name, mascot, ytd, rank, n, holdings, top, score, isPublic, style }) {
+async function buildShareCardBlob({ username, name, mascot, ytd, rank, n, holdings, top, score, isPublic, style, spark }) {
   const W = 1080, H = 1350;
   const c = document.createElement("canvas"); c.width = W; c.height = H;
   const x = c.getContext("2d");
@@ -6116,6 +6272,16 @@ async function buildShareCardBlob({ username, name, mascot, ytd, rank, n, holdin
   x.fillStyle = up ? "#34d399" : "#fb7185"; x.font = font(800, 150);
   x.fillText(ytd != null ? `${up ? "+" : "−"}${Math.abs(ytd).toFixed(1)}%` : "—", 80, 520);
   x.fillStyle = "rgba(255,255,255,0.7)"; x.font = font(600, 30); x.fillText("YTD · time-weighted return", 84, 570);
+  // sparkline (last weeks, % change) top-right
+  const sp = (spark || []).filter((v) => typeof v === "number");
+  if (sp.length >= 2) {
+    const L = 640, T = 400, Wd = 360, Hd = 150;
+    const mn = Math.min(...sp), mx = Math.max(...sp), span = mx - mn || 1;
+    x.beginPath();
+    sp.forEach((v, i) => { const px = L + (i / (sp.length - 1)) * Wd, py = T + Hd - ((v - mn) / span) * Hd; i ? x.lineTo(px, py) : x.moveTo(px, py); });
+    x.strokeStyle = up ? "#34d399" : "#fb7185"; x.lineWidth = 6; x.lineJoin = "round"; x.lineCap = "round"; x.stroke();
+    x.fillStyle = "rgba(255,255,255,0.45)"; x.font = font(600, 22); x.textAlign = "right"; x.fillText("last 6 weeks", 1000, T + Hd + 34); x.textAlign = "left";
+  }
   // rank line
   x.fillStyle = "#ffffff"; x.font = font(700, 40);
   x.fillText(rank != null ? `#${rank} among ${n} friends` : "Comparing with friends", 80, 650);
@@ -6156,7 +6322,7 @@ async function shareProfileCard({ user, data, active, cur, fx, say, setPreview }
   try {
     if (document.fonts && document.fonts.load) await document.fonts.load("800 50px Inter").catch(() => {});
     const [{ data: me }, { data: out }, { data: inc }, { data: board }, { data: prof }] = await Promise.all([
-      supabase.from("leaderboard").select("return_pct, holdings, top_holdings, score, name, profile").eq("user_id", user.id).maybeSingle(),
+      supabase.from("leaderboard").select("return_pct, holdings, top_holdings, score, name, profile, spark").eq("user_id", user.id).maybeSingle(),
       supabase.from("friends").select("friend_id").eq("user_id", user.id),
       supabase.from("friends").select("user_id").eq("friend_id", user.id),
       supabase.from("leaderboard").select("user_id, return_pct"),
@@ -6180,6 +6346,7 @@ async function shareProfileCard({ user, data, active, cur, fx, say, setPreview }
       score: share.score && me && me.score != null ? me.score : null,
       isPublic: !!(prof && prof.is_public),
       style: p ? p.label : "Investor",
+      spark: me && Array.isArray(me.spark) ? me.spark : null,
     });
     const file = new File([blob], `richr-${data.username}.png`, { type: "image/png" });
     if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -6268,6 +6435,9 @@ export function PublicProfile({ username }) {
   };
   return shell(
     <div className="space-y-4">
+      <PortfolioCard name={p.name} username={p.username} mascot={prof ? prof.mascot : "👤"} style={prof ? prof.label : ""}
+        ytd={p.return_pct != null ? Number(p.return_pct) : null} rank={null} top={Array.isArray(p.top_holdings) ? p.top_holdings : []}
+        spark={Array.isArray(p.spark) ? p.spark : null} score={p.score} />
       <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
         <div className="flex items-center gap-3">
           <div className="w-12 h-12 rounded-2xl bg-emerald-50 flex items-center justify-center text-2xl">{prof ? prof.mascot : "👤"}</div>
