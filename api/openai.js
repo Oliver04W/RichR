@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { requireUser, unauthorized } from "./_auth.js";
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -41,6 +42,8 @@ export default async function handler(req, res) {
       message: "OpenAI endpoint ready",
     });
   }
+
+  if (!(await requireUser(req))) return unauthorized(res);
 
   try {
     const messages = req.body?.messages;
