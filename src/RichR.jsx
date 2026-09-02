@@ -3,7 +3,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   Plus, RefreshCw, Trash2, Users, BookOpen, Home, Briefcase, Check, X,
   Clock, HelpCircle, Pencil, Trophy, Share2, TrendingUp, TrendingDown,
-  ChevronDown, ChevronLeft, Target, Sparkles, Flag, Activity, Calendar, Camera, Upload, Search, Star, ExternalLink, User
+  ChevronDown, ChevronLeft, ChevronRight, Lock, Target, Sparkles, Flag, Activity, Calendar, Camera, Upload, Search, Star, ExternalLink, User
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine
@@ -251,6 +251,96 @@ const socialStats = (p, cur, fx) => {
   const winRate = total ? Math.round((winners / total) * 100) : null;
   return { realizedPct, avgDays, winRate, closedCount: closed.length };
 };
+
+/* ---------- sharing controls ----------
+   Everything a friend can see about you goes through ONE row in the
+   leaderboard table, written from this device. Each item below is a
+   switch: off means the field is written as NULL, so the data never
+   leaves your phone. Settings live in your synced user document
+   (data.share); a missing key means "on" so existing users keep the
+   behaviour they already agreed to. Your name is always shared — it's
+   how friends find you on the board. */
+const SHARE_ITEMS = [
+  { id: "returnPct",     label: "Return %",              hint: "Time-weighted YTD return — the leaderboard number" },
+  { id: "realized",      label: "Realized return",       hint: "Return on positions you've closed" },
+  { id: "winRate",       label: "Win rate",              hint: "Share of positions that are up" },
+  { id: "avgHold",       label: "Average hold time",     hint: "How long you keep positions, in days" },
+  { id: "positions",     label: "Number of positions",   hint: "How many holdings you have" },
+  { id: "topHoldings",   label: "Top-10 holdings",       hint: "Tickers and their weight in your portfolio" },
+  { id: "badge",         label: "Investor badge",        hint: "Your investor-type mascot and label" },
+  { id: "portfolioName", label: "Portfolio name",        hint: "The name of the portfolio you share" },
+  { id: "philosophy",    label: "Investing philosophy",  hint: "The text on your profile" },
+];
+const shareOf = (data) => {
+  const s = (data && data.share) || {};
+  const out = {};
+  SHARE_ITEMS.forEach((it) => { out[it.id] = s[it.id] !== false; });
+  return out;
+};
+
+/* Build + upsert my leaderboard row, honouring the sharing switches.
+   Used by the Friends tab (Share / Update share) and by the Profile tab
+   (auto-refresh when a switch changes and I'm already on the board).
+   Returns { twrUsed } or throws. */
+async function publishBoard({ data, active, totals, cur, user }) {
+  const share = shareOf(data);
+  const fx = data.fx || DEFAULT_FX;
+  const totalVal = active.holdings.reduce((s, h) => s + holdingValue(h, cur, fx), 0);
+  const topHoldings = byValueDesc(active.holdings, cur, fx)
+    .slice(0, 10)
+    .map((h) => ({
+      ticker: h.ticker,
+      pct: totalVal > 0 ? Number(((holdingValue(h, cur, fx) / totalVal) * 100).toFixed(1)) : 0,
+    }));
+  /* Fair leaderboard number: TIME-WEIGHTED return (YTD), computed
+     server-side from real price history. Adding money or buying more
+     can't inflate it — each day's return is measured after stripping
+     that day's cash flow. Falls back to the simple cost-based return
+     only if the performance service is unavailable. Skipped entirely
+     when return % isn't shared — no need to send holdings anywhere. */
+  let returnPct = Number(totals.plPct.toFixed(2));
+  let twrUsed = false;
+  if (share.returnPct) {
+    try {
+      const { data: perf, error: pe } = await supabase.functions.invoke("portfolio-performance", {
+        body: {
+          display: cur,
+          holdings: active.holdings.map((h) => ({
+            ticker: h.ticker, shares: h.shares, buyPrice: h.buyPrice,
+            buyDate: h.buyDate || null, currency: h.currency || cur,
+          })),
+          closed: (active.closed || []).map((h) => ({
+            ticker: h.ticker, shares: h.shares, buyPrice: h.buyPrice,
+            buyDate: h.buyDate || null, sellPrice: h.sellPrice,
+            sellDate: h.sellDate || null, currency: h.currency || cur,
+          })),
+        },
+      });
+      const t = (!pe && perf && perf.ok)
+        ? (perf.twrYtd != null ? perf.twrYtd : perf.twrAll)
+        : null;
+      if (t != null && isFinite(t)) { returnPct = Number(Number(t).toFixed(2)); twrUsed = true; }
+    } catch (_) { /* fall back to simple return */ }
+  }
+  const stats = socialStats(active, cur, fx);
+  const row = {
+    user_id: user.id,
+    name: data.userName.trim(),
+    profile: share.badge ? (data.profile || "") : "",
+    portfolio: share.portfolioName ? active.name : "",
+    return_pct: share.returnPct ? returnPct : null,
+    holdings: share.positions ? active.holdings.length : null,
+    top_holdings: share.topHoldings ? topHoldings : null,
+    realized_pct: share.realized && stats.realizedPct != null ? Number(stats.realizedPct.toFixed(2)) : null,
+    avg_days: share.avgHold ? stats.avgDays : null,
+    win_rate: share.winRate ? stats.winRate : null,
+    philosophy: share.philosophy ? (data.philosophy || "").slice(0, 280) : "",
+    updated_at: new Date().toISOString(),
+  };
+  const { error } = await supabase.from("leaderboard").upsert(row);
+  if (error) throw error;
+  return { twrUsed };
+}
 
 const fxConvert = (amount, from, to, fx) => {
   if (!from || !to || from === to) return amount;
@@ -746,7 +836,8 @@ export default function RichR({ user, onSignOut }) {
         {tab === "research" && <ResearchTab cur={cur} say={say} onUpsert={upsertHolding}
           companyInfo={data.companyInfo || {}} onSaveInfo={saveCompanyInfo}
           watchlist={data.watchlist || []} onWatch={addWatch} onUnwatch={removeWatchByTicker} />}
-        {tab === "friends" && <FriendsTab data={data} active={active} totals={totals} cur={cur} say={say} user={user} />}
+        {tab === "friends" && <FriendsTab data={data} active={active} totals={totals} cur={cur} say={say} user={user}
+          onEditSharing={() => setTab("profile")} />}
         {tab === "profile" && (
           <ProfileTab data={data} user={user} say={say}
             onName={(userName) => patch(() => ({ userName }))}
@@ -754,6 +845,8 @@ export default function RichR({ user, onSignOut }) {
             cur={cur} onCurrency={(currency) => patch(() => ({ currency }))}
             onProfile={(profile) => patch(() => ({ profile }))}
             onPhilosophy={(philosophy) => patch(() => ({ philosophy }))}
+            onShare={(share) => patch(() => ({ share }))}
+            active={active} totals={totals}
             onSignOut={onSignOut} />
         )}
       </div>
@@ -786,8 +879,37 @@ export default function RichR({ user, onSignOut }) {
 }
 
 /* ================= PROFILE ================= */
-function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onProfile, onPhilosophy, onSignOut }) {
+function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onProfile, onPhilosophy, onShare, active, totals, onSignOut }) {
   const prof = profileOf(data.profile);
+  const share = shareOf(data);
+  const [syncing, setSyncing] = useState(false);
+  const syncTimer = useRef(null);
+
+  /* Flip one sharing switch. Saved instantly to your synced document;
+     if you're already on the leaderboard, your row is re-published a
+     moment later so friends stop (or start) seeing that item right
+     away — no need to go back and tap "Update share". */
+  const toggleShare = (id) => applyShare({ ...share, [id]: !share[id] });
+  const applyShare = (next) => {
+    onShare(next);
+    clearTimeout(syncTimer.current);
+    syncTimer.current = setTimeout(async () => {
+      const { data: row } = await supabase
+        .from("leaderboard").select("user_id").eq("user_id", user.id).maybeSingle();
+      if (!row) return; // not on the board — nothing to update
+      if (!active || !totals) return;
+      setSyncing(true);
+      try {
+        await publishBoard({ data: { ...data, share: next }, active, totals, cur, user });
+        say("Updated what your friends can see.");
+      } catch (e) {
+        say("Saved — but couldn't refresh your leaderboard row. Tap Update share in Friends.");
+      }
+      setSyncing(false);
+    }, 900);
+  };
+  useEffect(() => () => clearTimeout(syncTimer.current), []);
+  const sharedCount = SHARE_ITEMS.filter((it) => share[it.id]).length;
 
   const claimUsername = async (raw) => {
     const u = (raw || "").trim().toLowerCase().replace(/^@/, "");
@@ -857,7 +979,48 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
           onBlur={(e) => onPhilosophy(e.target.value.trim().slice(0, 280))}
           rows={3} maxLength={280}
           className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm resize-none" />
-        <p className="text-[10px] text-slate-400 mt-1">Up to 280 characters. Shared with friends when you tap Share.</p>
+        <p className="text-[10px] text-slate-400 mt-1">Up to 280 characters. Shown to friends only if “Investing philosophy” is on below.</p>
+      </div>
+
+      {/* sharing card — what friends can see */}
+      <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="font-bold text-slate-700 flex items-center gap-2">
+            <Share2 size={16} className="text-emerald-500" /> What friends can see
+          </h3>
+          <span className="text-[11px] font-semibold text-slate-400">
+            {syncing ? "Updating…" : `${sharedCount}/${SHARE_ITEMS.length} on`}
+          </span>
+        </div>
+        <p className="text-[11px] text-slate-400 leading-relaxed mb-3">
+          Your name is always shown so friends can find you. Everything else is up to you — items that are off never leave your device.
+          Amounts, buy prices and theses are never shared.
+        </p>
+        <div className="divide-y divide-slate-100">
+          {SHARE_ITEMS.map((it) => {
+            const on = share[it.id];
+            return (
+              <div key={it.id} className="flex items-center justify-between gap-3 py-2.5">
+                <div className="min-w-0">
+                  <div className={`text-sm font-semibold ${on ? "text-slate-700" : "text-slate-400"}`}>{it.label}</div>
+                  <p className="text-[11px] text-slate-400 leading-snug">{it.hint}</p>
+                </div>
+                <button onClick={() => toggleShare(it.id)} aria-pressed={on} aria-label={`${it.label}: ${on ? "shared" : "private"}`}
+                  className={`w-11 h-6 rounded-full p-0.5 shrink-0 transition ${on ? "bg-emerald-500" : "bg-slate-200"}`}>
+                  <span className={`block w-5 h-5 bg-white rounded-full shadow transform transition ${on ? "translate-x-5" : ""}`} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex gap-2 mt-3">
+          <button onClick={() => { const all = {}; SHARE_ITEMS.forEach((it) => { all[it.id] = true; }); applyShare(all); }}
+            disabled={sharedCount === SHARE_ITEMS.length}
+            className="flex-1 bg-emerald-50 text-emerald-700 rounded-xl py-2 text-xs font-semibold disabled:opacity-40">Share everything</button>
+          <button onClick={() => { const none = {}; SHARE_ITEMS.forEach((it) => { none[it.id] = false; }); applyShare(none); }}
+            disabled={sharedCount === 0}
+            className="flex-1 bg-slate-100 text-slate-600 rounded-xl py-2 text-xs font-semibold disabled:opacity-40">Only my name</button>
+        </div>
       </div>
 
       {/* account card */}
@@ -1488,7 +1651,9 @@ function ThesesTab({ active, cur, fx, onVerdict }) {
 }
 
 /* ================= FRIENDS ================= */
-function FriendsTab({ data, active, totals, cur, say, user }) {
+function FriendsTab({ data, active, totals, cur, say, user, onEditSharing }) {
+  const share = shareOf(data);
+  const sharedCount = SHARE_ITEMS.filter((it) => share[it.id]).length;
   const [board, setBoard] = useState(null);
   const [friends, setFriends] = useState(null);
   const [incoming, setIncoming] = useState(null); // everyone who has added you (mutual or not)
@@ -1581,17 +1746,19 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
       const { data: rows, error: bErr } = await supabase
         .from("leaderboard")
         .select("user_id, name, profile, portfolio, return_pct, holdings, top_holdings, realized_pct, avg_days, win_rate, philosophy")
-        .order("return_pct", { ascending: false })
+        .order("return_pct", { ascending: false, nullsFirst: false })
         .limit(100);
       if (bErr) throw bErr;
+      /* null = that person chose not to share the field. Keep it null
+         (not 0 / []) so the UI can say "private" instead of a fake value. */
       setBoard((rows || []).map((r) => ({
         userId: r.user_id,
         name: r.name || "anon",
         profile: r.profile || "",
         portfolio: r.portfolio || "",
-        returnPct: Number(r.return_pct) || 0,
-        holdings: r.holdings || 0,
-        topHoldings: Array.isArray(r.top_holdings) ? r.top_holdings : [],
+        returnPct: r.return_pct != null ? Number(r.return_pct) : null,
+        holdings: r.holdings != null ? Number(r.holdings) : null,
+        topHoldings: Array.isArray(r.top_holdings) ? r.top_holdings : null,
         realizedPct: r.realized_pct != null ? Number(r.realized_pct) : null,
         avgDays: r.avg_days != null ? Number(r.avg_days) : null,
         winRate: r.win_rate != null ? Number(r.win_rate) : null,
@@ -1652,71 +1819,13 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
   const publish = async () => {
     if (!data.userName.trim()) { say("Set your name (top right) before sharing."); return; }
     setBusy(true);
-    const fx = data.fx || DEFAULT_FX;
-    const totalVal = active.holdings.reduce((s, h) => s + holdingValue(h, cur, fx), 0);
-    const topHoldings = byValueDesc(active.holdings, cur, fx)
-      .slice(0, 10)
-      .map((h) => ({
-        ticker: h.ticker,
-        pct: totalVal > 0 ? Number(((holdingValue(h, cur, fx) / totalVal) * 100).toFixed(1)) : 0,
-      }));
-    /* Fair leaderboard number: TIME-WEIGHTED return (YTD), computed
-       server-side from real price history. Adding money or buying more
-       can't inflate it — each day's return is measured after stripping
-       that day's cash flow. Falls back to the simple cost-based return
-       only if the performance service is unavailable. */
-    let returnPct = Number(totals.plPct.toFixed(2));
-    let twrUsed = false;
     try {
-      const { data: perf, error: pe } = await supabase.functions.invoke("portfolio-performance", {
-        body: {
-          display: cur,
-          holdings: active.holdings.map((h) => ({
-            ticker: h.ticker, shares: h.shares, buyPrice: h.buyPrice,
-            buyDate: h.buyDate || null, currency: h.currency || cur,
-          })),
-          closed: (active.closed || []).map((h) => ({
-            ticker: h.ticker, shares: h.shares, buyPrice: h.buyPrice,
-            buyDate: h.buyDate || null, sellPrice: h.sellPrice,
-            sellDate: h.sellDate || null, currency: h.currency || cur,
-          })),
-        },
-      });
-      const t = (!pe && perf && perf.ok)
-        ? (perf.twrYtd != null ? perf.twrYtd : perf.twrAll)
-        : null;
-      if (t != null && isFinite(t)) { returnPct = Number(Number(t).toFixed(2)); twrUsed = true; }
-    } catch (_) { /* fall back to simple return */ }
-
-    const entry = {
-      name: data.userName.trim(),
-      profile: data.profile || "",
-      portfolio: active.name,
-      returnPct,
-      holdings: active.holdings.length,
-      topHoldings,
-      at: Date.now(),
-    };
-    const stats = socialStats(active, cur, fx);
-    try {
-      const { error } = await supabase.from("leaderboard").upsert({
-        user_id: user.id,
-        name: entry.name,
-        profile: entry.profile,
-        portfolio: entry.portfolio,
-        return_pct: entry.returnPct,
-        holdings: entry.holdings,
-        top_holdings: entry.topHoldings,
-        realized_pct: stats.realizedPct != null ? Number(stats.realizedPct.toFixed(2)) : null,
-        avg_days: stats.avgDays,
-        win_rate: stats.winRate,
-        philosophy: (data.philosophy || "").slice(0, 280),
-        updated_at: new Date().toISOString(),
-      });
-      if (error) throw error;
-      say(twrUsed
-        ? "Shared! Your time-weighted return is on the board."
-        : "Shared! (Performance service unreachable — used simple return.)");
+      const { twrUsed } = await publishBoard({ data, active, totals, cur, user });
+      say(!share.returnPct
+        ? "Shared! (Return % is private — see Profile › What friends can see.)"
+        : twrUsed
+          ? "Shared! Your time-weighted return is on the board."
+          : "Shared! (Performance service unreachable — used simple return.)");
       await loadAll();
     } catch (e) { say(`Couldn't publish — ${(e && e.message) ? e.message.slice(0, 120) : "try again."}`); }
     setBusy(false);
@@ -1742,9 +1851,21 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
       <div className="rounded-3xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white p-6 shadow-lg shadow-emerald-200">
         <div className="flex items-center gap-2 font-bold"><Share2 size={17} /> Share your progress</div>
         <p className="text-sm text-emerald-50 mt-1.5 leading-relaxed">
-          Publish “{active.name}” to your friends — your time-weighted return % (YTD, so adding money doesn’t inflate it), position count and top 10 holdings (with their portfolio weight) show on their leaderboard. Amounts and theses stay private. Unshare anytime.
+          Publish “{active.name}” to your friends. You choose exactly what they see — return % (time-weighted YTD, so adding money doesn’t inflate it), top holdings, win rate and more. Amounts, buy prices and theses always stay private. Unshare anytime.
         </p>
-        <div className="mt-4 flex items-center gap-2">
+        <button onClick={onEditSharing}
+          className="mt-3 w-full flex items-center justify-between bg-emerald-700/30 rounded-2xl px-3.5 py-2.5 text-left active:bg-emerald-700/50">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold">
+              {sharedCount === SHARE_ITEMS.length ? "Sharing everything" : sharedCount === 0 ? "Sharing only your name" : `Sharing ${sharedCount} of ${SHARE_ITEMS.length} items`}
+            </div>
+            <div className="text-[11px] text-emerald-100 truncate">
+              {sharedCount === 0 ? "Turn things on in Profile" : SHARE_ITEMS.filter((it) => share[it.id]).map((it) => it.label).join(" · ")}
+            </div>
+          </div>
+          <span className="text-xs font-semibold shrink-0 ml-2 flex items-center gap-0.5">Edit <ChevronRight size={14} /></span>
+        </button>
+        <div className="mt-3 flex items-center gap-2">
           <button onClick={publish} disabled={busy}
             className="bg-white text-emerald-600 font-semibold text-sm px-5 py-2.5 rounded-full shadow disabled:opacity-60">
             {busy ? "Working…" : onBoard ? "Update share" : "Share now"}
@@ -1910,19 +2031,23 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
         <div className="space-y-2">
           {shown.map((r, i) => {
             const me = r.userId === user.id;
-            const up = r.returnPct >= 0;
+            const hasReturn = r.returnPct != null;
+            const up = (r.returnPct || 0) >= 0;
             const prof = profileOf(r.profile);
-            const medal = i === 0 ? "bg-amber-100 text-amber-600" : i === 1 ? "bg-slate-200 text-slate-500" : i === 2 ? "bg-orange-100 text-orange-500" : "bg-slate-100 text-slate-400";
+            // Ranks only mean something for people who share a return %.
+            const medal = !hasReturn ? "bg-slate-50 text-slate-300"
+              : i === 0 ? "bg-amber-100 text-amber-600" : i === 1 ? "bg-slate-200 text-slate-500" : i === 2 ? "bg-orange-100 text-orange-500" : "bg-slate-100 text-slate-400";
+            const sub = [prof ? prof.label : null, r.portfolio || null, r.holdings != null ? `${r.holdings} positions` : null].filter(Boolean).join(" · ");
             return (
               <div key={r.userId} onClick={() => setViewing(r)}
                 className={`bg-white rounded-2xl p-4 flex items-center gap-3 shadow-sm border cursor-pointer active:bg-slate-50 ${me ? "border-emerald-300" : "border-slate-100"}`}>
-                <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-sm ${medal}`}>{i + 1}</div>
+                <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-sm ${medal}`}>{hasReturn ? i + 1 : "–"}</div>
                 <div className="flex-1 min-w-0">
                   <div className="font-semibold text-slate-700 text-sm truncate">
                     {prof && <span className="text-base leading-none mr-1" title={prof.label}>{prof.mascot}</span>}
                     {r.name} {me && <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-full ml-1">YOU</span>}
                   </div>
-                  <div className="text-xs text-slate-400">{prof ? `${prof.label} · ` : ""}{r.portfolio} · {r.holdings} positions</div>
+                  {sub && <div className="text-xs text-slate-400">{sub}</div>}
                   {r.topHoldings && r.topHoldings.length > 0 && (
                     <div className="flex flex-wrap gap-1 mt-1.5">
                       {r.topHoldings.map((h) => (
@@ -1933,7 +2058,9 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
                     </div>
                   )}
                 </div>
-                <div className={`font-bold ${up ? "text-emerald-600" : "text-rose-500"}`}>{pct(r.returnPct)}</div>
+                {hasReturn
+                  ? <div className={`font-bold ${up ? "text-emerald-600" : "text-rose-500"}`}>{pct(r.returnPct)}</div>
+                  : <div className="text-slate-300" title="Return % not shared"><Lock size={16} /></div>}
               </div>
             );
           })}
@@ -1941,8 +2068,8 @@ function FriendsTab({ data, active, totals, cur, say, user }) {
       )}
       <p className="text-[11px] text-slate-400 leading-relaxed">
         Your leaderboard shows only you and the friends you've added — there's no public list. Tap anyone to see their profile.
-        Shared with friends: name, badge, portfolio name, return %, realized %, win rate, average hold, top-10 allocation, and your philosophy.
-        Amounts, buy prices and theses stay on your device.
+        Everyone picks what they share (Profile › What friends can see); a lock means that person keeps their return % private.
+        Amounts, buy prices and theses always stay on your device.
       </p>
       {viewing && (
         <ProfileSheet r={viewing} me={viewing.userId === user.id} onClose={() => setViewing(null)} />
@@ -3630,8 +3757,9 @@ function ProfileSheet({ r, me, onClose }) {
             </div>
           )}
 
+          {/* "—" = not shared by this person (or nothing to show yet) */}
           <div className="grid grid-cols-2 gap-2">
-            <Stat label="UNREALIZED RETURN" value={pct(r.returnPct || 0)} tone={up ? "text-emerald-600" : "text-rose-500"} />
+            <Stat label="UNREALIZED RETURN" value={r.returnPct != null ? pct(r.returnPct) : "—"} tone={r.returnPct == null ? "text-slate-400" : up ? "text-emerald-600" : "text-rose-500"} />
             <Stat label="REALIZED RETURN" value={r.realizedPct != null ? pct(r.realizedPct) : "—"} tone={r.realizedPct == null ? "text-slate-400" : rUp ? "text-emerald-600" : "text-rose-500"} />
             <Stat label="WIN RATE" value={r.winRate != null ? `${r.winRate}%` : "—"} />
             <Stat label="AVG HOLD" value={r.avgDays != null ? `${r.avgDays}d` : "—"} />
@@ -3639,7 +3767,9 @@ function ProfileSheet({ r, me, onClose }) {
 
           <div>
             <h4 className="text-xs font-semibold text-slate-400 mb-2">TOP HOLDINGS · ALLOCATION{typeof r.holdings === "number" ? ` (${r.holdings} positions)` : ""}</h4>
-            {r.topHoldings && r.topHoldings.length > 0 ? (
+            {r.topHoldings == null ? (
+              <p className="text-sm text-slate-400 flex items-center gap-1.5"><Lock size={13} /> {me ? "You keep your holdings private." : `${r.name} keeps their holdings private.`}</p>
+            ) : r.topHoldings.length > 0 ? (
               <div className="space-y-1.5">
                 {r.topHoldings.map((h) => (
                   <div key={h.ticker} className="flex items-center gap-2">
