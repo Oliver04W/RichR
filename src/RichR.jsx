@@ -1048,7 +1048,7 @@ export default function RichR({ user, onSignOut }) {
             <h1 className="text-2xl font-extrabold tracking-tight flex items-baseline">
               Rich<img src="/logo.png" alt="R" className="h-[1.35rem] w-auto inline-block translate-y-[1px]" />
             </h1>
-            <p className="text-xs text-slate-400 font-medium">Grow your money with friends</p>
+            <p className="text-xs text-slate-400 font-medium">Grow your wealth with friends</p>
           </div>
           <button onClick={openProfile}
             className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-3.5 py-2 text-sm font-medium text-slate-600 shadow-sm">
