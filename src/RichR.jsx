@@ -1487,7 +1487,7 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
           <div className="flex gap-2 flex-wrap">
             <button onClick={goImport}
               className="bg-white text-emerald-600 text-sm font-semibold px-5 py-2.5 rounded-full shadow flex items-center gap-1.5">
-              <Camera size={15} /> Import from screenshot
+              <Camera size={15} /> Import portfolio
             </button>
             <button onClick={goPositions}
               className="bg-emerald-700/40 text-white text-sm font-semibold px-5 py-2.5 rounded-full">
@@ -1498,7 +1498,7 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
               Try sample data
             </button>
           </div>
-          <p className="text-[11px] text-emerald-100 mt-3">Fastest: screenshot your broker app (Nordnet, Avanza, Interactive Brokers…), upload it, confirm the holdings — about 20 seconds. Sample data is clearly marked and can't be shared.</p>
+          <p className="text-[11px] text-emerald-100 mt-3">Fastest: a screenshot or CSV export from your broker app (Nordnet, Avanza, Interactive Brokers…) — confirm the holdings and you’re done in about 20 seconds. Sample data is clearly marked and can't be shared.</p>
         </div>
         {!data.onboardingDismissed && (
           <OnboardingCard user={user} active={active} data={data} onImport={goImport} onAddManually={goPositions} goFriends={goFriends} onDismiss={onDismissOnboarding} />
@@ -1891,7 +1891,7 @@ function OnboardingCard({ user, active, data, onImport, onAddManually, goFriends
   const steps = [
     { id: "portfolio", title: "Add your portfolio", done: real > 0,
       hint: real > 0 ? `${real} position${real === 1 ? "" : "s"} added` : "Screenshot your broker app — RichR reads it in ~20 s.",
-      actions: real > 0 ? [] : [["Import from screenshot", onImport, true], ["Add manually", onAddManually, false]] },
+      actions: real > 0 ? [] : [["Import portfolio", onImport, true], ["Add manually", onAddManually, false]] },
     { id: "friends", title: "Add friends", done: (friendsN || 0) > 0,
       hint: friendsN == null ? "" : friendsN > 0 ? `${friendsN} mutual friend${friendsN === 1 ? "" : "s"}` : "Friends who add you back can see what you share — and you them.",
       actions: (friendsN || 0) > 0 ? [] : [["Find friends", goFriends, true]] },
@@ -2272,7 +2272,7 @@ function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRe
           <div className="flex gap-2 justify-center flex-wrap">
             <button onClick={() => setImporting(true)}
               className="flex items-center gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold px-4 py-2.5 rounded-full shadow">
-              <Camera size={15} /> Import from screenshot
+              <Camera size={15} /> Import portfolio
             </button>
             <button onClick={onLoadSample} className="bg-slate-100 text-slate-600 text-sm font-semibold px-4 py-2.5 rounded-full">
               Try sample data
