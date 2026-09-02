@@ -3056,8 +3056,8 @@ function PositionModal({ holding, cur, fx = null, holdings = [], onClose, onSave
 
             {/* already own it: one line + two small controls */}
             {dup && (
-              <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 text-[12px] text-slate-700 tabular-nums">
-                <span className="flex-1 min-w-0 truncate">You already own <b>{dup.shares} {dup.ticker}</b> · avg. {money(dup.buyPrice, dup.currency || cur)}</span>
+              <div className="flex items-center gap-2 flex-wrap bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 text-[12px] text-slate-700 tabular-nums">
+                <span className="flex-1 min-w-[12rem]">You already own <b>{dup.shares} {dup.ticker}</b> · avg. {money(dup.buyPrice, dup.currency || cur)}</span>
                 <div className="flex bg-white border border-amber-200 rounded-md p-0.5 shrink-0">
                   {[["merge", "Add to position"], ["separate", "Separate lot"]].map(([id, l]) => (
                     <button key={id} onClick={() => setDupChoice(id)}
