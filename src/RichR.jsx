@@ -314,7 +314,7 @@ const clamp01 = (x) => Math.max(0, Math.min(100, Math.round(x)));
 const SCORE_WEIGHTS = { performance: 0.35, riskAdjusted: 0.25, diversification: 0.2, concentration: 0.2 };
 
 function computeScore({ holdings, cur, fx, series, bench }) {
-  const parts = {}, notes = {};
+  const parts = {}, notes = {}, inputs = {};
   // --- weights
   const total = (holdings || []).reduce((s, h) => s + holdingValue(h, cur, fx), 0);
   const ws = total > 0 ? (holdings || []).map((h) => holdingValue(h, cur, fx) / total).filter((w) => w > 0) : [];
@@ -322,6 +322,7 @@ function computeScore({ holdings, cur, fx, series, bench }) {
     const hhi = ws.reduce((a, w) => a + w * w, 0);
     const effN = 1 / hhi;
     const top1 = Math.max(...ws) * 100;
+    inputs.top1 = Number(top1.toFixed(1)); inputs.effN = Number(effN.toFixed(1)); inputs.n = ws.length;
     parts.diversification = clamp01(100 * (1 - Math.exp(-(effN - 1) / 6)));
     notes.diversification = `≈ ${effN.toFixed(1)} equally-weighted positions across ${ws.length}. More, and more evenly sized, positions score higher (10+ effective ≈ 80).`;
     parts.concentration = clamp01(100 - Math.max(0, top1 - 8) * 1.4);
@@ -343,6 +344,7 @@ function computeScore({ holdings, cur, fx, series, bench }) {
     const edge = bret != null ? mine - bret : mine;
     // annualise the edge so a 2-month-old portfolio isn't judged on 2 months
     const edgeAnn = edge * Math.min(1, 365 / days) ;
+    inputs.mine = Number(mine.toFixed(1)); inputs.bench = bret != null ? Number(bret.toFixed(1)) : null; inputs.edge = Number(edge.toFixed(1));
     parts.performance = clamp01(50 + edgeAnn * 2.5);
     notes.performance = bret != null
       ? `${mine >= 0 ? "+" : ""}${mine.toFixed(1)}% vs S&P 500 ${bret >= 0 ? "+" : ""}${bret.toFixed(1)}% over ${days >= 300 ? "the past year" : `${Math.round(days)} days`} (money you added doesn't count). Matching the index = 50; each point ahead ≈ +2.5.`
@@ -359,6 +361,7 @@ function computeScore({ holdings, cur, fx, series, bench }) {
       const volAnn = Math.sqrt(varc) * Math.sqrt(252) * 100;
       const retAnn = mean * 252 * 100;
       const sharpe = volAnn > 0 ? (retAnn - 2) / volAnn : 0; // 2% risk-free
+      inputs.sharpe = Number(sharpe.toFixed(2)); inputs.vol = Number(volAnn.toFixed(0));
       parts.riskAdjusted = clamp01(50 + sharpe * 20);
       notes.riskAdjusted = `Annualised ${retAnn >= 0 ? "+" : ""}${retAnn.toFixed(0)}% at ${volAnn.toFixed(0)}% volatility → Sharpe ≈ ${sharpe.toFixed(2)}. Steadier gains score higher; 1.0 ≈ 70, 2.5 ≈ 100.`;
     } else {
@@ -369,10 +372,29 @@ function computeScore({ holdings, cur, fx, series, bench }) {
     notes.riskAdjusted = "Needs about a month of daily history.";
   }
   const keys = Object.keys(parts);
-  if (!keys.length) return { score: null, parts, notes };
+  if (!keys.length) return { score: null, parts, notes, inputs };
   const wsum = keys.reduce((a, k) => a + SCORE_WEIGHTS[k], 0);
   const score = clamp01(keys.reduce((a, k) => a + parts[k] * SCORE_WEIGHTS[k], 0) / wsum);
-  return { score, parts, notes };
+  return { score, parts, notes, inputs };
+}
+
+/* "Your concentration score fell because your largest position grew from
+   21% to 31%." — one sentence per part that moved, from the logged inputs. */
+function explainScoreChange(prev, cur) {
+  if (!prev || !cur || !prev.parts || !cur.parts) return [];
+  const pi = prev.inputs || {}, ci = cur.inputs || {};
+  const out = [];
+  const moved = (k) => cur.parts[k] != null && prev.parts[k] != null && cur.parts[k] !== prev.parts[k];
+  const dir = (k) => (cur.parts[k] > prev.parts[k] ? "rose" : "fell");
+  if (moved("concentration") && pi.top1 != null && ci.top1 != null && pi.top1 !== ci.top1)
+    out.push(`Your concentration score ${dir("concentration")} because your largest position went from ${pi.top1}% to ${ci.top1}% of the portfolio.`);
+  if (moved("diversification") && pi.effN != null && ci.effN != null)
+    out.push(`Diversification ${dir("diversification")}: you now hold the equivalent of ${ci.effN} equally-weighted positions (was ${pi.effN})${pi.n !== ci.n ? `, ${ci.n} positions in total (was ${pi.n})` : ""}.`);
+  if (moved("performance") && pi.edge != null && ci.edge != null)
+    out.push(`Performance ${dir("performance")}: you're now ${ci.edge >= 0 ? "+" : ""}${ci.edge} points vs the S&P 500 (was ${pi.edge >= 0 ? "+" : ""}${pi.edge}).`);
+  if (moved("riskAdjusted") && pi.sharpe != null && ci.sharpe != null)
+    out.push(`Risk-adjusted return ${dir("riskAdjusted")}: Sharpe ${ci.sharpe} (was ${pi.sharpe})${pi.vol !== ci.vol ? `, volatility ${ci.vol}% (was ${pi.vol}%)` : ""}.`);
+  return out;
 }
 const SCORE_LABEL = { performance: "Performance", riskAdjusted: "Risk-adjusted return", diversification: "Diversification", concentration: "Concentration" };
 const scoreTone = (n) => n == null ? "text-slate-300" : n >= 75 ? "text-emerald-600" : n >= 50 ? "text-amber-500" : "text-rose-500";
@@ -450,7 +472,7 @@ async function publishBoard({ data, active, totals, cur, user }) {
   let events = [];
   let prevRow = null;
   try {
-    const { data: pr } = await supabase.from("leaderboard").select("top_holdings, score").eq("user_id", user.id).maybeSingle();
+    const { data: pr } = await supabase.from("leaderboard").select("top_holdings, score, return_pct").eq("user_id", user.id).maybeSingle();
     prevRow = pr || null;
   } catch (_) {}
   if (share.activity) {
@@ -458,6 +480,12 @@ async function publishBoard({ data, active, totals, cur, user }) {
     else if (share.topHoldings && Array.isArray(prevRow.top_holdings)) events = diffHoldingsEvents(prevRow.top_holdings, topHoldings);
     if (scoreRes && scoreRes.score != null && prevRow && prevRow.score != null && Math.abs(scoreRes.score - prevRow.score) >= 3)
       events.push({ kind: "score", ticker: null, from_pct: prevRow.score, to_pct: scoreRes.score });
+    // milestone: YTD return crossed a round threshold upwards since the last publish
+    if (share.returnPct && prevRow && prevRow.return_pct != null) {
+      const was = Number(prevRow.return_pct), now = returnPct;
+      const crossed = [10, 20, 30, 50, 75, 100, 200].filter((t) => was < t && now >= t);
+      if (crossed.length) events.push({ kind: "milestone", ticker: null, from_pct: was, to_pct: crossed[crossed.length - 1] });
+    }
   }
   const row = {
     user_id: user.id,
@@ -1099,6 +1127,7 @@ export default function RichR({ user, onSignOut }) {
             onAddGoal={addGoal} onUpdateGoal={updateGoal} onRemoveGoal={removeGoal}
             onBenchmark={(benchmark) => patch(() => ({ benchmark }))}
             onScoreLog={(scoreLog) => patch(() => ({ scoreLog }))}
+            user={user} goFriends={() => setTab("friends")}
           />
         )}
         {tab === "portfolio" && sub === "holdings" && (
@@ -1122,7 +1151,7 @@ export default function RichR({ user, onSignOut }) {
         {tab === "groups" && <GroupsTab user={user} active={active} cur={cur} fx={data.fx || DEFAULT_FX} say={say}
           username={data.username} onOpenTicker={openTicker} />}
         {tab === "friends" && <FriendsTab data={data} active={active} totals={totals} cur={cur} say={say} user={user}
-          onEditSharing={openProfile} />}
+          onEditSharing={openProfile} onOpenTicker={openTicker} />}
         {tab === "profile" && (
           <ProfileTab data={data} user={user} say={say}
             onName={(userName) => patch(() => ({ userName }))}
@@ -1198,6 +1227,28 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
   };
   useEffect(() => () => clearTimeout(syncTimer.current), []);
   const sharedCount = SHARE_ITEMS.filter((it) => share[it.id]).length;
+
+  /* Public profile link (opt-in, off by default). Lives in profiles.is_public;
+     the page at /u/<username> is served by a security-definer function that
+     returns nothing unless this is on. */
+  const [isPublic, setIsPublic] = useState(null);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    supabase.from("profiles").select("is_public").eq("user_id", user.id).maybeSingle()
+      .then(({ data: p }) => setIsPublic(!!(p && p.is_public)));
+  }, [user.id]);
+  const togglePublic = async () => {
+    const next = !isPublic;
+    setIsPublic(next);
+    const { error } = await supabase.from("profiles").update({ is_public: next }).eq("user_id", user.id);
+    if (error) { setIsPublic(!next); say("Couldn't update — try again."); return; }
+    say(next ? "Your profile link is live." : "Profile link switched off — the page now shows “private”.");
+  };
+  const profileUrl = data.username ? `${window.location.origin}/u/${data.username}` : "";
+  const copyLink = async () => {
+    try { await navigator.clipboard.writeText(profileUrl); setCopied(true); setTimeout(() => setCopied(false), 1500); }
+    catch (e) { say(profileUrl); }
+  };
 
   const claimUsername = async (raw) => {
     const u = (raw || "").trim().toLowerCase().replace(/^@/, "");
@@ -1319,6 +1370,33 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
         </div>
       </div>
 
+      {/* public profile link */}
+      <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h3 className="font-bold text-slate-700 flex items-center gap-2"><ExternalLink size={16} className="text-emerald-500" /> Public profile link</h3>
+            <p className="text-[11px] text-slate-400 leading-snug mt-1">
+              Anyone with the link sees your investing identity — name, badge, YTD %, RichR Score, top holdings by % and recent changes — exactly what your switches above allow. Never amounts. Off by default.
+            </p>
+          </div>
+          {data.username ? (
+            <button onClick={togglePublic} aria-pressed={!!isPublic} disabled={isPublic === null}
+              className={`w-11 h-6 rounded-full p-0.5 shrink-0 transition ${isPublic ? "bg-emerald-500" : "bg-slate-200"}`}>
+              <span className={`block w-5 h-5 bg-white rounded-full shadow transform transition ${isPublic ? "translate-x-5" : ""}`} />
+            </button>
+          ) : null}
+        </div>
+        {!data.username ? (
+          <p className="text-xs text-amber-600 mt-2">Claim a username first — the link is built from it.</p>
+        ) : (
+          <div className="mt-3 flex items-center gap-2">
+            <div className={`flex-1 min-w-0 text-xs font-mono px-3 py-2 rounded-xl border truncate ${isPublic ? "bg-emerald-50 border-emerald-100 text-emerald-800" : "bg-slate-50 border-slate-100 text-slate-400"}`}>{profileUrl}</div>
+            <button onClick={copyLink} className="text-xs font-semibold text-slate-600 bg-slate-100 px-3 py-2 rounded-xl shrink-0">{copied ? "Copied!" : "Copy"}</button>
+            <a href={profileUrl} target="_blank" rel="noreferrer" className="text-xs font-semibold text-emerald-600 shrink-0">Open</a>
+          </div>
+        )}
+      </div>
+
       {/* account card */}
       <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
         <div className="text-xs text-slate-400 mb-3">
@@ -1332,7 +1410,8 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
 }
 
 /* ================= HOME ================= */
-function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, goImport, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, priceDataAt, onAddGoal, onUpdateGoal, onRemoveGoal, onBenchmark, onScoreLog }) {
+function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, goImport, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, priceDataAt, onAddGoal, onUpdateGoal, onRemoveGoal, onBenchmark, onScoreLog, user, goFriends }) {
+  const [ytd, setYtd] = useState({ m: null, b: null });
   const [renaming, setRenaming] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const up = totals.pl >= 0;
@@ -1472,8 +1551,12 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
       <ScoreCard active={active} cur={cur} fx={fx} liveValue={totals.value} liveCost={totals.cost}
         log={data.scoreLog || []} onLog={onScoreLog} />
 
-      {/* period returns vs S&P 500 */}
-      <PeriodReturns active={active} cur={cur} liveValue={totals.value} liveCost={totals.cost} bench={benchOf(data)} onBench={onBenchmark} />
+      {/* period returns vs benchmark */}
+      <PeriodReturns active={active} cur={cur} liveValue={totals.value} liveCost={totals.cost} bench={benchOf(data)} onBench={onBenchmark}
+        onYtd={(m, b) => setYtd({ m, b })} />
+
+      {/* friends benchmark */}
+      <FriendsBenchmark user={user} myYtd={ytd.m} benchYtd={ytd.b} benchLabel={benchOf(data).label} onGoFriends={goFriends} />
 
       {/* best / worst + concentration */}
       <MoversCard active={active} cur={cur} fx={fx} />
@@ -1662,7 +1745,7 @@ async function loadDailySeries(holdings, cur, benchSymbol) {
   return { portfolio: histCache.portfolio, bench: (histCache.bench[benchSymbol] || {}).pts || null };
 }
 
-function PeriodReturns({ active, cur, liveValue, liveCost, bench: BENCH, onBench }) {
+function PeriodReturns({ active, cur, liveValue, liveCost, bench: BENCH, onBench, onYtd }) {
   const [rows, setRows] = useState(null); // [{label, mine, bench}]
   const [state, setState] = useState("loading");
   const key = holdingsKey(active.holdings, cur);
@@ -1684,6 +1767,7 @@ function PeriodReturns({ active, cur, liveValue, liveCost, bench: BENCH, onBench
           { label: "1 week", from: now - 7 * 86400000 },
           { label: "1 month", from: now - 30 * 86400000 },
           { label: "YTD", from: jan1 },
+          { label: "All", from: 0 }, // since the first position (≤ 1 year of history)
         ];
         const bRet = (from) => {
           if (!bseries) return null;
@@ -1692,13 +1776,19 @@ function PeriodReturns({ active, cur, liveValue, liveCost, bench: BENCH, onBench
           const b = bseries[bseries.length - 1];
           return a && b && a.c > 0 ? ((b.c - a.c) / a.c) * 100 : null;
         };
-        setRows(windows.map((w) => {
+        const computed = windows.map((w) => {
           let i = idxOnOrBefore(series, w.from);
           // portfolio younger than the window: measure from its first point
           if (i < 0) i = 0;
+          while (i < series.length - 1 && !(series[i].value > 0)) i++;
           const mine = periodReturn(series, i);
-          return { label: w.label, mine, bench: bRet(w.from), since: series[i] ? series[i].t : null };
-        }));
+          // benchmark over the SAME window the portfolio was measured on
+          const from = series[i] ? new Date(series[i].t).getTime() : w.from;
+          return { label: w.label, mine, bench: bRet(from), since: series[i] ? series[i].t : null };
+        });
+        setRows(computed);
+        const y = computed.find((r) => r.label === "YTD");
+        if (onYtd) onYtd(y ? (y.mine != null ? Number(y.mine.toFixed(2)) : null) : null, y ? (y.bench != null ? Number(y.bench.toFixed(2)) : null) : null);
         setState("ok");
       } catch (e) { if (!dead) setState("none"); }
     })();
@@ -1716,7 +1806,7 @@ function PeriodReturns({ active, cur, liveValue, liveCost, bench: BENCH, onBench
       ) : state === "none" || !rows ? (
         <p className="text-sm text-slate-400">Not enough price history yet — check back after the next market day.</p>
       ) : (
-        <div className="grid grid-cols-4 gap-2">
+        <div className="grid grid-cols-5 gap-1.5">
           {rows.map((r) => {
             const has = r.mine != null;
             const up = (r.mine || 0) >= 0;
@@ -1756,8 +1846,9 @@ function ScoreCard({ active, cur, fx, liveValue, liveCost, log, onLog }) {
         if (r.score != null) {
           const today = new Date().toISOString().slice(0, 10);
           const last = log[log.length - 1];
-          if (!last || last.d !== today) onLog([...log, { d: today, score: r.score, parts: r.parts }].slice(-60));
-          else if (last.score !== r.score) onLog([...log.slice(0, -1), { d: today, score: r.score, parts: r.parts }]);
+          const entry = { d: today, score: r.score, parts: r.parts, inputs: r.inputs };
+          if (!last || last.d !== today) onLog([...log, entry].slice(-60));
+          else if (last.score !== r.score) onLog([...log.slice(0, -1), entry]);
         }
       } catch (e) { if (!dead) setRes({ score: null, parts: {}, notes: {} }); }
     })();
@@ -1814,6 +1905,15 @@ function ScoreCard({ active, cur, fx, liveValue, liveCost, log, onLog }) {
       </button>
       {open && res && (
         <div className="mt-4 pt-3 border-t border-slate-100 space-y-3">
+          {(() => {
+            const why = explainScoreChange(prev, { parts: res.parts, inputs: res.inputs });
+            return why.length ? (
+              <div className="bg-slate-50 rounded-2xl p-3">
+                <div className="text-[10px] font-bold text-slate-400 mb-1">WHY IT CHANGED SINCE {prev ? fmtDate(prev.d).toUpperCase() : ""}</div>
+                {why.map((w, i) => <p key={i} className="text-xs text-slate-600 leading-snug mb-1 last:mb-0">{w}</p>)}
+              </div>
+            ) : null;
+          })()}
           {Object.keys(SCORE_LABEL).map((k) => {
             const cur_ = res.parts[k], was = prev && prev.parts ? prev.parts[k] : null;
             const d = cur_ != null && was != null ? cur_ - was : null;
@@ -1836,6 +1936,77 @@ function ScoreCard({ active, cur, fx, liveValue, liveCost, log, onLog }) {
           <p className="text-[10px] text-slate-300">Score = weighted average of the parts you have data for. Performance is judged against the S&P 500 regardless of your chosen benchmark, so friends' scores are comparable. Shared with friends only if “RichR Score” is on in Profile.</p>
         </div>
       )}
+    </div>
+  );
+}
+
+/* "You +14.2% · Friends +9.7% · S&P 500 +8.4% · #2 among 8 friends".
+   Friends' numbers are their published time-weighted YTD returns on the
+   leaderboard (mutual friends only — RLS). Mine is my own published row
+   if I've shared, otherwise my local cash-flow-adjusted YTD. */
+function FriendsBenchmark({ user, myYtd, benchYtd, benchLabel, onGoFriends }) {
+  const [rows, setRows] = useState(null); // [{userId, name, ret}]
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      try {
+        const [{ data: out }, { data: inc }, { data: board }] = await Promise.all([
+          supabase.from("friends").select("friend_id").eq("user_id", user.id),
+          supabase.from("friends").select("user_id").eq("friend_id", user.id),
+          supabase.from("leaderboard").select("user_id, name, return_pct"),
+        ]);
+        if (dead) return;
+        const incSet = new Set((inc || []).map((r) => r.user_id));
+        const mutual = new Set((out || []).map((r) => r.friend_id).filter((id) => incSet.has(id)));
+        const rs = (board || []).filter((b) => b.return_pct != null && (mutual.has(b.user_id) || b.user_id === user.id))
+          .map((b) => ({ userId: b.user_id, name: b.name, ret: Number(b.return_pct) }));
+        setRows(rs);
+      } catch (e) { if (!dead) setRows([]); }
+    })();
+    return () => { dead = true; };
+  }, [user.id]);
+
+  if (rows === null) return null;
+  const meRow = rows.find((r) => r.userId === user.id);
+  const mine = meRow ? meRow.ret : myYtd;
+  const friends = rows.filter((r) => r.userId !== user.id);
+  const friendsAvg = friends.length ? friends.reduce((a, r) => a + r.ret, 0) / friends.length : null;
+  let rank = null;
+  if (mine != null && friends.length) {
+    const all = [...friends.map((f) => f.ret), mine].sort((a, b) => b - a);
+    rank = all.indexOf(mine) + 1;
+  }
+  const Cell = ({ label, v, tone, hint }) => (
+    <div className="bg-slate-50 rounded-2xl p-2.5 text-center min-w-0">
+      <div className="text-[10px] font-semibold text-slate-400 truncate">{label}</div>
+      <div className={`font-bold text-sm mt-0.5 ${v == null ? "text-slate-300" : tone || ((v >= 0) ? "text-emerald-600" : "text-rose-500")}`}>{v == null ? "—" : pct(v)}</div>
+      {hint && <div className="text-[10px] text-slate-400 truncate">{hint}</div>}
+    </div>
+  );
+  return (
+    <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="font-bold text-slate-700 flex items-center gap-2"><Users size={16} className="text-emerald-500" /> You vs friends</h3>
+        <span className="text-[11px] text-slate-400">YTD, time-weighted</span>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <Cell label="You" v={mine} hint={meRow ? "as shared" : "not shared yet"} />
+        <Cell label={`Friends${friends.length ? ` (${friends.length})` : ""}`} v={friendsAvg} hint={friends.length ? "average" : "none sharing"} />
+        <Cell label={benchLabel} v={benchYtd} tone="text-slate-700" hint="index" />
+      </div>
+      <div className="mt-3 flex items-center justify-between gap-2">
+        {rank != null ? (
+          <div className="text-sm font-semibold text-slate-700">
+            <span className={`inline-block px-2 py-0.5 rounded-full text-white text-xs mr-1.5 ${rank === 1 ? "bg-amber-400" : rank <= 3 ? "bg-emerald-500" : "bg-slate-400"}`}>#{rank}</span>
+            among {friends.length + 1} {friends.length + 1 === 1 ? "person" : "people"} sharing
+          </div>
+        ) : (
+          <div className="text-xs text-slate-400">
+            {friends.length === 0 ? "No friends are sharing a return yet — nudge them in the Friends tab." : "Share your portfolio to get ranked."}
+          </div>
+        )}
+        <button onClick={onGoFriends} className="text-xs font-semibold text-emerald-600 shrink-0">Leaderboard →</button>
+      </div>
     </div>
   );
 }
@@ -2401,7 +2572,7 @@ function ThesesTab({ active, cur, fx, onVerdict }) {
 }
 
 /* ================= FRIENDS ================= */
-function FriendsTab({ data, active, totals, cur, say, user, onEditSharing }) {
+function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpenTicker }) {
   const share = shareOf(data);
   const sharedCount = SHARE_ITEMS.filter((it) => share[it.id]).length;
   const [board, setBoard] = useState(null);
@@ -2662,7 +2833,8 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing }) {
 
       {/* activity feed — what mutual friends changed (percentages only) */}
       <ActivityFeed user={user} friends={friends} names={(friends || []).reduce((m, f) => { m[f.id] = f.username; return m; }, {})}
-        myName={data.username} onOpenProfile={openFriendProfile} />
+        myName={data.username} onOpenProfile={openFriendProfile}
+        board={shown || []} onOpenTicker={onOpenTicker} />
 
       {/* friends manager */}
       <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
@@ -4130,9 +4302,28 @@ const PH_RANGES = [
   { id: "1d",  label: "1D",  sub: "Today" },
   { id: "1w",  label: "1W",  sub: "Past week" },
   { id: "1mo", label: "1M",  sub: "Past month" },
-  { id: "6mo", label: "6M",  sub: "Past 6 months" },
+  { id: "ytd", label: "YTD", sub: "This year" },
   { id: "1y",  label: "1Y",  sub: "Past year" },
+  { id: "all", label: "ALL", sub: "Since your first position" },
 ];
+/* The history service speaks 1d/1w/1mo/6mo/1y; YTD and ALL are the 1y
+   daily series cut client-side. ALL shows at most a year — the service
+   doesn't go further back yet. */
+const PH_SERVICE_RANGE = { "1d": "1d", "1w": "1w", "1mo": "1mo", "ytd": "1y", "1y": "1y", "all": "1y" };
+const cutSeries = (points, range) => {
+  if (!points) return points;
+  if (range === "ytd") {
+    const jan1 = new Date(new Date().getFullYear(), 0, 1).getTime();
+    // start at the last close before Jan 1 so the first day's move counts
+    const i = points.findIndex((p) => new Date(p.t).getTime() >= jan1);
+    return i <= 0 ? points : points.slice(i - 1);
+  }
+  if (range === "all") {
+    const i = points.findIndex((p) => p.value > 0);
+    return i <= 0 ? points : points.slice(i - 1);
+  }
+  return points;
+};
 
 function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCost, hex, bench: BENCH = DEFAULT_BENCH, onBench }) {
   const [range, setRange] = useState("1d");
@@ -4146,7 +4337,7 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
   useEffect(() => {
     if (!open || !compare) return;
     let dead = false;
-    const map = { "1d": "1d", "1w": "5d", "1mo": "1mo", "6mo": "6mo", "1y": "1y" };
+    const map = { "1d": "1d", "1w": "5d", "1mo": "1mo", "ytd": "ytd", "1y": "1y", "all": "1y" };
     (async () => {
       try {
         const { data, error } = await supabase.functions.invoke("get-history", {
@@ -4167,7 +4358,7 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
       try {
         const body = {
           display: cur,
-          range,
+          range: PH_SERVICE_RANGE[range] || "1y",
           holdings: (holdings || []).map((h) => ({
             ticker: h.ticker, shares: Number(h.shares) || 0,
             buyPrice: Number(h.buyPrice) || 0, buyDate: h.buyDate || null,
@@ -4179,7 +4370,7 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
         if (error || !data || !data.ok || !Array.isArray(data.points) || !data.points.length) {
           setErr((data && data.error) || "Could not load history."); setPts(null);
         } else {
-          setPts(data.points);
+          setPts(cutSeries(data.points, range));
         }
       } catch (e) { if (!dead) { setErr("Could not load history."); setPts(null); } }
       if (!dead) setLoading(false);
@@ -4298,7 +4489,7 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
           <div className="flex items-center gap-1.5 mt-3">
             {PH_RANGES.map((r) => (
               <button key={r.id} onClick={() => setRange(r.id)}
-                className={`flex-1 text-xs font-bold py-2 rounded-full transition ${
+                className={`flex-1 text-[11px] font-bold py-2 rounded-full transition ${
                   range === r.id ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-500"}`}>
                 {r.label}
               </button>
@@ -4927,22 +5118,55 @@ function GroupsTab({ user, active, cur, fx, say, onOpenTicker, username }) {
 }
 
 /* ================= ACTIVITY FEED ================= */
-function ActivityFeed({ user, friends, names, myName, onOpenProfile }) {
+function ActivityFeed({ user, friends, names, myName, onOpenProfile, board, onOpenTicker }) {
   const [events, setEvents] = useState(null);
   const [showAll, setShowAll] = useState(false);
-  useEffect(() => {
-    let dead = false;
-    (async () => {
-      try {
-        const { data: rows, error } = await supabase
-          .from("portfolio_events").select("id, user_id, kind, ticker, from_pct, to_pct, created_at")
-          .order("created_at", { ascending: false }).limit(60);
-        if (error) throw error;
-        if (!dead) setEvents(rows || []);
-      } catch (e) { if (!dead) setEvents([]); }
-    })();
-    return () => { dead = true; };
-  }, [user.id, (friends || []).length]);
+  const [reactions, setReactions] = useState([]); // {event_id,user_id,emoji}
+  const [comments, setComments] = useState([]);   // {id,event_id,user_id,body,created_at}
+  const [openComments, setOpenComments] = useState({}); // event id -> bool
+  const [draft, setDraft] = useState({});
+  const load = async () => {
+    try {
+      const { data: rows, error } = await supabase
+        .from("portfolio_events").select("id, user_id, kind, ticker, from_pct, to_pct, created_at")
+        .order("created_at", { ascending: false }).limit(60);
+      if (error) throw error;
+      const ids = (rows || []).map((r) => r.id);
+      let rs = [], cs = [];
+      if (ids.length) {
+        const [{ data: r1 }, { data: c1 }] = await Promise.all([
+          supabase.from("event_reactions").select("event_id, user_id, emoji").in("event_id", ids),
+          supabase.from("event_comments").select("id, event_id, user_id, body, created_at").in("event_id", ids).order("created_at", { ascending: true }),
+        ]);
+        rs = r1 || []; cs = c1 || [];
+      }
+      setEvents(rows || []); setReactions(rs); setComments(cs);
+    } catch (e) { setEvents([]); }
+  };
+  useEffect(() => { load(); }, [user.id, (friends || []).length]);
+
+  const react = async (ev, emoji) => {
+    const mine = reactions.find((r) => r.event_id === ev.id && r.user_id === user.id && r.emoji === emoji);
+    setReactions((rs) => mine ? rs.filter((r) => r !== mine) : [...rs, { event_id: ev.id, user_id: user.id, emoji }]);
+    if (mine) await supabase.from("event_reactions").delete().match({ event_id: ev.id, user_id: user.id, emoji });
+    else await supabase.from("event_reactions").insert({ event_id: ev.id, user_id: user.id, emoji });
+  };
+  const comment = async (ev) => {
+    const body = (draft[ev.id] || "").trim().slice(0, 500);
+    if (!body) return;
+    const { error } = await supabase.from("event_comments").insert({ event_id: ev.id, user_id: user.id, body });
+    if (error) return;
+    setDraft((d) => ({ ...d, [ev.id]: "" }));
+    await load();
+  };
+
+  /* "3 of your friends own NVDA" — from mutual friends' shared top holdings. */
+  const popular = (() => {
+    const rows = (board || []).filter((b) => b.userId !== user.id && Array.isArray(b.topHoldings));
+    const count = {};
+    rows.forEach((b) => b.topHoldings.forEach((h) => { count[h.ticker] = (count[h.ticker] || 0) + 1; }));
+    return Object.entries(count).filter(([, n]) => n >= 2).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  })();
 
   if (events === null) return null;
   const text = (e) => {
@@ -4954,6 +5178,7 @@ function ActivityFeed({ user, friends, names, myName, onOpenProfile }) {
       case "increased": return <>increased <b>{e.ticker}</b> from {p(e.from_pct)} → {p(e.to_pct)}</>;
       case "decreased": return <>trimmed <b>{e.ticker}</b> from {p(e.from_pct)} → {p(e.to_pct)}</>;
       case "score": return <>RichR Score {Number(e.to_pct) > Number(e.from_pct) ? "rose" : "fell"} {Math.round(e.from_pct)} → <b>{Math.round(e.to_pct)}</b></>;
+      case "milestone": return <>portfolio reached <b>+{Math.round(e.to_pct)}% YTD</b> 🎉</>;
       default: return e.kind;
     }
   };
@@ -4963,6 +5188,19 @@ function ActivityFeed({ user, friends, names, myName, onOpenProfile }) {
       <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-1">
         <Activity size={16} className="text-emerald-500" /> Activity
       </h3>
+      {popular.length > 0 && (
+        <div className="bg-slate-50 rounded-2xl p-3 mb-2">
+          <div className="text-[10px] font-bold text-slate-400 mb-1">POPULAR AMONG YOUR FRIENDS</div>
+          <div className="flex flex-wrap gap-1.5">
+            {popular.map(([t, n]) => (
+              <button key={t} onClick={() => onOpenTicker && onOpenTicker(t)}
+                className="text-xs font-semibold text-slate-700 bg-white border border-slate-200 px-2 py-1 rounded-full">
+                {n} of your friends own <b>{t}</b>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       {events.length === 0 ? (
         <p className="text-sm text-slate-400">Nothing yet. When you or a friend changes a shared portfolio, it shows up here — as percentages, never amounts.</p>
       ) : (
@@ -4970,13 +5208,52 @@ function ActivityFeed({ user, friends, names, myName, onOpenProfile }) {
           {shown.map((e) => {
             const me = e.user_id === user.id;
             const who = me ? "You" : `@${names[e.user_id] || "friend"}`;
+            const rs = reactions.filter((r) => r.event_id === e.id);
+            const cs = comments.filter((c) => c.event_id === e.id);
+            const open = !!openComments[e.id];
             return (
-              <div key={e.id} className="py-2 flex items-start gap-2">
-                <div className="flex-1 min-w-0 text-sm text-slate-600">
-                  <button onClick={() => !me && onOpenProfile(e.user_id, names[e.user_id])} className={`font-semibold ${me ? "text-slate-700" : "text-emerald-700"}`}>{who}</button>{" "}
-                  {text(e)}
+              <div key={e.id} className="py-2.5">
+                <div className="flex items-start gap-2">
+                  <div className="flex-1 min-w-0 text-sm text-slate-600">
+                    <button onClick={() => !me && onOpenProfile(e.user_id, names[e.user_id])} className={`font-semibold ${me ? "text-slate-700" : "text-emerald-700"}`}>{who}</button>{" "}
+                    {text(e)}
+                  </div>
+                  <div className="text-[10px] text-slate-400 shrink-0 mt-0.5">{timeAgo(e.created_at)}</div>
                 </div>
-                <div className="text-[10px] text-slate-400 shrink-0 mt-0.5">{timeAgo(e.created_at)}</div>
+                <div className="flex items-center gap-1 mt-1.5 flex-wrap">
+                  {REACTIONS.map((em) => {
+                    const n = rs.filter((r) => r.emoji === em).length;
+                    const mine = rs.some((r) => r.emoji === em && r.user_id === user.id);
+                    return (
+                      <button key={em} onClick={() => react(e, em)}
+                        className={`text-[11px] px-1.5 py-0.5 rounded-full border ${mine ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-white border-slate-100 text-slate-500"} ${n === 0 ? "opacity-50" : ""}`}>
+                        {em}{n > 0 ? ` ${n}` : ""}
+                      </button>
+                    );
+                  })}
+                  <button onClick={() => setOpenComments((o) => ({ ...o, [e.id]: !open }))}
+                    className="text-[11px] font-semibold text-slate-400 px-1.5 py-0.5 ml-1">
+                    {cs.length ? `${cs.length} comment${cs.length === 1 ? "" : "s"}` : "Comment"}
+                  </button>
+                </div>
+                {open && (
+                  <div className="mt-2 ml-2 pl-3 border-l-2 border-slate-100 space-y-1.5">
+                    {cs.map((c) => (
+                      <div key={c.id} className="text-xs text-slate-600">
+                        <span className="font-semibold text-slate-700">@{c.user_id === user.id ? (myName || "you") : (names[c.user_id] || "friend")}</span>{" "}
+                        <span className="whitespace-pre-wrap break-words">{c.body}</span>
+                        <span className="text-slate-300 ml-1">{timeAgo(c.created_at)}</span>
+                      </div>
+                    ))}
+                    <div className="flex items-center gap-1.5 pt-0.5">
+                      <input value={draft[e.id] || ""} onChange={(ev) => setDraft((d) => ({ ...d, [e.id]: ev.target.value }))}
+                        onKeyDown={(ev) => { if (ev.key === "Enter") comment(e); }}
+                        placeholder="Write a comment…" className="flex-1 min-w-0 border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs" />
+                      <button onClick={() => comment(e)} disabled={!(draft[e.id] || "").trim()}
+                        className="text-xs font-semibold text-emerald-600 disabled:opacity-40">Post</button>
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}
@@ -5368,6 +5645,144 @@ function MembersSheet({ group, members, names, user, isOwner, mutuals, onAdd, on
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+
+/* ================= PUBLIC PROFILE (/u/<username>) ================= */
+/* Served without sign-in. All data comes from get_public_profile(), which
+   returns null unless the person switched their public link on. */
+export function PublicProfile({ username }) {
+  const [p, setP] = useState(undefined); // undefined loading, null private/missing
+  useEffect(() => {
+    let dead = false;
+    supabase.rpc("get_public_profile", { uname: username }).then(({ data, error }) => {
+      if (dead) return;
+      setP(error ? null : (data || null));
+    });
+    return () => { dead = true; };
+  }, [username]);
+
+  const shell = (children) => (
+    <div className="min-h-screen bg-slate-50" style={{ fontFamily: "'Inter', system-ui, sans-serif" }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');`}</style>
+      <div className="max-w-md mx-auto px-4 py-8">
+        <div className="flex items-center justify-between mb-6">
+          <a href="/" className="text-2xl font-extrabold tracking-tight text-slate-800 flex items-baseline">
+            Rich<img src="/logo.png" alt="R" className="h-[1.35rem] w-auto inline-block translate-y-[1px]" />
+          </a>
+          <a href="/" className="text-xs font-semibold text-white bg-gradient-to-r from-emerald-500 to-teal-500 px-3.5 py-2 rounded-full shadow">Create your own →</a>
+        </div>
+        {children}
+        <p className="text-[11px] text-slate-400 text-center mt-8 leading-relaxed">
+          Percentages only — RichR never shows amounts. Nothing here is investment advice.
+        </p>
+      </div>
+    </div>
+  );
+
+  if (p === undefined) return shell(<div className="text-center text-sm text-slate-400 py-16">Loading…</div>);
+  if (p === null) return shell(
+    <div className="bg-white rounded-3xl p-8 text-center shadow-sm border border-slate-100">
+      <Lock size={24} className="mx-auto text-slate-300 mb-3" />
+      <p className="font-semibold text-slate-600">@{username} is private</p>
+      <p className="text-sm text-slate-400 mt-1">This person hasn't switched on their public profile link, or the name doesn't exist.</p>
+    </div>
+  );
+
+  const prof = profileOf(p.profile);
+  const up = (p.return_pct || 0) >= 0;
+  const events = Array.isArray(p.events) ? p.events : [];
+  const pctS = (n) => `${Math.round(Number(n))}%`;
+  const evText = (e) => {
+    switch (e.kind) {
+      case "shared": return "started sharing their portfolio";
+      case "added": return `added ${e.ticker}${e.to_pct != null ? ` (${pctS(e.to_pct)})` : ""}`;
+      case "removed": return `sold out of ${e.ticker}`;
+      case "increased": return `increased ${e.ticker} from ${pctS(e.from_pct)} → ${pctS(e.to_pct)}`;
+      case "decreased": return `trimmed ${e.ticker} from ${pctS(e.from_pct)} → ${pctS(e.to_pct)}`;
+      case "score": return `RichR Score ${Number(e.to_pct) > Number(e.from_pct) ? "rose" : "fell"} ${Math.round(e.from_pct)} → ${Math.round(e.to_pct)}`;
+      case "milestone": return `portfolio reached +${Math.round(e.to_pct)}% YTD`;
+      default: return e.kind;
+    }
+  };
+  return shell(
+    <div className="space-y-4">
+      <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+        <div className="flex items-center gap-3">
+          <div className="w-12 h-12 rounded-2xl bg-emerald-50 flex items-center justify-center text-2xl">{prof ? prof.mascot : "👤"}</div>
+          <div className="min-w-0 flex-1">
+            <div className="font-bold text-lg text-slate-800 truncate">{p.name || `@${p.username}`}</div>
+            <div className="text-xs text-slate-400">@{p.username}{prof ? ` · ${prof.label}` : ""}{p.portfolio ? ` · ${p.portfolio}` : ""}</div>
+          </div>
+          {p.return_pct != null && (
+            <div className="text-right">
+              <div className={`text-xl font-extrabold ${up ? "text-emerald-600" : "text-rose-500"}`}>{pct(Number(p.return_pct))}</div>
+              <div className="text-[10px] font-semibold text-slate-400">YTD · time-weighted</div>
+            </div>
+          )}
+        </div>
+        {p.philosophy && <p className="text-[14px] text-slate-600 italic mt-3 leading-relaxed">“{p.philosophy}”</p>}
+        <div className="grid grid-cols-3 gap-2 mt-4">
+          <div className="bg-slate-50 rounded-2xl p-2.5 text-center">
+            <div className={`font-bold text-sm ${scoreTone(p.score)}`}>{p.score != null ? p.score : "—"}</div>
+            <div className="text-[10px] font-semibold text-slate-400">RichR Score</div>
+          </div>
+          <div className="bg-slate-50 rounded-2xl p-2.5 text-center">
+            <div className="font-bold text-sm text-slate-700">{p.win_rate != null ? `${p.win_rate}%` : "—"}</div>
+            <div className="text-[10px] font-semibold text-slate-400">Win rate</div>
+          </div>
+          <div className="bg-slate-50 rounded-2xl p-2.5 text-center">
+            <div className="font-bold text-sm text-slate-700">{p.holdings != null ? p.holdings : "—"}</div>
+            <div className="text-[10px] font-semibold text-slate-400">Positions</div>
+          </div>
+        </div>
+      </div>
+
+      {Array.isArray(p.top_holdings) && p.top_holdings.length > 0 && (
+        <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+          <h4 className="text-xs font-semibold text-slate-400 mb-2">TOP HOLDINGS · ALLOCATION</h4>
+          <div className="space-y-1.5">
+            {p.top_holdings.map((h) => (
+              <div key={h.ticker} className="flex items-center gap-2">
+                <div className="text-sm font-semibold text-slate-700 w-20 shrink-0 truncate">{h.ticker}</div>
+                <div className="flex-1 bg-slate-100 rounded-full h-2 overflow-hidden"><div className="bg-emerald-400 h-full rounded-full" style={{ width: `${Math.min(100, h.pct)}%` }} /></div>
+                <div className="text-xs font-semibold text-slate-500 w-12 text-right">{h.pct}%</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {p.score_parts && (
+        <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+          <h4 className="text-xs font-semibold text-slate-400 mb-2">RICHR SCORE BREAKDOWN</h4>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+            {Object.keys(SCORE_LABEL).map((k) => (
+              <div key={k} className="flex items-center justify-between text-xs">
+                <span className="text-slate-500">{SCORE_LABEL[k]}</span>
+                <span className={`font-bold ${scoreTone(p.score_parts[k])}`}>{p.score_parts[k] != null ? p.score_parts[k] : "—"}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {events.length > 0 && (
+        <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+          <h4 className="text-xs font-semibold text-slate-400 mb-2">RECENT CHANGES</h4>
+          <div className="divide-y divide-slate-50">
+            {events.map((e, i) => (
+              <div key={i} className="py-1.5 flex items-start gap-2 text-sm text-slate-600">
+                <div className="flex-1">{evText(e)}</div>
+                <div className="text-[10px] text-slate-400 shrink-0 mt-0.5">{timeAgo(e.created_at)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {p.updated_at && <p className="text-[10px] text-slate-300 text-center">Last updated {fmtDateTime(p.updated_at)}</p>}
     </div>
   );
 }

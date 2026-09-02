@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { supabase } from "./supabase";
-import RichR from "./RichR";
+import RichR, { PublicProfile } from "./RichR";
 
 export default function App() {
   // undefined = still checking the stored session, null = signed out
@@ -11,6 +11,10 @@ export default function App() {
     const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
     return () => sub.subscription.unsubscribe();
   }, []);
+
+  // /u/<username> — public profile page, no sign-in needed
+  const m = typeof window !== "undefined" && window.location.pathname.match(/^\/u\/([a-z0-9_]{3,20})\/?$/i);
+  if (m) return <PublicProfile username={m[1]} />;
 
   if (session === undefined) return <Splash />;
   if (!session) return <Login />;
