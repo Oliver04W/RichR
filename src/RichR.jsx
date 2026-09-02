@@ -384,6 +384,12 @@ const perfTheme = (plPct) => {
 export default function RichR({ user, onSignOut }) {
   const [data, setData] = useState(null);
   const [tab, setTab] = useState("portfolio");
+  /* Where you were before opening Profile (from the name button top-right,
+     or "Edit" on the Friends share card) — so its Back control returns you
+     there instead of always to Portfolio. */
+  const prevTabRef = useRef("portfolio");
+  const openProfile = () => { if (tab !== "profile") prevTabRef.current = tab; setTab("profile"); };
+  const closeProfile = () => setTab(prevTabRef.current === "profile" ? "portfolio" : prevTabRef.current);
   const [sub, setSub] = useState("overview"); // Portfolio tab sections: overview | holdings | analysis
   const [refreshing, setRefreshing] = useState(false);
   const [toast, setToast] = useState("");
@@ -818,7 +824,7 @@ export default function RichR({ user, onSignOut }) {
             </h1>
             <p className="text-xs text-slate-400 font-medium">Grow your money with friends</p>
           </div>
-          <button onClick={() => setTab("profile")}
+          <button onClick={openProfile}
             className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-3.5 py-2 text-sm font-medium text-slate-600 shadow-sm">
             {profileOf(data.profile) && <span className="text-base leading-none">{profileOf(data.profile).mascot}</span>}
             {data.userName || "Set up profile"}
@@ -912,7 +918,7 @@ export default function RichR({ user, onSignOut }) {
           companyInfo={data.companyInfo || {}} onSaveInfo={saveCompanyInfo}
           watchlist={data.watchlist || []} onWatch={addWatch} onUnwatch={removeWatchByTicker} />}
         {tab === "friends" && <FriendsTab data={data} active={active} totals={totals} cur={cur} say={say} user={user}
-          onEditSharing={() => setTab("profile")} />}
+          onEditSharing={openProfile} />}
         {tab === "profile" && (
           <ProfileTab data={data} user={user} say={say}
             onName={(userName) => patch(() => ({ userName }))}
@@ -922,6 +928,7 @@ export default function RichR({ user, onSignOut }) {
             onPhilosophy={(philosophy) => patch(() => ({ philosophy }))}
             onShare={(share) => patch(() => ({ share }))}
             active={active} totals={totals}
+            onBack={closeProfile} backLabel={TAB_LABEL[prevTabRef.current === "profile" ? "portfolio" : prevTabRef.current]}
             onSignOut={onSignOut} />
         )}
       </div>
@@ -940,7 +947,7 @@ export default function RichR({ user, onSignOut }) {
             const on = tab === t.id;
             const I = t.icon;
             return (
-              <button key={t.id} onClick={() => setTab(t.id)}
+              <button key={t.id} onClick={() => (t.id === "profile" ? openProfile() : setTab(t.id))}
                 className="flex-1 flex flex-col items-center gap-1 py-2.5 pb-4">
                 <I size={20} className={on ? "text-emerald-500" : "text-slate-400"} />
                 <span className={`text-[11px] font-medium ${on ? "text-emerald-600" : "text-slate-400"}`}>{t.label}</span>
@@ -954,7 +961,9 @@ export default function RichR({ user, onSignOut }) {
 }
 
 /* ================= PROFILE ================= */
-function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onProfile, onPhilosophy, onShare, active, totals, onSignOut }) {
+const TAB_LABEL = { portfolio: "Portfolio", research: "Research", friends: "Friends", profile: "Profile" };
+
+function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onProfile, onPhilosophy, onShare, active, totals, onBack, backLabel, onSignOut }) {
   const prof = profileOf(data.profile);
   const share = shareOf(data);
   const [syncing, setSyncing] = useState(false);
@@ -1001,6 +1010,14 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
 
   return (
     <div className="space-y-4">
+      {/* back to wherever Profile was opened from */}
+      <div className="flex items-center justify-between -mt-1">
+        <button onClick={onBack} className="flex items-center gap-0.5 text-sm font-semibold text-emerald-600 -ml-1 active:opacity-70">
+          <ChevronLeft size={20} /> Back{backLabel ? ` to ${backLabel}` : ""}
+        </button>
+        <span className="text-[11px] text-slate-400">Changes save automatically</span>
+      </div>
+
       {/* identity card */}
       <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
         <div className="flex items-center gap-3 mb-4">
