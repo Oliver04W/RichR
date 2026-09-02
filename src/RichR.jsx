@@ -9,7 +9,7 @@ import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine,
   ComposedChart, Line, PieChart, Pie, Cell
 } from "recharts";
-import { supabase } from "./supabase";
+import { supabase, SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY } from "./supabase";
 
 /* ------------------------------------------------------------------ */
 /*  RichR — track investments, write theses, share progress with      */
@@ -511,17 +511,51 @@ export default function RichR({ user, onSignOut }) {
 
   /* ---- write-through: localStorage immediately, cloud debounced ---- */
   const cloudTimer = useRef(null);
+  const pendingRef = useRef(null); // doc waiting for the debounced cloud save
   useEffect(() => {
     if (!loaded.current || !data) return;
     const stamped = { ...data, _ts: Date.now() };
     saveLocal(storageKey, stamped);
+    pendingRef.current = stamped;
     if (cloudTimer.current) clearTimeout(cloudTimer.current);
     cloudTimer.current = setTimeout(async () => {
+      pendingRef.current = null;
       const ok = await saveCloud(user.id, stamped);
       if (ok) cloudOk.current = true;
     }, 1200);
     return () => { if (cloudTimer.current) clearTimeout(cloudTimer.current); };
   }, [data, storageKey]);
+
+  /* If the tab is hidden or closed while a save is still pending, flush it
+     right away (keepalive so the request survives navigation). Otherwise a
+     quick edit-then-leave could vanish from the cloud copy. */
+  useEffect(() => {
+    const flush = () => {
+      const d = pendingRef.current;
+      if (!d) return;
+      pendingRef.current = null;
+      if (cloudTimer.current) clearTimeout(cloudTimer.current);
+      try {
+        const sess = JSON.parse(localStorage.getItem(`sb-${new URL(SUPABASE_URL).host.split(".")[0]}-auth-token`) || "null");
+        const token = sess && sess.access_token;
+        if (!token) return;
+        fetch(`${SUPABASE_URL}/rest/v1/user_data?on_conflict=user_id`, {
+          method: "POST", keepalive: true,
+          headers: {
+            "content-type": "application/json",
+            apikey: SUPABASE_PUBLISHABLE_KEY,
+            authorization: `Bearer ${token}`,
+            prefer: "resolution=merge-duplicates,return=minimal",
+          },
+          body: JSON.stringify({ user_id: user.id, data: d, updated_at: new Date().toISOString() }),
+        }).catch(() => {});
+      } catch (e) { /* best effort */ }
+    };
+    const onVis = () => { if (document.visibilityState === "hidden") flush(); };
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("pagehide", flush);
+    return () => { document.removeEventListener("visibilitychange", onVis); window.removeEventListener("pagehide", flush); };
+  }, [user.id]);
 
   // pull my claimed username from Supabase so it survives devices
   useEffect(() => {
