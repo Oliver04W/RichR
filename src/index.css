@@ -27,3 +27,27 @@ input::placeholder, textarea::placeholder { color: #94a3b8; }
 .overflow-x-auto::-webkit-scrollbar { height: 0; }
 /* safe-area for the bottom nav on phones */
 nav.fixed.bottom-0 { padding-bottom: env(safe-area-inset-bottom); }
+
+/* ---------- RichR design system (v2) ----------
+   One card, two buttons, two radii, one accent. Green/red are reserved for
+   performance numbers; the accent (emerald-600) is for actions only. */
+@theme {
+  --radius-sm: 8px;
+  --radius-card: 16px;
+}
+.card { background: #fff; border-radius: 16px; border: 1px solid #eef2f7; padding: 20px; }
+.card-tight { background: #fff; border-radius: 16px; border: 1px solid #eef2f7; padding: 14px 16px; }
+.section-title { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #94a3b8; }
+.btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: .4rem; background: #059669; color: #fff; font-weight: 600; font-size: 14px; padding: 10px 18px; border-radius: 9999px; transition: background .15s; }
+.btn-primary:hover { background: #047857; }
+.btn-primary:disabled { opacity: .5; }
+.btn-secondary { display: inline-flex; align-items: center; justify-content: center; gap: .4rem; background: #f1f5f9; color: #334155; font-weight: 600; font-size: 14px; padding: 10px 18px; border-radius: 9999px; transition: background .15s; }
+.btn-secondary:hover { background: #e2e8f0; }
+.btn-secondary:disabled { opacity: .5; }
+/* lighter, consistent borders everywhere */
+.border-slate-100 { border-color: #eef2f7 !important; }
+.border-slate-200 { border-color: #e6ebf2 !important; }
+/* cards no longer carry shadows — whitespace and borders do the separating */
+.shadow-sm { box-shadow: none !important; }
+/* the big number */
+.num-hero { font-size: 44px; line-height: 1; font-weight: 800; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }

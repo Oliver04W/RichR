@@ -399,6 +399,26 @@ function explainScoreChange(prev, cur) {
 const SCORE_LABEL = { performance: "Performance", riskAdjusted: "Risk-adjusted return", diversification: "Diversification", concentration: "Concentration" };
 const scoreTone = (n) => n == null ? "text-slate-300" : n >= 75 ? "text-emerald-600" : n >= 50 ? "text-amber-500" : "text-rose-500";
 
+/* Winning streak: consecutive calendar weeks (ending with the current one)
+   where the cash-flow-adjusted weekly return was positive. Computed from
+   the same daily series the dashboard uses. */
+function winningStreak(series) {
+  const live = (series || []).filter((p) => p.value > 0);
+  if (live.length < 6) return 0;
+  const weekOf = (t) => { const d = new Date(t); const day = (d.getDay() + 6) % 7; d.setDate(d.getDate() - day); d.setHours(0, 0, 0, 0); return d.getTime(); };
+  const byWeek = new Map();
+  live.forEach((p) => { const w = weekOf(p.t); if (!byWeek.has(w)) byWeek.set(w, []); byWeek.get(w).push(p); });
+  const weeks = [...byWeek.keys()].sort((a, b) => a - b);
+  let streak = 0;
+  for (let i = weeks.length - 1; i > 0; i--) {
+    const cur = byWeek.get(weeks[i]), prev = byWeek.get(weeks[i - 1]);
+    const a = prev[prev.length - 1], b = cur[cur.length - 1];
+    const r = a.value > 0 ? ((b.value - a.value) - ((b.cost || 0) - (a.cost || 0))) / a.value : 0;
+    if (r > 0) streak++; else break;
+  }
+  return streak;
+}
+
 /* Turn two top-holdings lists (ticker + weight %) into feed events.
    Threshold 3 points so daily price drift doesn't spam the feed. */
 function diffHoldingsEvents(prev, next) {
@@ -1021,9 +1041,9 @@ export default function RichR({ user, onSignOut }) {
     patch((d) => ({ news: { ...(d.news || {}), [d.activeId]: n } }));
 
   const tabs = [
-    { id: "portfolio", label: "Portfolio", icon: Briefcase },
-    { id: "research", label: "Research", icon: Search },
-    { id: "groups", label: "Groups", icon: MessageCircle },
+    { id: "portfolio", label: "Home", icon: Home },
+    { id: "research", label: "Discover", icon: Search },
+    { id: "__add", label: "", icon: Plus },
     { id: "friends", label: "Friends", icon: Users },
     { id: "profile", label: "Profile", icon: User },
   ];
@@ -1042,19 +1062,12 @@ export default function RichR({ user, onSignOut }) {
           spreads into two columns (see HomeTab). */}
       <div className={`mx-auto px-4 pb-28 pt-6 transition-[max-width] ${
         tab === "portfolio" && sub === "overview" && active.holdings.length > 0 ? "max-w-md lg:max-w-5xl" : "max-w-md"}`}>
-        {/* header */}
-        <div className="flex items-center justify-between mb-5">
-          <div>
-            <h1 className="text-2xl font-extrabold tracking-tight flex items-baseline">
-              Rich<img src="/logo.png" alt="R" className="h-[1.35rem] w-auto inline-block translate-y-[1px]" />
-            </h1>
-            <p className="text-xs text-slate-400 font-medium">Grow your wealth with friends</p>
-          </div>
-          <button onClick={openProfile}
-            className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-3.5 py-2 text-sm font-medium text-slate-600 shadow-sm">
-            {profileOf(data.profile) && <span className="text-base leading-none">{profileOf(data.profile).mascot}</span>}
-            {data.userName || "Set up profile"}
-          </button>
+        {/* header: a restrained wordmark; the personality comes from the content */}
+        <div className="flex items-center justify-between mb-6">
+          <h1 className="text-xl font-extrabold tracking-tight flex items-baseline text-slate-900">
+            Rich<img src="/logo.png" alt="R" className="h-[1.1rem] w-auto inline-block translate-y-[1px]" />
+          </h1>
+          <div className="text-xs font-semibold text-slate-400">{TAB_LABEL[tab]}</div>
         </div>
 
         {/* friend request banner */}
@@ -1070,7 +1083,7 @@ export default function RichR({ user, onSignOut }) {
               )}
             </div>
             <button onClick={addBackFromAlert}
-              className="bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-xs font-semibold px-3 py-1.5 rounded-full shadow shrink-0">
+              className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-3 py-1.5 rounded-full shadow shrink-0">
               Add back
             </button>
             <button onClick={dismissFriendAlert}
@@ -1091,7 +1104,7 @@ export default function RichR({ user, onSignOut }) {
               <div className="text-[11px] text-slate-400">{nudge.more > 0 ? `+${nudge.more} more · ` : ""}Share to join the leaderboard</div>
             </div>
             <button onClick={() => { setTab("friends"); dismissNudge(); }}
-              className="bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-xs font-semibold px-3 py-1.5 rounded-full shadow shrink-0">
+              className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-3 py-1.5 rounded-full shadow shrink-0">
               Share
             </button>
             <button onClick={dismissNudge}
@@ -1129,6 +1142,7 @@ export default function RichR({ user, onSignOut }) {
             onScoreLog={(scoreLog) => patch(() => ({ scoreLog }))}
             user={user} goFriends={() => setTab("friends")}
             onDismissOnboarding={() => patch(() => ({ onboardingDismissed: true }))}
+            onOpenProfile={openProfile}
           />
         )}
         {tab === "portfolio" && sub === "holdings" && (
@@ -1149,8 +1163,6 @@ export default function RichR({ user, onSignOut }) {
           companyInfo={data.companyInfo || {}} onSaveInfo={saveCompanyInfo}
           watchlist={data.watchlist || []} onWatch={addWatch} onUnwatch={removeWatchByTicker}
           initialQuery={researchQuery} onConsumeQuery={() => setResearchQuery("")} />}
-        {tab === "groups" && <GroupsTab user={user} active={active} cur={cur} fx={data.fx || DEFAULT_FX} say={say}
-          username={data.username} onOpenTicker={openTicker} />}
         {tab === "friends" && <FriendsTab data={data} active={active} totals={totals} cur={cur} say={say} user={user}
           onEditSharing={openProfile} onOpenTicker={openTicker} />}
         {tab === "profile" && (
@@ -1180,11 +1192,21 @@ export default function RichR({ user, onSignOut }) {
           {tabs.map((t) => {
             const on = tab === t.id;
             const I = t.icon;
+            if (t.id === "__add") {
+              return (
+                <div key="add" className="flex-1 flex items-start justify-center pt-1.5 pb-4">
+                  <button onClick={() => { setTab("portfolio"); setSub("holdings"); setImportOnce(true); }} aria-label="Add or update portfolio"
+                    className="w-12 h-12 -mt-5 rounded-full bg-emerald-600 text-white flex items-center justify-center shadow-lg shadow-emerald-200 active:scale-95 transition">
+                    <Plus size={22} />
+                  </button>
+                </div>
+              );
+            }
             return (
               <button key={t.id} onClick={() => (t.id === "profile" ? openProfile() : setTab(t.id))}
                 className="flex-1 flex flex-col items-center gap-1 py-2.5 pb-4">
-                <I size={20} className={on ? "text-emerald-500" : "text-slate-400"} />
-                <span className={`text-[11px] font-medium ${on ? "text-emerald-600" : "text-slate-400"}`}>{t.label}</span>
+                <I size={20} className={on ? "text-slate-900" : "text-slate-400"} strokeWidth={on ? 2.4 : 2} />
+                <span className={`text-[11px] font-semibold ${on ? "text-slate-900" : "text-slate-400"}`}>{t.label}</span>
               </button>
             );
           })}
@@ -1195,7 +1217,7 @@ export default function RichR({ user, onSignOut }) {
 }
 
 /* ================= PROFILE ================= */
-const TAB_LABEL = { portfolio: "Portfolio", research: "Research", groups: "Groups", friends: "Friends", profile: "Profile" };
+const TAB_LABEL = { portfolio: "Home", research: "Discover", groups: "Groups", friends: "Friends", profile: "Profile" };
 
 function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onProfile, onPhilosophy, onShare, active, totals, onBack, backLabel, onSignOut }) {
   const prof = profileOf(data.profile);
@@ -1276,7 +1298,7 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
       </div>
 
       {/* identity card */}
-      <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+      <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
         <div className="flex items-center gap-3 mb-4">
           <div className="w-12 h-12 rounded-full bg-emerald-50 flex items-center justify-center text-2xl">
             {prof ? prof.mascot : "🙂"}
@@ -1302,7 +1324,7 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
       </div>
 
       {/* preferences card */}
-      <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+      <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
         <label className="block text-xs font-semibold text-slate-400 mb-1.5">CURRENCY</label>
         <select value={cur} onChange={(e) => onCurrency(e.target.value)}
           className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm bg-white mb-4">
@@ -1332,7 +1354,7 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
       </div>
 
       {/* sharing card — what friends can see */}
-      <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+      <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
         <div className="flex items-center justify-between mb-1">
           <h3 className="font-bold text-slate-700 flex items-center gap-2">
             <Share2 size={16} className="text-emerald-500" /> What friends can see
@@ -1373,7 +1395,7 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
       </div>
 
       {/* public profile link */}
-      <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+      <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
             <h3 className="font-bold text-slate-700 flex items-center gap-2"><ExternalLink size={16} className="text-emerald-500" /> Public profile link</h3>
@@ -1406,7 +1428,7 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
       </div>
 
       {/* account card */}
-      <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+      <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
         <div className="text-xs text-slate-400 mb-3">
           Signed in{user && user.email ? ` as ${user.email}` : ""}. Your portfolio syncs to your account and follows you across devices.
         </div>
@@ -1418,9 +1440,18 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
 }
 
 /* ================= HOME ================= */
-function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, goImport, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, priceDataAt, onAddGoal, onUpdateGoal, onRemoveGoal, onBenchmark, onScoreLog, user, goFriends, onDismissOnboarding }) {
+function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, goImport, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, priceDataAt, onAddGoal, onUpdateGoal, onRemoveGoal, onBenchmark, onScoreLog, user, goFriends, onDismissOnboarding, onOpenProfile }) {
   const [ytd, setYtd] = useState({ m: null, b: null });
   const [social, setSocial] = useState(null); // { mine, friendsAvg, rank, n, shared, friendsCount }
+  const [streak, setStreak] = useState(0);
+  useEffect(() => {
+    let dead = false;
+    loadDailySeries(active.holdings, cur, DEFAULT_BENCH.symbol).then(({ portfolio }) => {
+      if (dead || !portfolio) return;
+      setStreak(winningStreak([...portfolio, { t: new Date().toISOString(), value: totals.value, cost: totals.cost }]));
+    }).catch(() => {});
+    return () => { dead = true; };
+  }, [holdingsKey(active.holdings, cur)]);
   const [renaming, setRenaming] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const up = totals.pl >= 0;
@@ -1459,34 +1490,34 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
      stat tiles — a first-time user should see one clear next step. */
   if (empty) {
     return (
-      <div className="space-y-4 lg:max-w-md lg:mx-auto">
-        {switcher}
-        <div className="rounded-3xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white p-6 shadow-lg shadow-emerald-200">
+      <div className="space-y-6 lg:max-w-md lg:mx-auto">
+        {data.portfolios.length > 1 && switcher}
+        <div className="card">
           <div className="flex items-center justify-between">
             {renaming ? (
               <input autoFocus defaultValue={active.name}
                 onBlur={(e) => { onRename(e.target.value.trim() || active.name); setRenaming(false); }}
                 onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
-                className="bg-white/20 rounded-lg px-2 py-1 text-sm font-semibold text-white placeholder-white/60 w-40" />
+                className="border border-slate-200 rounded-lg px-2 py-1 text-sm font-semibold w-44" />
             ) : (
-              <button onClick={() => setRenaming(true)} className="text-sm font-semibold text-white/90 flex items-center gap-1.5">
+              <button onClick={() => setRenaming(true)} className="section-title flex items-center gap-1.5">
                 {active.name} <Pencil size={12} className="opacity-70" />
               </button>
             )}
             {data.portfolios.length > 1 && (
-              <button onClick={onDeletePortfolio} className="text-white/70"><Trash2 size={15} /></button>
+              <button onClick={onDeletePortfolio} className="text-slate-300"><Trash2 size={15} /></button>
             )}
           </div>
-          <div className="w-12 h-12 mt-5 rounded-2xl bg-white/20 flex items-center justify-center mb-3">
+          <div className="w-12 h-12 mt-5 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center mb-3">
             <Sparkles size={22} />
           </div>
-          <h3 className="font-bold text-xl">Start your journey</h3>
-          <p className="text-sm text-emerald-50 mt-1 mb-5 leading-relaxed">
+          <h3 className="font-bold text-xl text-slate-900">Start your journey</h3>
+          <p className="text-sm text-slate-500 mt-1 mb-5 leading-relaxed">
             Add your first position and write down why you bought it. Prices update live, and once you have a few positions you can share your progress with friends.
           </p>
           <div className="flex gap-2 flex-wrap">
             <button onClick={goImport}
-              className="bg-white text-emerald-600 text-sm font-semibold px-5 py-2.5 rounded-full shadow flex items-center gap-1.5">
+              className="btn-primary">
               <Camera size={15} /> Import portfolio
             </button>
             <button onClick={goPositions}
@@ -1498,7 +1529,7 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
               Try sample data
             </button>
           </div>
-          <p className="text-[11px] text-emerald-100 mt-3">Fastest: a screenshot or CSV export from your broker app (Nordnet, Avanza, Interactive Brokers…) — confirm the holdings and you’re done in about 20 seconds. Sample data is clearly marked and can't be shared.</p>
+          <p className="text-[11px] text-slate-400 mt-3">Fastest: a screenshot or CSV export from your broker app (Nordnet, Avanza, Interactive Brokers…) — confirm the holdings and you’re done in about 20 seconds. Sample data is clearly marked and can't be shared.</p>
         </div>
         {!data.onboardingDismissed && (
           <OnboardingCard user={user} active={active} data={data} onImport={goImport} onAddManually={goPositions} goFriends={goFriends} onDismiss={onDismissOnboarding} />
@@ -1509,131 +1540,135 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
     );
   }
 
+  const best = (() => {
+    const priced = active.holdings.filter((h) => h.currentPrice > 0 && h.buyPrice > 0).map((h) => ({ h, r: ((h.currentPrice - h.buyPrice) / h.buyPrice) * 100 }));
+    return priced.length ? priced.sort((a, b) => b.r - a.r)[0] : null;
+  })();
+
   return (
-    <div className="space-y-4">
-      {switcher}
-
-      {/* On wide screens: hero + stats on the left, chart + goals on the right. */}
-      <div className="space-y-4 lg:grid lg:grid-cols-2 lg:gap-5 lg:space-y-0 lg:items-start">
-      <div className="space-y-4">
-      {/* hero card — gradient follows performance: green up, red down, grey flat */}
-      <div className={`rounded-3xl ${th.grad} text-white p-6 shadow-lg ${th.shadow}`}>
-        <div className="flex items-center justify-between">
-          {renaming ? (
-            <input autoFocus defaultValue={active.name}
-              onBlur={(e) => { onRename(e.target.value.trim() || active.name); setRenaming(false); }}
-              onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
-              className="bg-white/20 rounded-lg px-2 py-1 text-sm font-semibold text-white placeholder-white/60 w-40" />
-          ) : (
-            <button onClick={() => setRenaming(true)} className="text-sm font-semibold text-white/90 flex items-center gap-1.5">
-              {active.name} <Pencil size={12} className="opacity-70" />
+    <div className="space-y-8">
+      <IdentityStrip data={data} active={active} cur={cur} fx={fx} social={social} streak={streak} onProfile={onOpenProfile} />
+      {data.portfolios.length > 1 && switcher}
+      {/* ===== anchor: the number, then performance, then the graph ===== */}
+      <section>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            {renaming ? (
+              <input autoFocus defaultValue={active.name}
+                onBlur={(e) => { onRename(e.target.value.trim() || active.name); setRenaming(false); }}
+                onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+                className="border border-slate-200 rounded-lg px-2 py-1 text-sm font-semibold w-44" />
+            ) : (
+              <button onClick={() => setRenaming(true)} className="section-title flex items-center gap-1.5 hover:text-slate-600">
+                {active.name} <Pencil size={11} className="opacity-60" />
+              </button>
+            )}
+            {data.portfolios.length > 1 && (
+              <button onClick={onDeletePortfolio} className="text-slate-300 hover:text-rose-400" title="Delete this portfolio"><Trash2 size={13} /></button>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <button onClick={onToggleAuto} title={staleness.title}
+              className={`flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full border transition ${
+                staleness.stale ? "bg-amber-50 text-amber-700 border-amber-200"
+                  : autoRefresh ? "bg-white text-emerald-700 border-emerald-200" : "bg-white text-slate-400 border-slate-200"}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${staleness.stale ? "bg-amber-400" : autoRefresh ? "bg-emerald-500 animate-pulse" : "bg-slate-300"}`} />
+              {staleness.stale ? staleness.label : autoRefresh ? "Live" : "Live off"}
             </button>
-          )}
-          {data.portfolios.length > 1 && (
-            <button onClick={onDeletePortfolio} className="text-white/70"><Trash2 size={15} /></button>
-          )}
+            <button onClick={() => onRefresh(false)} disabled={refreshing} title={priceDataAt > 0 ? `Prices as of ${fmtTime(priceDataAt)}` : "Update prices"}
+              className="w-7 h-7 rounded-full border border-slate-200 bg-white text-slate-500 flex items-center justify-center disabled:opacity-60">
+              <RefreshCw size={12} style={{ animation: refreshing ? "spin 1s linear infinite" : "none" }} />
+            </button>
+          </div>
         </div>
 
-        <div className="mt-3 text-4xl font-extrabold tracking-tight tabular-nums">{money(totals.value, cur)}</div>
-        <div className="mt-1.5 flex items-center gap-2 text-sm font-semibold">
+        <div className="mt-2 num-hero text-slate-900">{money(totals.value, cur)}</div>
+        <div className={`mt-2 flex items-center gap-1.5 text-base font-semibold tabular-nums ${flat ? "text-slate-500" : up ? "text-emerald-600" : "text-rose-500"}`}>
           {flat ? <Activity size={16} /> : up ? <TrendingUp size={16} /> : <TrendingDown size={16} />}
-          {money(totals.pl, cur)} ({pct(totals.plPct)})
+          {up ? "+" : ""}{money(totals.pl, cur)} ({pct(totals.plPct)})
+          <span className="text-slate-400 font-medium text-sm">all time</span>
         </div>
+        {(staleness.stale) && (
+          <p className="text-[11px] text-amber-600 mt-1">Prices are {staleness.age} old — tap ↻ to update.</p>
+        )}
 
-        {/* progress bar: cost basis at center, like distance-to-goal */}
         <div className="mt-5">
-          <div className="flex justify-between text-[11px] font-medium text-white/80 mb-1.5">
-            <span>Invested {moneyShort(totals.cost, cur)}</span>
-            <span className="flex items-center gap-1"><Target size={11} /> Growth</span>
-          </div>
-          <div className="h-2.5 bg-white/25 rounded-full overflow-hidden">
-            <div className="h-full bg-white rounded-full transition-all duration-500" style={{ width: `${progress}%` }} />
-          </div>
+          <PerformanceChart holdings={active.holdings} cur={cur} liveValue={totals.value} liveCost={totals.cost}
+            bench={benchOf(data)} onBench={onBenchmark} height={220} compact initialRange="1mo" onExpand={() => setShowHistory(true)} />
         </div>
+      </section>
 
-        {/* social comparison, right where you look first */}
-        <button onClick={goFriends} className="mt-4 w-full text-left bg-white/15 hover:bg-white/20 rounded-2xl px-3.5 py-3 transition">
-          {social && social.rank != null ? (
-            <div className="text-sm font-bold flex items-center gap-2">
-              <span className={`inline-flex items-center justify-center min-w-[2rem] h-7 px-1.5 rounded-full text-xs font-extrabold ${social.rank === 1 ? "bg-amber-300 text-amber-900" : "bg-white text-emerald-700"}`}>#{social.rank}</span>
-              You’re #{social.rank} of {social.n} sharing this year
-            </div>
-          ) : (
-            <div className="text-sm font-bold">
-              {social && social.friendsCount === 0 ? "Add friends to see where you rank" : social && !social.shared ? "Share your portfolio to get ranked" : "Comparing with friends…"}
-            </div>
-          )}
-          <div className="text-[11px] text-white/85 mt-1 tabular-nums flex flex-wrap gap-x-3">
-            <span>You {(social && social.mine != null) ? pct(social.mine) : ytd.m != null ? pct(ytd.m) : "—"}</span>
-            <span>Friends {social && social.friendsAvg != null ? pct(social.friendsAvg) : "—"}</span>
-            <span>{benchOf(data).label} {ytd.b != null ? pct(ytd.b) : "—"}</span>
-            <span className="opacity-70">YTD</span>
+      {/* ===== the three facts, as text not boxes ===== */}
+      <section className="grid grid-cols-3 gap-4 border-t border-slate-100 pt-5">
+        <div>
+          <div className="section-title">Performance</div>
+          <div className={`mt-1 text-lg font-bold tabular-nums ${ytd.m == null ? "text-slate-300" : ytd.m >= 0 ? "text-emerald-600" : "text-rose-500"}`}>{ytd.m != null ? pct(ytd.m) : "—"}</div>
+          <div className="text-[11px] text-slate-400">YTD{ytd.b != null ? ` · ${benchOf(data).short} ${pct(ytd.b)}` : ""}</div>
+        </div>
+        <button onClick={goFriends} className="text-left">
+          <div className="section-title">Ranking</div>
+          <div className="mt-1 text-lg font-bold text-slate-800 tabular-nums">
+            {social && social.rank != null ? `#${social.rank} of ${social.n}` : "—"}
+          </div>
+          <div className="text-[11px] text-slate-400">
+            {social && social.rank != null ? "friends this year" : social && social.friendsCount === 0 ? "add friends to rank" : social && !social.shared ? "share to get ranked" : "friends"}
           </div>
         </button>
-      </div>
+        <div>
+          <div className="section-title">Best performer</div>
+          {best ? (
+            <>
+              <div className="mt-1 text-lg font-bold text-slate-800 truncate">{best.h.ticker}</div>
+              <div className={`text-[11px] font-semibold tabular-nums ${best.r >= 0 ? "text-emerald-600" : "text-rose-500"}`}>{pct(best.r)}</div>
+            </>
+          ) : <div className="mt-1 text-lg font-bold text-slate-300">—</div>}
+        </div>
+      </section>
 
       {!data.onboardingDismissed && (
         <OnboardingCard user={user} active={active} data={data} onImport={goImport} onAddManually={goPositions} goFriends={goFriends} onDismiss={onDismissOnboarding} />
       )}
 
-      {/* quick stats row */}
-      <div className="grid grid-cols-3 gap-3">
-        <StatCard label="Positions" value={active.holdings.length} />
-        <StatCard label="Invested" value={moneyShort(totals.cost, cur)} />
-        <StatCard label="Return" value={pct(totals.plPct)} tone={th.stat} />
-      </div>
+      <div className="lg:grid lg:grid-cols-2 lg:gap-10 space-y-8 lg:space-y-0">
+        <div className="space-y-8">
+          {/* ===== holdings, scannable ===== */}
+          <section>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="section-title">Holdings</h3>
+              <button onClick={goPositions} className="text-xs font-semibold text-emerald-700">All {active.holdings.length} →</button>
+            </div>
+            <HoldingsPreview active={active} cur={cur} fx={fx} onOpen={goPositions} />
+          </section>
 
-      {/* RichR Score */}
-      <ScoreCard active={active} cur={cur} fx={fx} liveValue={totals.value} liveCost={totals.cost}
-        log={data.scoreLog || []} onLog={onScoreLog} />
-
-      {/* period returns vs benchmark */}
-      <PeriodReturns active={active} cur={cur} liveValue={totals.value} liveCost={totals.cost} bench={benchOf(data)} onBench={onBenchmark}
-        onYtd={(m, b) => setYtd({ m, b })} />
-
-      {/* friends benchmark */}
-      <FriendsBenchmark user={user} myYtd={ytd.m} benchYtd={ytd.b} benchLabel={benchOf(data).label} onGoFriends={goFriends}
-        onSummary={setSocial} hidden />
-
-      {/* best / worst + concentration */}
-      <MoversCard active={active} cur={cur} fx={fx} />
-      </div>{/* /left column */}
-
-      <div className="space-y-4">
-      {/* chart card */}
-      <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
-        <div className="flex items-center justify-between mb-1 gap-2 flex-wrap">
-          <h3 className="font-bold text-slate-700">Your progress</h3>
-          <div className="flex items-center gap-2">
-            <button onClick={onToggleAuto} title={staleness.title}
-              className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border transition ${
-                staleness.stale ? "bg-amber-50 text-amber-700 border-amber-200"
-                  : autoRefresh ? "bg-emerald-500 text-white border-emerald-500" : "bg-white text-slate-400 border-slate-200"}`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${staleness.stale ? "bg-amber-400" : autoRefresh ? "bg-white animate-pulse" : "bg-slate-300"}`} />
-              {staleness.stale ? staleness.label : autoRefresh ? "Live · 30s" : "Live off"}
-            </button>
-            <button onClick={() => onRefresh(false)} disabled={refreshing}
-              className={`flex items-center gap-1.5 text-sm font-semibold px-3 py-1.5 rounded-full disabled:opacity-60 ${th.chip}`}>
-              <RefreshCw size={13} style={{ animation: refreshing ? "spin 1s linear infinite" : "none" }} />
-              {refreshing ? "Updating…" : "Update"}
-            </button>
-          </div>
+          {/* ===== periods vs benchmark ===== */}
+          <section>
+            <PeriodReturns active={active} cur={cur} liveValue={totals.value} liveCost={totals.cost} bench={benchOf(data)} onBench={onBenchmark}
+              onYtd={(m, b) => setYtd({ m, b })} bare />
+          </section>
+          <FriendsBenchmark user={user} myYtd={ytd.m} benchYtd={ytd.b} benchLabel={benchOf(data).label} onGoFriends={goFriends}
+            onSummary={setSocial} hidden />
         </div>
-        {priceDataAt > 0 ? (
-          <p className={`text-[11px] mb-1 ${staleness.stale ? "text-amber-600" : "text-slate-400"}`}>
-            {staleness.stale
-              ? `Prices are ${staleness.age} old (${fmtDateTime(priceDataAt)}) — tap Update.`
-              : `Prices as of ${fmtTime(priceDataAt)}`}
-          </p>
-        ) : pricesAt > 0 ? (
-          <p className="text-[11px] text-slate-400 mb-1">Prices fetched {fmtTime(pricesAt)}</p>
-        ) : null}
-        <PerformanceChart holdings={active.holdings} cur={cur} liveValue={totals.value} liveCost={totals.cost}
-          bench={benchOf(data)} onBench={onBenchmark} height={190} compact initialRange="1mo" onExpand={() => setShowHistory(true)} />
-        <p className="text-[10px] text-slate-300 mt-2">
-          Foreign holdings converted at{" "}
-          {fx && fx.at ? `live FX rates (updated ${fmtDateTime(fx.at)})` : "approximate FX rates — tap Update for live rates"}.
-        </p>
+
+        <div className="space-y-8">
+          {/* ===== score ===== */}
+          <section>
+            <ScoreCard active={active} cur={cur} fx={fx} liveValue={totals.value} liveCost={totals.cost}
+              log={data.scoreLog || []} onLog={onScoreLog} />
+          </section>
+
+          {/* ===== allocation + concentration ===== */}
+          <section>
+            <AllocationCard active={active} cur={cur} fx={fx} />
+          </section>
+          <section>
+            <MoversCard active={active} cur={cur} fx={fx} />
+          </section>
+
+          <section>
+            <GoalsSection goals={goals} allValue={allValue} cur={cur}
+              onAdd={onAddGoal} onUpdate={onUpdateGoal} onRemove={onRemoveGoal} />
+          </section>
+        </div>
       </div>
 
       <PortfolioHistorySheet open={showHistory} onClose={() => setShowHistory(false)}
@@ -1641,14 +1676,64 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
         liveValue={totals.value} liveCost={totals.cost} hex={th.hex}
         bench={benchOf(data)} onBench={onBenchmark} />
 
-      {/* allocation donut */}
-      <AllocationCard active={active} cur={cur} fx={fx} />
+      <p className="text-[10px] text-slate-300">
+        Foreign holdings converted at {fx && fx.at ? `live FX rates (updated ${fmtDateTime(fx.at)})` : "approximate FX rates"}. Excludes dividends and fees.
+      </p>
+    </div>
+  );
+}
 
-      {/* goals */}
-      <GoalsSection goals={goals} allValue={allValue} cur={cur}
-        onAdd={onAddGoal} onUpdate={onUpdateGoal} onRemove={onRemoveGoal} />
-      </div>{/* /right column */}
-      </div>{/* /grid */}
+/* Who you are on RichR, in one line: avatar, name, streak, rank, top tickers. */
+function IdentityStrip({ data, active, cur, fx, social, streak, onProfile }) {
+  const prof = profileOf(data.profile);
+  const top = byValueDesc(active.holdings, cur, fx).slice(0, 3);
+  const total = active.holdings.reduce((s, h) => s + holdingValue(h, cur, fx), 0);
+  return (
+    <button onClick={onProfile} className="w-full flex items-center gap-3 text-left">
+      <div className="w-11 h-11 rounded-full bg-emerald-50 flex items-center justify-center text-2xl shrink-0">{prof ? prof.mascot : "🙂"}</div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="font-bold text-slate-900">{data.userName || "Set up profile"}</span>
+          {social && social.rank != null && (
+            <span className={`text-[10px] font-extrabold px-1.5 py-0.5 rounded ${social.rank === 1 ? "bg-amber-100 text-amber-800" : social.rank <= 3 ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>#{social.rank} friends</span>
+          )}
+          {streak >= 2 && <span className="text-[10px] font-bold text-orange-700 bg-orange-50 px-1.5 py-0.5 rounded">🔥 {streak}-week streak</span>}
+        </div>
+        <div className="text-xs text-slate-400 truncate tabular-nums">
+          {data.username ? `@${data.username}` : "no username yet"}
+          {top.length ? " · " + top.map((h) => `${h.ticker} ${total > 0 ? Math.round((holdingValue(h, cur, fx) / total) * 100) : 0}%`).join(" · ") : ""}
+        </div>
+      </div>
+    </button>
+  );
+}
+
+/* Top holdings as scannable rows: logo, name, weight bar, return. */
+function HoldingsPreview({ active, cur, fx, onOpen, limit = 5 }) {
+  const total = active.holdings.reduce((s, h) => s + holdingValue(h, cur, fx), 0);
+  const rows = byValueDesc(active.holdings, cur, fx).slice(0, limit);
+  if (!rows.length) return null;
+  return (
+    <div className="divide-y divide-slate-100">
+      {rows.map((h) => {
+        const w = total > 0 ? (holdingValue(h, cur, fx) / total) * 100 : 0;
+        const cp = h.currentPrice > 0 ? h.currentPrice : h.buyPrice;
+        const r = h.buyPrice > 0 ? ((cp - h.buyPrice) / h.buyPrice) * 100 : 0;
+        return (
+          <button key={h.id} onClick={onOpen} className="w-full flex items-center gap-3 py-3 text-left">
+            <Logo h={h} size={38} rounded="rounded-lg" />
+            <div className="flex-1 min-w-0">
+              <div className="flex items-baseline justify-between gap-2">
+                <div className="font-bold text-slate-800 text-sm">{h.ticker}</div>
+                <div className="text-xs font-semibold text-slate-500 tabular-nums">{w.toFixed(1)}%</div>
+              </div>
+              <div className="text-xs text-slate-400 truncate">{h.name}</div>
+              <div className="mt-1.5 h-1.5 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-slate-800 rounded-full" style={{ width: `${Math.min(100, w)}%` }} /></div>
+            </div>
+            <div className={`text-sm font-bold tabular-nums w-16 text-right ${r >= 0 ? "text-emerald-600" : "text-rose-500"}`}>{pct(r)}</div>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -1656,7 +1741,7 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
 /* Loading placeholder: a few shimmering lines in a card. */
 function Skeleton({ lines = 3, className = "" }) {
   return (
-    <div className={`bg-white rounded-3xl p-5 shadow-sm border border-slate-100 ${className}`} aria-busy="true">
+    <div className={`bg-white rounded-2xl p-5 shadow-sm border border-slate-100 ${className}`} aria-busy="true">
       <div className="skel h-4 w-1/3 mb-3" />
       {Array.from({ length: lines }).map((_, i) => (
         <div key={i} className="skel h-3 mb-2" style={{ width: `${85 - i * 15}%` }} />
@@ -1778,7 +1863,7 @@ async function loadDailySeries(holdings, cur, benchSymbol) {
   return { portfolio: histCache.portfolio, bench: (histCache.bench[benchSymbol] || {}).pts || null };
 }
 
-function PeriodReturns({ active, cur, liveValue, liveCost, bench: BENCH, onBench, onYtd }) {
+function PeriodReturns({ active, cur, liveValue, liveCost, bench: BENCH, onBench, onYtd, bare }) {
   const [rows, setRows] = useState(null); // [{label, mine, bench}]
   const [state, setState] = useState("loading");
   const key = holdingsKey(active.holdings, cur);
@@ -1829,9 +1914,9 @@ function PeriodReturns({ active, cur, liveValue, liveCost, bench: BENCH, onBench
   }, [key, Math.round(liveValue), BENCH.symbol]);
 
   return (
-    <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+    <div className={bare ? "" : "card"}>
       <div className="flex items-center justify-between mb-3 gap-2">
-        <h3 className="font-bold text-slate-700">Performance</h3>
+        <h3 className="section-title">Periods</h3>
         <BenchPicker value={BENCH} onChange={onBench} />
       </div>
       {state === "loading" ? (
@@ -1903,7 +1988,7 @@ function OnboardingCard({ user, active, data, onImport, onAddManually, goFriends
   if (friendsN === null || onBoard === null) return null;
   if (doneN === 3) return null;
   return (
-    <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+    <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
       <div className="flex items-center justify-between mb-3">
         <h3 className="font-bold text-slate-700">Get set up</h3>
         <div className="flex items-center gap-2">
@@ -1927,7 +2012,7 @@ function OnboardingCard({ user, active, data, onImport, onAddManually, goFriends
                 <div className="flex gap-2 mt-2 flex-wrap">
                   {st.actions.map(([label, fn, primary]) => (
                     <button key={label} onClick={fn}
-                      className={`text-xs font-semibold px-3 py-1.5 rounded-full ${primary ? "bg-gradient-to-r from-emerald-500 to-teal-500 text-white shadow" : "bg-slate-100 text-slate-600"}`}>
+                      className={`text-xs font-semibold px-3 py-1.5 rounded-full ${primary ? "bg-emerald-600 hover:bg-emerald-700 text-white shadow" : "bg-slate-100 text-slate-600"}`}>
                       {label}
                     </button>
                   ))}
@@ -1976,7 +2061,7 @@ function ScoreCard({ active, cur, fx, liveValue, liveCost, log, onLog }) {
   const hex = ring >= 75 ? "#10b981" : ring >= 50 ? "#f59e0b" : "#f43f5e";
 
   return (
-    <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+    <div>
       <button onClick={() => setOpen((v) => !v)} className="w-full flex items-center gap-4 text-left">
         <div className="relative w-20 h-20 shrink-0">
           <svg viewBox="0 0 36 36" className="w-20 h-20 -rotate-90">
@@ -2099,7 +2184,7 @@ function FriendsBenchmark({ user, myYtd, benchYtd, benchLabel, onGoFriends, onSu
     </div>
   );
   return (
-    <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+    <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
       <div className="flex items-center justify-between mb-3">
         <h3 className="font-bold text-slate-700 flex items-center gap-2"><Users size={16} className="text-emerald-500" /> You vs friends</h3>
         <span className="text-[11px] text-slate-400">YTD, time-weighted</span>
@@ -2150,7 +2235,8 @@ function MoversCard({ active, cur, fx }) {
     </div>
   );
   return (
-    <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100 space-y-3">
+    <div className="space-y-3">
+      <h3 className="section-title">Movers</h3>
       <Row label="BEST PERFORMER" item={best} tone={best.r >= 0 ? "text-emerald-600" : "text-rose-500"} />
       {sorted.length > 1 && <Row label="WORST PERFORMER" item={worst} tone={worst.r >= 0 ? "text-emerald-600" : "text-rose-500"} />}
       <div className="border-t border-slate-100 pt-3 flex items-center justify-between gap-3">
@@ -2180,8 +2266,8 @@ function AllocationCard({ active, cur, fx }) {
   active.holdings.forEach((h) => { const t = h.type || "Stock"; byType[t] = (byType[t] || 0) + holdingValue(h, cur, fx); });
   const types = Object.entries(byType).sort((a, b) => b[1] - a[1]);
   return (
-    <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
-      <h3 className="font-bold text-slate-700 mb-1">Allocation</h3>
+    <div>
+      <h3 className="section-title mb-2">Allocation</h3>
       <div className="flex items-center gap-3">
         <div className="w-36 h-36 shrink-0">
           <ResponsiveContainer width="100%" height="100%">
@@ -2219,6 +2305,8 @@ function AllocationCard({ active, cur, fx }) {
 function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRemove, onSetPrice, onLoadSample, onClosePosition, watchlist, onRemoveWatch, onSetWatchPrice, goResearch, openImport, onImportOpened }) {
   const [editing, setEditing] = useState(null);
   const [importing, setImporting] = useState(false);
+  const [dense, setDense] = useState(true); // compact rows by default; "Show details" expands
+  const totalValue = active.holdings.reduce((s, h) => s + holdingValue(h, cur, fx), 0);
   useEffect(() => { if (openImport) { setImporting(true); if (onImportOpened) onImportOpened(); } }, [openImport]);
   const [detail, setDetail] = useState(null);
   const [view, setView] = useState("holdings"); // "holdings" | "watchlist"
@@ -2246,7 +2334,7 @@ function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRe
               <Camera size={15} /> Import
             </button>
             <button onClick={() => setEditing("new")}
-              className="flex items-center gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold px-4 py-2 rounded-full shadow">
+              className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold px-4 py-2 rounded-full shadow">
               <Plus size={15} /> Add
             </button>
           </div>
@@ -2266,12 +2354,12 @@ function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRe
 
       {view === "holdings" && (<>
       {active.holdings.length === 0 ? (
-        <div className="bg-white rounded-3xl p-8 text-center shadow-sm border border-slate-100">
+        <div className="bg-white rounded-2xl p-8 text-center shadow-sm border border-slate-100">
           <p className="font-semibold text-slate-600 mb-1">Nothing here yet</p>
           <p className="text-sm text-slate-400 mb-4">Add positions manually, or import them straight from a screenshot of your bank or broker app.</p>
           <div className="flex gap-2 justify-center flex-wrap">
             <button onClick={() => setImporting(true)}
-              className="flex items-center gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold px-4 py-2.5 rounded-full shadow">
+              className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold px-4 py-2.5 rounded-full shadow">
               <Camera size={15} /> Import portfolio
             </button>
             <button onClick={onLoadSample} className="bg-slate-100 text-slate-600 text-sm font-semibold px-4 py-2.5 rounded-full">
@@ -2292,10 +2380,17 @@ function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRe
             </button>
           </div>
         )}
-        {byValueDesc(active.holdings, cur, fx).map((h) => (
-          <PositionCard key={h.id} h={h} cur={cur} fx={fx} onOpen={() => setDetail(h)}
-            onEdit={() => setEditing(h)} onRemove={() => onRemove(h.id)} onSetPrice={onSetPrice} />
-        ))}
+        <div className="flex items-center justify-between">
+          <div className="text-xs text-slate-400 tabular-nums">{active.holdings.length} positions · {money(totalValue, cur)}</div>
+          <button onClick={() => setDense((v) => !v)} className="text-xs font-semibold text-slate-500 bg-slate-100 px-2.5 py-1 rounded-lg">{dense ? "Show details" : "Compact"}</button>
+        </div>
+        <div className="card-tight divide-y divide-slate-100 !py-1">
+          {byValueDesc(active.holdings, cur, fx).map((h) => (
+            <PositionCard key={h.id} h={h} cur={cur} fx={fx} onOpen={() => setDetail(h)}
+              weight={totalValue > 0 ? (holdingValue(h, cur, fx) / totalValue) * 100 : 0} expanded={!dense}
+              onEdit={() => setEditing(h)} onRemove={() => onRemove(h.id)} onSetPrice={onSetPrice} />
+          ))}
+        </div>
       </>)}
 
       {(active.closed && active.closed.length > 0) && (
@@ -2325,18 +2420,18 @@ function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRe
 
       {view === "watchlist" && (<>
       {wl.length === 0 ? (
-        <div className="bg-white rounded-3xl p-8 text-center shadow-sm border border-slate-100">
+        <div className="bg-white rounded-2xl p-8 text-center shadow-sm border border-slate-100">
           <Star size={24} className="mx-auto text-amber-400 mb-3" />
           <p className="font-semibold text-slate-600 mb-1">Your watchlist is empty</p>
           <p className="text-sm text-slate-400 mb-4">Find assets you're keen on in Research and tap Watch — they'll show up here as a concept portfolio you can track before buying.</p>
           <button onClick={goResearch}
-            className="flex items-center gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold px-4 py-2.5 rounded-full shadow mx-auto">
+            className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold px-4 py-2.5 rounded-full shadow mx-auto">
             <Search size={15} /> Go to Research
           </button>
         </div>
       ) : (<>
         {concept != null && (
-          <div className="bg-white rounded-3xl p-4 shadow-sm border border-slate-100 flex items-center justify-between gap-3">
+          <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100 flex items-center justify-between gap-3">
             <div className="min-w-0">
               <div className="text-xs font-semibold text-slate-400">CONCEPT PORTFOLIO</div>
               <div className="text-[11px] text-slate-400 mt-0.5">If you'd bought equal amounts when you added each</div>
@@ -2402,7 +2497,7 @@ function WatchCard({ w, cur, onBuy, onRemove, onSetPrice }) {
   const days = w.addedAt ? Math.max(0, Math.floor((Date.now() - w.addedAt) / 86400000)) : 0;
 
   return (
-    <div className="bg-white rounded-3xl p-4 shadow-sm border border-slate-100">
+    <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-start gap-3 min-w-0">
           <Logo h={w} />
@@ -2445,7 +2540,7 @@ function WatchCard({ w, cur, onBuy, onRemove, onSetPrice }) {
           )}
           <div className="flex gap-1.5 justify-end mt-2">
             <button onClick={onBuy}
-              className="h-8 px-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-xs font-semibold flex items-center gap-1 shadow">
+              className="h-8 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1 shadow">
               <Plus size={12} /> Buy
             </button>
             <button onClick={onRemove} className="w-8 h-8 rounded-xl bg-rose-50 flex items-center justify-center text-rose-400">
@@ -2458,62 +2553,62 @@ function WatchCard({ w, cur, onBuy, onRemove, onSetPrice }) {
   );
 }
 
-function PositionCard({ h, cur, fx, onOpen, onEdit, onRemove, onSetPrice }) {
+function PositionCard({ h, cur, fx, onOpen, onEdit, onRemove, onSetPrice, weight = null, expanded = false }) {
   const [editPrice, setEditPrice] = useState(false);
   const hc = h.currency || cur;
   const cp = h.currentPrice > 0 ? h.currentPrice : h.buyPrice;
   const value = fxConvert(h.shares * cp, hc, cur, fx);
   const plPct = h.buyPrice ? ((cp - h.buyPrice) / h.buyPrice) * 100 : 0;
+  const pl = fxConvert(h.shares * (cp - h.buyPrice), hc, cur, fx);
   const up = plPct >= 0;
   const V = VERDICTS[h.verdict] || VERDICTS.open;
 
   return (
-    <div className="bg-white rounded-3xl p-4 shadow-sm border border-slate-100 cursor-pointer active:bg-slate-50 transition"
-      onClick={onOpen}>
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex items-start gap-3 min-w-0">
-          <Logo h={h} />
-          <div className="min-w-0">
-            <div className="font-semibold text-slate-700 truncate">{h.name}</div>
-            <div className="text-xs text-slate-400 font-medium">
-              {h.shares} × {money(h.buyPrice, hc)} · {h.type}
-              {hc !== cur && <span className="ml-1 text-[10px] font-bold text-sky-600 bg-sky-50 px-1.5 py-0.5 rounded-full">{hc}</span>}
-              {" "}· {daysHeld(h.buyDate)}d
+    <div className="py-3 cursor-pointer" onClick={onOpen}>
+      <div className="flex items-center gap-3">
+        <Logo h={h} size={40} rounded="rounded-lg" />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-baseline justify-between gap-2">
+            <div className="font-bold text-slate-800 text-sm flex items-center gap-1.5">
+              {h.ticker}
+              {h.sample && <span className="text-[9px] font-bold uppercase tracking-wide text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded">sample</span>}
+              {hc !== cur && <span className="text-[9px] font-bold text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">{hc}</span>}
             </div>
-            <button onClick={(e) => { e.stopPropagation(); setEditPrice(true); }}
-              className={`text-xs font-semibold mt-0.5 underline decoration-dotted ${cp > h.buyPrice ? "text-emerald-600" : cp < h.buyPrice ? "text-rose-500" : "text-slate-400"}`}>
-              now {money(cp, hc)}
-            </button>
-            {editPrice && (
-              <div className="mt-1.5" onClick={(e) => e.stopPropagation()}>
-                <input autoFocus type="number" defaultValue={h.currentPrice || ""}
-                  placeholder={`Price in ${hc}`}
-                  onBlur={(e) => { const v = parseFloat(e.target.value); if (v > 0) onSetPrice(h.id, v); setEditPrice(false); }}
-                  onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
-                  className="border border-slate-200 rounded-xl px-2.5 py-1.5 text-sm w-32" />
-              </div>
-            )}
+            {weight != null && <div className="text-xs font-semibold text-slate-500 tabular-nums">{weight.toFixed(1)}%</div>}
           </div>
+          <div className="text-xs text-slate-400 truncate">{h.name}</div>
+          {weight != null && (
+            <div className="mt-1.5 h-1.5 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-slate-800 rounded-full" style={{ width: `${Math.min(100, weight)}%` }} /></div>
+          )}
         </div>
-        <div className="text-right shrink-0">
-          <div className="font-bold text-slate-700">{money(value, cur)}</div>
-          <div className={`text-sm font-bold ${up ? "text-emerald-600" : "text-rose-500"}`}>{pct(plPct)}</div>
-          <div className="flex gap-1.5 justify-end mt-2">
-            <button onClick={(e) => { e.stopPropagation(); onEdit(); }} className="w-8 h-8 rounded-xl bg-slate-100 flex items-center justify-center text-slate-500">
-              <Pencil size={13} />
-            </button>
-            <button onClick={(e) => { e.stopPropagation(); onRemove(); }} className="w-8 h-8 rounded-xl bg-rose-50 flex items-center justify-center text-rose-400">
-              <Trash2 size={13} />
-            </button>
-          </div>
+        <div className="text-right shrink-0 w-24">
+          <div className="font-bold text-slate-800 text-sm tabular-nums">{money(value, cur)}</div>
+          <div className={`text-xs font-bold tabular-nums ${up ? "text-emerald-600" : "text-rose-500"}`}>{pct(plPct)}</div>
         </div>
       </div>
-      <div className="mt-3 flex items-center gap-2">
-        <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-full ${V.chip}`}>
-          <V.icon size={11} /> {V.label}
-        </span>
-        {h.thesis && <span className="text-xs text-slate-400 truncate">“{h.thesis}”</span>}
-      </div>
+
+      {expanded && (
+        <div className="mt-2.5 ml-[52px] flex items-center justify-between gap-3 flex-wrap">
+          <div className="text-xs text-slate-500 tabular-nums">
+            {h.shares} × {money(h.buyPrice, hc)} → <button onClick={(e) => { e.stopPropagation(); setEditPrice(true); }} className="font-semibold text-slate-700 underline decoration-dotted">{money(cp, hc)}</button>
+            <span className="text-slate-400"> · {up ? "+" : ""}{money(pl, cur)} · {daysHeld(h.buyDate)}d · {h.type}</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded ${V.chip}`}><V.icon size={10} /> {V.label}</span>
+            <button onClick={(e) => { e.stopPropagation(); onEdit(); }} className="w-7 h-7 rounded-lg bg-slate-100 flex items-center justify-center text-slate-500"><Pencil size={12} /></button>
+            <button onClick={(e) => { e.stopPropagation(); onRemove(); }} className="w-7 h-7 rounded-lg bg-slate-100 flex items-center justify-center text-slate-400 hover:text-rose-500"><Trash2 size={12} /></button>
+          </div>
+          {editPrice && (
+            <div className="w-full" onClick={(e) => e.stopPropagation()}>
+              <input autoFocus type="number" defaultValue={h.currentPrice || ""} placeholder={`Price in ${hc}`}
+                onBlur={(e) => { const v = parseFloat(e.target.value); if (v > 0) onSetPrice(h.id, v); setEditPrice(false); }}
+                onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+                className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-sm w-36" />
+            </div>
+          )}
+          {h.thesis && <p className="w-full text-xs text-slate-400 italic truncate">“{h.thesis}”</p>}
+        </div>
+      )}
     </div>
   );
 }
@@ -2564,7 +2659,7 @@ function PositionModal({ holding, cur, onClose, onSave, title }) {
 
   return (
     <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto overscroll-contain"
+      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl max-h-[92vh] overflow-y-auto overscroll-contain"
         onClick={(e) => e.stopPropagation()}>
         <div className="p-5 border-b border-slate-100 flex items-center justify-between">
           <h3 className="font-bold text-lg text-slate-700">{title || (holding ? "Edit position" : "New position")}</h3>
@@ -2622,7 +2717,7 @@ function PositionModal({ holding, cur, onClose, onSave, title }) {
         </div>
         <div className="p-5 pt-0">
           <button onClick={save} disabled={!valid}
-            className="w-full bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-semibold py-3 rounded-2xl shadow disabled:opacity-50">
+            className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-3 rounded-2xl shadow disabled:opacity-50">
             {holding ? "Save changes" : "Add position"}
           </button>
         </div>
@@ -2635,7 +2730,7 @@ function PositionModal({ holding, cur, onClose, onSave, title }) {
 function ThesesTab({ active, cur, fx, onVerdict }) {
   if (!active.holdings.length)
     return (
-      <div className="bg-white rounded-3xl p-8 text-center shadow-sm border border-slate-100">
+      <div className="bg-white rounded-2xl p-8 text-center shadow-sm border border-slate-100">
         <BookOpen size={24} className="mx-auto text-slate-300 mb-3" />
         <p className="font-semibold text-slate-600 mb-1">No theses yet</p>
         <p className="text-sm text-slate-400">Add positions and write down your reasoning — then come back to grade your calls.</p>
@@ -2653,7 +2748,7 @@ function ThesesTab({ active, cur, fx, onVerdict }) {
         const plPct = h.buyPrice ? ((cp - h.buyPrice) / h.buyPrice) * 100 : 0;
         const up = plPct >= 0;
         return (
-          <div key={h.id} className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+          <div key={h.id} className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2.5 min-w-0">
                 <Logo h={h} size={32} rounded="rounded-xl" />
@@ -2905,28 +3000,46 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpe
   const hasSample = active.holdings.some((h) => h.sample);
   const canShare = active.holdings.length > 0 && !hasSample;
 
+  const [view, setView] = useState("board"); // board | activity | groups
+
+  if (view === "groups") {
+    return (
+      <div className="space-y-4">
+        <FriendsSwitcher view={view} setView={setView} />
+        <GroupsTab user={user} active={active} cur={cur} fx={data.fx || DEFAULT_FX} say={say} username={data.username} onOpenTicker={onOpenTicker} />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
+      <FriendsSwitcher view={view} setView={setView} />
+      {view === "activity" && (
+        <ActivityFeed user={user} friends={friends} names={(friends || []).reduce((m, f) => { m[f.id] = f.username; return m; }, {})}
+          myName={data.username} onOpenProfile={openFriendProfile}
+          board={shown || []} onOpenTicker={onOpenTicker} />
+      )}
+      {view === "board" && (<>
       {/* share card */}
-      <div className="rounded-3xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white p-6 shadow-lg shadow-emerald-200">
-        <div className="flex items-center gap-2 font-bold"><Share2 size={17} /> Share your progress</div>
-        <p className="text-sm text-emerald-50 mt-1.5 leading-relaxed">
+      <div className="card">
+        <div className="flex items-center gap-2 font-bold text-slate-800"><Share2 size={17} className="text-emerald-600" /> Share your progress</div>
+        <p className="text-sm text-slate-500 mt-1.5 leading-relaxed">
           Publish “{active.name}” to your friends. You choose exactly what they see — return % (time-weighted YTD, so adding money doesn’t inflate it), top holdings, win rate and more. Amounts, buy prices and theses always stay private. Unshare anytime.
         </p>
         <button onClick={onEditSharing}
-          className="mt-3 w-full flex items-center justify-between bg-emerald-700/30 rounded-2xl px-3.5 py-2.5 text-left active:bg-emerald-700/50">
+          className="mt-3 w-full flex items-center justify-between bg-slate-50 rounded-xl px-3.5 py-2.5 text-left">
           <div className="min-w-0">
-            <div className="text-sm font-semibold">
+            <div className="text-sm font-semibold text-slate-700">
               {sharedCount === SHARE_ITEMS.length ? "Sharing everything" : sharedCount === 0 ? "Sharing only your name" : `Sharing ${sharedCount} of ${SHARE_ITEMS.length} items`}
             </div>
-            <div className="text-[11px] text-emerald-100 truncate">
+            <div className="text-[11px] text-slate-400 truncate">
               {sharedCount === 0 ? "Turn things on in Profile" : SHARE_ITEMS.filter((it) => share[it.id]).map((it) => it.label).join(" · ")}
             </div>
           </div>
-          <span className="text-xs font-semibold shrink-0 ml-2 flex items-center gap-0.5">Edit <ChevronRight size={14} /></span>
+          <span className="text-xs font-semibold text-emerald-700 shrink-0 ml-2 flex items-center gap-0.5">Edit <ChevronRight size={14} /></span>
         </button>
         {!canShare && (
-          <p className="mt-3 text-[11px] text-emerald-100 bg-emerald-700/30 rounded-xl px-3 py-2">
+          <p className="mt-3 text-[11px] text-amber-700 bg-amber-50 rounded-xl px-3 py-2">
             {hasSample
               ? "You still have sample positions — clear or replace them in Portfolio › Holdings before sharing."
               : "Add a position in the Portfolio tab first — there's nothing to share yet."}
@@ -2934,25 +3047,20 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpe
         )}
         <div className="mt-3 flex items-center gap-2">
           <button onClick={publish} disabled={busy || !canShare}
-            className="bg-white text-emerald-600 font-semibold text-sm px-5 py-2.5 rounded-full shadow disabled:opacity-60">
+            className="btn-primary">
             {busy ? "Working…" : onBoard ? "Update share" : "Share now"}
           </button>
           {onBoard && (
             <button onClick={unpublish} disabled={busy}
-              className="bg-emerald-700/40 text-white font-semibold text-sm px-5 py-2.5 rounded-full disabled:opacity-60">
+              className="btn-secondary">
               Unshare
             </button>
           )}
         </div>
       </div>
 
-      {/* activity feed — what mutual friends changed (percentages only) */}
-      <ActivityFeed user={user} friends={friends} names={(friends || []).reduce((m, f) => { m[f.id] = f.username; return m; }, {})}
-        myName={data.username} onOpenProfile={openFriendProfile}
-        board={shown || []} onOpenTicker={onOpenTicker} />
-
       {/* friends manager */}
-      <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+      <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
         <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-1">
           <Plus size={16} className="text-emerald-500" /> Add friends
         </h3>
@@ -2967,7 +3075,7 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpe
             placeholder="friend's username"
             className="flex-1 min-w-0 border border-slate-200 rounded-xl px-3 py-2 text-sm lowercase" />
           <button onClick={addFriend} disabled={adding || !addName.trim()}
-            className="bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold px-4 rounded-xl shadow disabled:opacity-50 shrink-0">
+            className="bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold px-4 rounded-xl shadow disabled:opacity-50 shrink-0">
             {adding ? "Adding…" : "Add"}
           </button>
         </div>
@@ -3003,7 +3111,7 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpe
         const incomingPending = (incoming || []).filter((r) => !r.mutual);
         const outgoingPending = (friends || []).filter((f) => !f.mutual);
         return (
-          <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+          <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
             <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-3">
               <Users size={16} className="text-emerald-500" /> Your friends
               {mutuals.length > 0 && <span className="text-xs font-semibold text-slate-400">· {mutuals.length}</span>}
@@ -3064,7 +3172,7 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpe
                       <div key={r.id} className="flex items-center justify-between gap-2 py-2.5 border-b border-slate-50 last:border-0">
                         <span className="text-sm font-semibold text-slate-700 truncate">@{r.username}</span>
                         <button onClick={() => addBack(r.id, r.username)}
-                          className="bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-xs font-semibold px-3 py-1.5 rounded-full shadow shrink-0">
+                          className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-3 py-1.5 rounded-full shadow shrink-0">
                           Add back
                         </button>
                       </div>
@@ -3110,7 +3218,7 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpe
       {shown === null ? (
         <Skeleton lines={4} />
       ) : shown.length === 0 ? (
-        <div className="bg-white rounded-3xl p-8 text-center shadow-sm border border-slate-100">
+        <div className="bg-white rounded-2xl p-8 text-center shadow-sm border border-slate-100">
           <Trophy size={24} className="mx-auto text-amber-300 mb-3" />
           <p className="font-semibold text-slate-600 mb-1">No shared returns yet</p>
           <p className="text-sm text-slate-400">
@@ -3164,9 +3272,21 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpe
         Everyone picks what they share (Profile › What friends can see); a lock means that person keeps their return % private.
         Amounts, buy prices and theses always stay on your device.
       </p>
+      </>)}
       {viewing && (
         <ProfileSheet r={viewing} me={viewing.userId === user.id} onClose={() => setViewing(null)} />
       )}
+    </div>
+  );
+}
+
+function FriendsSwitcher({ view, setView }) {
+  return (
+    <div className="bg-slate-100 rounded-xl p-1 flex">
+      {[["board", "Leaderboard"], ["activity", "Activity"], ["groups", "Groups"]].map(([id, lbl]) => (
+        <button key={id} onClick={() => setView(id)}
+          className={`flex-1 text-[13px] font-semibold py-1.5 rounded-lg transition ${view === id ? "bg-white text-slate-800" : "text-slate-500"}`}>{lbl}</button>
+      ))}
     </div>
   );
 }
@@ -3176,7 +3296,7 @@ function GoalsSection({ goals, allValue, cur, onAdd, onUpdate, onRemove }) {
   const [editing, setEditing] = useState(null); // goal object or "new"
 
   return (
-    <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+    <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
       <div className="flex items-center justify-between mb-1">
         <h3 className="font-bold text-slate-700 flex items-center gap-2">
           <Flag size={16} className="text-emerald-500" /> Your goals
@@ -3258,7 +3378,7 @@ function GoalModal({ goal, cur, onClose, onSave }) {
 
   return (
     <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto overscroll-contain"
+      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl max-h-[92vh] overflow-y-auto overscroll-contain"
         onClick={(e) => e.stopPropagation()}>
         <div className="p-5 border-b border-slate-100 flex items-center justify-between">
           <h3 className="font-bold text-lg text-slate-700">{goal ? "Edit goal" : "New goal"}</h3>
@@ -3285,7 +3405,7 @@ function GoalModal({ goal, cur, onClose, onSave }) {
         <div className="p-5 pt-0">
           <button onClick={() => valid && onSave({ ...f, title: f.title.trim(), targetAmount: Number(f.targetAmount) || 0 })}
             disabled={!valid}
-            className="w-full bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-semibold py-3 rounded-2xl shadow disabled:opacity-50">
+            className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-3 rounded-2xl shadow disabled:opacity-50">
             {goal ? "Save changes" : "Add goal"}
           </button>
         </div>
@@ -3464,7 +3584,7 @@ function InsightsTab({ active, totals, cur, fx, say, analysis, onSave, news, onS
 
   if (!active.holdings.length)
     return (
-      <div className="bg-white rounded-3xl p-8 text-center shadow-sm border border-slate-100">
+      <div className="bg-white rounded-2xl p-8 text-center shadow-sm border border-slate-100">
         <Activity size={24} className="mx-auto text-slate-300 mb-3" />
         <p className="font-semibold text-slate-600 mb-1">Nothing to analyze yet</p>
         <p className="text-sm text-slate-400">Add positions first — then get your risk profile, a news scan, and your theses in one place.</p>
@@ -3506,14 +3626,14 @@ function RiskView({ analysis, busy, onAnalyze }) {
     <div className="space-y-4">
       <div className="flex justify-end">
         <button onClick={onAnalyze} disabled={busy}
-          className="flex items-center gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold px-4 py-2 rounded-full shadow disabled:opacity-60">
+          className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold px-4 py-2 rounded-full shadow disabled:opacity-60">
           <Sparkles size={14} style={{ animation: busy ? "spin 1.2s linear infinite" : "none" }} />
           {busy ? "Analyzing…" : analysis ? "Re-analyze" : "Analyze"}
         </button>
       </div>
 
       {!analysis ? (
-        <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100">
+        <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100">
           <p className="text-sm text-slate-500 leading-relaxed">
             Tap <span className="font-semibold">Analyze</span> and the app will look up each holding's beta and volatility
             from public market data, then calculate your portfolio's beta, estimated standard deviation and concentration.
@@ -3531,7 +3651,7 @@ function RiskView({ analysis, busy, onAnalyze }) {
           </div>
 
           {analysis.note && (
-            <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+            <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
               <div className="flex items-center gap-2 font-bold text-slate-700 text-sm mb-2">
                 <Sparkles size={14} className="text-emerald-500" /> Diversification note
               </div>
@@ -3539,7 +3659,7 @@ function RiskView({ analysis, busy, onAnalyze }) {
             </div>
           )}
 
-          <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+          <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
             <h3 className="font-bold text-slate-700 text-sm mb-3">Per holding</h3>
             <div className="grid grid-cols-4 text-[11px] font-semibold text-slate-400 pb-2 border-b border-slate-100">
               <span>TICKER</span><span className="text-right">WEIGHT</span>
@@ -3581,14 +3701,14 @@ function NewsView({ news, busy, onFetch }) {
           {news ? `Scanned ${fmtDateTime(news.at)}` : "News affecting your holdings"}
         </p>
         <button onClick={onFetch} disabled={busy}
-          className="flex items-center gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold px-4 py-2 rounded-full shadow disabled:opacity-60">
+          className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold px-4 py-2 rounded-full shadow disabled:opacity-60">
           <RefreshCw size={14} style={{ animation: busy ? "spin 1s linear infinite" : "none" }} />
           {busy ? "Scanning…" : news ? "Rescan" : "Scan news"}
         </button>
       </div>
 
       {!news ? (
-        <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100">
+        <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100">
           <p className="text-sm text-slate-500 leading-relaxed">
             Tap <span className="font-semibold">Scan news</span> and the app pulls recent articles about your
             holdings from financial news sources, then highlights the ones most likely to move your portfolio —
@@ -3600,7 +3720,7 @@ function NewsView({ news, busy, onFetch }) {
           {news.items.map((n, i) => {
             const imp = IMPACT[n.impact] || IMPACT.mixed;
             const card = (
-              <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100 active:opacity-80 transition">
+              <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100 active:opacity-80 transition">
                 <div className="flex items-center gap-1.5 flex-wrap mb-2">
                   <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-full ${imp.chip}`}>
                     <imp.icon size={11} /> {imp.label}
@@ -4029,7 +4149,7 @@ function ImportModal({ cur, onClose, onImport, initialMode = "shot" }) {
 
   return (
     <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto overscroll-contain flex flex-col"
+      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl max-h-[92vh] overflow-y-auto overscroll-contain flex flex-col"
         onClick={(e) => e.stopPropagation()}>
         <div className="p-5 border-b border-slate-100 flex items-center justify-between shrink-0">
           <h3 className="font-bold text-lg text-slate-700">Import holdings</h3>
@@ -4081,7 +4201,7 @@ function ImportModal({ cur, onClose, onImport, initialMode = "shot" }) {
             <p className="text-sm text-slate-400 mb-4 leading-relaxed">{errMsg}</p>
             <div className="flex gap-2 justify-center flex-wrap">
               <button onClick={() => { const f = pendingCsv.current; pendingCsv.current = null; setStage("pick"); if (f) handleFiles([f]); }}
-                className="bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold px-4 py-2.5 rounded-full shadow">Let AI read it</button>
+                className="bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold px-4 py-2.5 rounded-full shadow">Let AI read it</button>
               <button onClick={downloadTemplate} className="bg-slate-100 text-slate-600 text-sm font-semibold px-4 py-2.5 rounded-full">Get the template</button>
               <button onClick={() => setStage("pick")} className="bg-slate-100 text-slate-600 text-sm font-semibold px-4 py-2.5 rounded-full">Back</button>
             </div>
@@ -4216,7 +4336,7 @@ function ImportModal({ cur, onClose, onImport, initialMode = "shot" }) {
                 </p>
               )}
               <button onClick={confirm} disabled={!importable.length}
-                className="w-full bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-semibold py-3 rounded-2xl shadow disabled:opacity-50">
+                className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-3 rounded-2xl shadow disabled:opacity-50">
                 Add {importable.length} position{importable.length === 1 ? "" : "s"}
               </button>
             </div>
@@ -4289,7 +4409,7 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClosePosition, onClose })
 
   return (
     <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="absolute inset-0 flex flex-col bg-white sm:static sm:inset-auto sm:w-full sm:max-w-md sm:rounded-3xl sm:max-h-[90vh]"
+      <div className="absolute inset-0 flex flex-col bg-white sm:static sm:inset-auto sm:w-full sm:max-w-md sm:rounded-2xl sm:max-h-[90vh]"
         onClick={(e) => e.stopPropagation()}>
         {/* back bar — fixed, always visible */}
         <div className="shrink-0 bg-white px-4 py-3 border-b border-slate-100 flex items-center justify-between sm:rounded-t-3xl"
@@ -4396,7 +4516,7 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClosePosition, onClose })
                   <div className="flex gap-2">
                     <button onClick={() => onClosePosition(Number(sellP), sellD)}
                       disabled={!(Number(sellP) > 0)}
-                      className="flex-1 bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold py-2.5 rounded-xl disabled:opacity-50">
+                      className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold py-2.5 rounded-xl disabled:opacity-50">
                       Confirm sale
                     </button>
                     <button onClick={() => setClosing(false)}
@@ -4831,7 +4951,7 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
           <button onClick={onClose} className="p-2 -ml-2 text-slate-500"><ChevronLeft size={22} /></button>
           <h2 className="font-bold text-lg text-slate-700">Portfolio history</h2>
         </div>
-        <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+        <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
           <PerformanceChart holdings={holdings} cur={cur} liveValue={liveValue} liveCost={liveCost} bench={bench} onBench={onBench} height={300} initialRange="1y" />
         </div>
       </div>
@@ -4964,7 +5084,7 @@ function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo, watchlist, o
 
       {/* quote card */}
       {sel && (
-        <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+        <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="font-bold text-slate-700 truncate">{sel.name || sel.symbol}</div>
@@ -5006,7 +5126,7 @@ function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo, watchlist, o
 
           <div className="mt-4 flex items-center gap-2">
             <button onClick={() => startAdd(sel)}
-              className="flex-1 bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold py-2.5 rounded-full shadow flex items-center justify-center gap-1.5">
+              className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold py-2.5 rounded-full shadow flex items-center justify-center gap-1.5">
               <Plus size={15} /> Add to portfolio
             </button>
             <button onClick={() => watch(sel)}
@@ -5019,7 +5139,7 @@ function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo, watchlist, o
       )}
 
       {!sel && (
-        <div className="bg-white rounded-3xl p-8 text-center shadow-sm border border-slate-100">
+        <div className="bg-white rounded-2xl p-8 text-center shadow-sm border border-slate-100">
           <Search size={24} className="mx-auto text-slate-300 mb-3" />
           <p className="text-sm text-slate-400">Search any instrument above to see its current price. Nothing is added until you choose to.</p>
         </div>
@@ -5138,7 +5258,7 @@ function ProfileSheet({ r, me, onClose }) {
   );
   return (
     <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="absolute inset-0 flex flex-col bg-white sm:static sm:inset-auto sm:w-full sm:max-w-md sm:rounded-3xl sm:max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
+      <div className="absolute inset-0 flex flex-col bg-white sm:static sm:inset-auto sm:w-full sm:max-w-md sm:rounded-2xl sm:max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
         <div className="shrink-0 bg-white px-4 py-3 border-b border-slate-100 flex items-center justify-between sm:rounded-t-3xl"
           style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top))" }}>
           <button onClick={onClose} className="flex items-center gap-0.5 text-sm font-semibold text-emerald-600 -ml-1">
@@ -5344,14 +5464,14 @@ function GroupsTab({ user, active, cur, fx, say, onOpenTicker, username }) {
 
   return (
     <div className="space-y-4">
-      <div className="rounded-3xl bg-gradient-to-br from-indigo-500 to-violet-600 text-white p-6 shadow-lg shadow-indigo-200">
+      <div className="rounded-2xl bg-gradient-to-br from-slate-800 to-slate-900 text-white p-6">
         <div className="flex items-center gap-2 font-bold"><MessageCircle size={17} /> Talk it through</div>
-        <p className="text-sm text-indigo-50 mt-1.5 leading-relaxed">
+        <p className="text-sm text-slate-200 mt-1.5 leading-relaxed">
           Private groups with your friends — discuss ideas, share a position with your thesis, tag tickers like <span className="font-semibold">$NVDA</span>.
           Only people you've both added can be in a group, and only members can read it.
         </p>
         <button onClick={() => setCreating(true)} disabled={!mutuals}
-          className="mt-4 bg-white text-indigo-600 font-semibold text-sm px-5 py-2.5 rounded-full shadow flex items-center gap-1.5 disabled:opacity-60">
+          className="mt-4 bg-white text-emerald-700 font-semibold text-sm px-5 py-2.5 rounded-full shadow flex items-center gap-1.5 disabled:opacity-60">
           <Plus size={15} /> New group
         </button>
       </div>
@@ -5359,8 +5479,8 @@ function GroupsTab({ user, active, cur, fx, say, onOpenTicker, username }) {
       {groups === null ? (
         <Skeleton lines={3} />
       ) : groups.length === 0 ? (
-        <div className="bg-white rounded-3xl p-8 text-center shadow-sm border border-slate-100">
-          <MessageCircle size={24} className="mx-auto text-indigo-300 mb-3" />
+        <div className="bg-white rounded-2xl p-8 text-center shadow-sm border border-slate-100">
+          <MessageCircle size={24} className="mx-auto text-slate-300 mb-3" />
           <p className="font-semibold text-slate-600 mb-1">No groups yet</p>
           <p className="text-sm text-slate-400">
             {mutuals && mutuals.length === 0
@@ -5375,7 +5495,7 @@ function GroupsTab({ user, active, cur, fx, say, onOpenTicker, username }) {
             <div className="flex items-center">
             <button onClick={() => setOpen(g)}
               className="flex-1 min-w-0 text-left p-4 flex items-center gap-3 active:bg-slate-50 rounded-l-2xl">
-              <div className="w-11 h-11 rounded-2xl bg-indigo-50 text-indigo-500 flex items-center justify-center font-bold text-lg shrink-0">
+              <div className="w-11 h-11 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center font-bold text-lg shrink-0">
                 {g.name.trim().slice(0, 1).toUpperCase()}
               </div>
               <div className="flex-1 min-w-0">
@@ -5501,7 +5621,7 @@ function ActivityFeed({ user, friends, names, myName, onOpenProfile, board, onOp
   };
   const shown = showAll ? events : events.slice(0, 8);
   return (
-    <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+    <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
       <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-1">
         <Activity size={16} className="text-emerald-500" /> Activity
       </h3>
@@ -5591,7 +5711,7 @@ function NewGroupModal({ mutuals, onClose, onCreate }) {
   const valid = name.trim().length > 0;
   return (
     <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto overscroll-contain p-5" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl max-h-[92vh] overflow-y-auto overscroll-contain p-5" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="font-bold text-lg text-slate-700">New group</h3>
           <button onClick={onClose} className="w-8 h-8 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center"><X size={14} /></button>
@@ -5619,7 +5739,7 @@ function NewGroupModal({ mutuals, onClose, onCreate }) {
           </div>
         )}
         <button onClick={async () => { setBusy(true); await onCreate(name.trim(), [...picked]); setBusy(false); }} disabled={!valid || busy}
-          className="w-full bg-gradient-to-r from-indigo-500 to-violet-500 text-white font-semibold text-sm py-3 rounded-full shadow disabled:opacity-50">
+          className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm py-3 rounded-full shadow disabled:opacity-50">
           {busy ? "Creating…" : "Create group"}
         </button>
       </div>
@@ -5760,13 +5880,13 @@ function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpe
       <div key={p.id} className={`${isReply ? "ml-6 mt-1.5" : "mt-3"} group`}>
         <div className="flex items-baseline gap-2 mb-0.5">
           {isReply && <CornerDownRight size={11} className="text-slate-300 self-center" />}
-          <span className={`text-xs font-bold ${mine ? "text-indigo-600" : "text-slate-600"}`}>@{uname(p.user_id)}</span>
+          <span className={`text-xs font-bold ${mine ? "text-emerald-700" : "text-slate-600"}`}>@{uname(p.user_id)}</span>
           <span className="text-[10px] text-slate-400">{timeAgo(p.created_at)}</span>
           {(mine || isOwner) && (
             <button onClick={() => removePost(p)} className="text-[10px] text-slate-300 hover:text-rose-400 ml-auto">delete</button>
           )}
         </div>
-        <div className={`rounded-2xl px-3.5 py-2.5 text-[15px] leading-relaxed ${mine ? "bg-indigo-50 text-slate-700" : "bg-white border border-slate-100 text-slate-700"}`}>
+        <div className={`rounded-2xl px-3.5 py-2.5 text-[15px] leading-relaxed ${mine ? "bg-emerald-50 text-slate-700" : "bg-white border border-slate-100 text-slate-700"}`}>
           {p.position && <PositionShareCard pos={p.position} onTicker={onOpenTicker} />}
           {p.body && <PostBody text={p.body} onTicker={onOpenTicker} />}
         </div>
@@ -5776,7 +5896,7 @@ function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpe
             if (isReply && c.n === 0) return null;
             return (
               <button key={e} onClick={() => react(p, e)}
-                className={`text-[11px] px-1.5 py-0.5 rounded-full border ${c.me ? "bg-indigo-100 border-indigo-200 text-indigo-700" : "bg-white border-slate-100 text-slate-500"} ${c.n === 0 ? "opacity-50" : ""}`}>
+                className={`text-[11px] px-1.5 py-0.5 rounded-full border ${c.me ? "bg-emerald-100 border-emerald-200 text-emerald-700" : "bg-white border-slate-100 text-slate-500"} ${c.n === 0 ? "opacity-50" : ""}`}>
                 {e}{c.n > 0 ? ` ${c.n}` : ""}
               </button>
             );
@@ -5796,7 +5916,7 @@ function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpe
       {/* sticky header */}
       <div className="sticky top-0 z-30 bg-slate-50/95 backdrop-blur border-b border-slate-200 px-4 py-2.5 flex items-center gap-2"
         style={{ paddingTop: "max(0.625rem, env(safe-area-inset-top))" }}>
-        <button onClick={onBack} className="flex items-center gap-0.5 text-sm font-semibold text-indigo-600 -ml-1 shrink-0"><ChevronLeft size={20} /> Groups</button>
+        <button onClick={onBack} className="flex items-center gap-0.5 text-sm font-semibold text-emerald-700 -ml-1 shrink-0"><ChevronLeft size={20} /> Groups</button>
         <button onClick={() => setShowMembers(true)} className="flex-1 min-w-0 text-center">
           <div className="font-bold text-slate-700 text-sm truncate">{group.name}</div>
           <div className="text-[11px] text-slate-400">{members.length} member{members.length === 1 ? "" : "s"}</div>
@@ -5813,7 +5933,7 @@ function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpe
           <div className="mt-8 space-y-3" aria-busy="true"><div className="skel h-10 w-3/4" /><div className="skel h-10 w-2/3 ml-auto" /><div className="skel h-10 w-1/2" /></div>
         ) : tops.length === 0 ? (
           <div className="text-center mt-10">
-            <MessageCircle size={24} className="mx-auto text-indigo-300 mb-2" />
+            <MessageCircle size={24} className="mx-auto text-slate-300 mb-2" />
             <p className="text-sm font-semibold text-slate-600">Nothing yet</p>
             <p className="text-xs text-slate-400 mt-1">Say hi, share a position, or tag a ticker with $ — e.g. “what do you think of $ASML?”</p>
           </div>
@@ -5835,7 +5955,7 @@ function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpe
         )}
         <div className="flex items-end gap-2">
           <button onClick={() => { setSharing((v) => !v); }} title="Share a position"
-            className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${sharing ? "bg-indigo-100 text-indigo-600" : "bg-slate-100 text-slate-500"}`}>
+            className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${sharing ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
             <TrendingUp size={17} />
           </button>
           <textarea value={text} onChange={(e) => setText(e.target.value.slice(0, 2000))} rows={1}
@@ -5843,7 +5963,7 @@ function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpe
             placeholder={replyTo ? "Write a reply…" : "Message… use $TICKER to tag"}
             className="flex-1 border border-slate-200 rounded-2xl px-3.5 py-2.5 text-[15px] resize-none max-h-32" />
           <button onClick={() => send()} disabled={sending || !text.trim()}
-            className="w-10 h-10 rounded-full bg-gradient-to-r from-indigo-500 to-violet-500 text-white flex items-center justify-center shrink-0 disabled:opacity-40">
+            className="w-10 h-10 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white flex items-center justify-center shrink-0 disabled:opacity-40">
             <Send size={16} />
           </button>
         </div>
@@ -5862,10 +5982,10 @@ function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpe
 function PositionShareCard({ pos, onTicker }) {
   const up = (pos.plPct || 0) >= 0;
   return (
-    <button onClick={() => onTicker(pos.ticker)} className="w-full text-left bg-white border border-indigo-100 rounded-xl p-3 mb-2 active:bg-indigo-50">
+    <button onClick={() => onTicker(pos.ticker)} className="w-full text-left bg-white border border-emerald-100 rounded-xl p-3 mb-2 active:bg-emerald-50">
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0">
-          <div className="text-[10px] font-bold text-indigo-500 tracking-wide">SHARED POSITION</div>
+          <div className="text-[10px] font-bold text-emerald-600 tracking-wide">SHARED POSITION</div>
           <div className="font-bold text-slate-700 truncate">{pos.ticker} <span className="font-medium text-slate-400 text-sm">{pos.name}</span></div>
           <div className="text-[11px] text-slate-400">{pos.buyDate ? `Bought ${fmtDate(pos.buyDate, { day: "numeric", month: "short", year: "numeric" })}` : "Open position"}{pos.type ? ` · ${pos.type}` : ""}</div>
         </div>
@@ -5891,7 +6011,7 @@ function SharePositionPicker({ holdings, cur, fx, onPick, onClose }) {
         return (
           <button key={h.id}
             onClick={() => onPick({ ticker: h.ticker, name: h.name || h.ticker, type: h.type || "Stock", buyDate: h.buyDate || null, thesis: (h.thesis || "").slice(0, 280), plPct: plPct != null ? Number(plPct.toFixed(2)) : null, currency: h.currency || cur })}
-            className="w-full flex items-center justify-between px-2 py-2 rounded-xl text-sm bg-white mb-1 border border-slate-100 active:bg-indigo-50">
+            className="w-full flex items-center justify-between px-2 py-2 rounded-xl text-sm bg-white mb-1 border border-slate-100 active:bg-emerald-50">
             <span className="font-semibold text-slate-700 truncate">{h.ticker} <span className="font-normal text-slate-400">{h.name}</span></span>
             {plPct != null && <span className={`text-xs font-bold shrink-0 ml-2 ${plPct >= 0 ? "text-emerald-600" : "text-rose-500"}`}>{pct(plPct)}</span>}
           </button>
@@ -5906,7 +6026,7 @@ function MembersSheet({ group, members, names, user, isOwner, mutuals, onAdd, on
   const addable = (mutuals || []).filter((f) => !members.includes(f.id));
   return (
     <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto overscroll-contain p-5" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl max-h-[92vh] overflow-y-auto overscroll-contain p-5" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-3">
           {isOwner ? (
             <input defaultValue={group.name} onBlur={(e) => onRename(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
@@ -5939,7 +6059,7 @@ function MembersSheet({ group, members, names, user, isOwner, mutuals, onAdd, on
               <button key={f.id} onClick={() => onAdd(f.id, f.username)}
                 className="w-full flex items-center justify-between px-3 py-2.5 text-sm bg-white active:bg-slate-50">
                 <span className="font-semibold text-slate-600">@{f.username}</span>
-                <span className="text-xs font-semibold text-indigo-600">Add</span>
+                <span className="text-xs font-semibold text-emerald-700">Add</span>
               </button>
             ))}
           </div>
@@ -6077,10 +6197,10 @@ async function shareProfileCard({ user, data, active, cur, fx, say, setPreview }
 function ShareCardPreview({ url, username, onClose }) {
   return (
     <div className="fixed inset-0 bg-slate-900/60 z-[90] flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-white rounded-3xl p-4 max-w-sm w-full" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-white rounded-2xl p-4 max-w-sm w-full" onClick={(e) => e.stopPropagation()}>
         <img src={url} alt="Your RichR card" className="rounded-2xl w-full" />
         <div className="flex gap-2 mt-3">
-          <a href={url} download={`richr-${username}.png`} className="flex-1 text-center bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold py-2.5 rounded-full shadow">Download PNG</a>
+          <a href={url} download={`richr-${username}.png`} className="flex-1 text-center bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold py-2.5 rounded-full shadow">Download PNG</a>
           <button onClick={onClose} className="flex-1 bg-slate-100 text-slate-600 text-sm font-semibold py-2.5 rounded-full">Close</button>
         </div>
         <p className="text-[10px] text-slate-400 mt-2 text-center">On a phone this opens the share sheet directly.</p>
@@ -6123,7 +6243,7 @@ export function PublicProfile({ username }) {
 
   if (p === undefined) return shell(<div className="text-center text-sm text-slate-400 py-16">Loading…</div>);
   if (p === null) return shell(
-    <div className="bg-white rounded-3xl p-8 text-center shadow-sm border border-slate-100">
+    <div className="bg-white rounded-2xl p-8 text-center shadow-sm border border-slate-100">
       <Lock size={24} className="mx-auto text-slate-300 mb-3" />
       <p className="font-semibold text-slate-600">@{username} is private</p>
       <p className="text-sm text-slate-400 mt-1">This person hasn't switched on their public profile link, or the name doesn't exist.</p>
@@ -6148,7 +6268,7 @@ export function PublicProfile({ username }) {
   };
   return shell(
     <div className="space-y-4">
-      <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+      <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
         <div className="flex items-center gap-3">
           <div className="w-12 h-12 rounded-2xl bg-emerald-50 flex items-center justify-center text-2xl">{prof ? prof.mascot : "👤"}</div>
           <div className="min-w-0 flex-1">
@@ -6180,7 +6300,7 @@ export function PublicProfile({ username }) {
       </div>
 
       {Array.isArray(p.top_holdings) && p.top_holdings.length > 0 && (
-        <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+        <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
           <h4 className="text-xs font-semibold text-slate-400 mb-2">TOP HOLDINGS · ALLOCATION</h4>
           <div className="space-y-1.5">
             {p.top_holdings.map((h) => (
@@ -6195,7 +6315,7 @@ export function PublicProfile({ username }) {
       )}
 
       {p.score_parts && (
-        <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+        <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
           <h4 className="text-xs font-semibold text-slate-400 mb-2">RICHR SCORE BREAKDOWN</h4>
           <div className="grid grid-cols-2 gap-x-4 gap-y-1">
             {Object.keys(SCORE_LABEL).map((k) => (
@@ -6209,7 +6329,7 @@ export function PublicProfile({ username }) {
       )}
 
       {events.length > 0 && (
-        <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+        <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
           <h4 className="text-xs font-semibold text-slate-400 mb-2">RECENT CHANGES</h4>
           <div className="divide-y divide-slate-50">
             {events.map((e, i) => (
