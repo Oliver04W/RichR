@@ -1128,6 +1128,7 @@ export default function RichR({ user, onSignOut }) {
             onBenchmark={(benchmark) => patch(() => ({ benchmark }))}
             onScoreLog={(scoreLog) => patch(() => ({ scoreLog }))}
             user={user} goFriends={() => setTab("friends")}
+            onDismissOnboarding={() => patch(() => ({ onboardingDismissed: true }))}
           />
         )}
         {tab === "portfolio" && sub === "holdings" && (
@@ -1233,6 +1234,7 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
      returns nothing unless this is on. */
   const [isPublic, setIsPublic] = useState(null);
   const [copied, setCopied] = useState(false);
+  const [cardPreview, setCardPreview] = useState(null);
   useEffect(() => {
     supabase.from("profiles").select("is_public").eq("user_id", user.id).maybeSingle()
       .then(({ data: p }) => setIsPublic(!!(p && p.is_public)));
@@ -1395,6 +1397,12 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
             <a href={profileUrl} target="_blank" rel="noreferrer" className="text-xs font-semibold text-emerald-600 shrink-0">Open</a>
           </div>
         )}
+        <button onClick={() => shareProfileCard({ user, data, active, cur, fx: data.fx || DEFAULT_FX, say, setPreview: setCardPreview })}
+          className="mt-3 w-full flex items-center justify-center gap-2 bg-slate-900 text-white text-sm font-semibold py-3 rounded-full shadow">
+          <Share2 size={15} /> Share profile card
+        </button>
+        <p className="text-[10px] text-slate-400 mt-1.5 text-center">A picture for WhatsApp, Instagram or Discord — your YTD %, rank, score and top holdings. Never amounts.</p>
+        {cardPreview && <ShareCardPreview url={cardPreview} username={data.username} onClose={() => { URL.revokeObjectURL(cardPreview); setCardPreview(null); }} />}
       </div>
 
       {/* account card */}
@@ -1410,8 +1418,9 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
 }
 
 /* ================= HOME ================= */
-function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, goImport, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, priceDataAt, onAddGoal, onUpdateGoal, onRemoveGoal, onBenchmark, onScoreLog, user, goFriends }) {
+function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, goImport, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, priceDataAt, onAddGoal, onUpdateGoal, onRemoveGoal, onBenchmark, onScoreLog, user, goFriends, onDismissOnboarding }) {
   const [ytd, setYtd] = useState({ m: null, b: null });
+  const [social, setSocial] = useState(null); // { mine, friendsAvg, rank, n, shared, friendsCount }
   const [renaming, setRenaming] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const up = totals.pl >= 0;
@@ -1491,6 +1500,9 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
           </div>
           <p className="text-[11px] text-emerald-100 mt-3">Fastest: screenshot your broker app (Nordnet, Avanza, Interactive Brokers…), upload it, confirm the holdings — about 20 seconds. Sample data is clearly marked and can't be shared.</p>
         </div>
+        {!data.onboardingDismissed && (
+          <OnboardingCard user={user} active={active} data={data} onImport={goImport} onAddManually={goPositions} goFriends={goFriends} onDismiss={onDismissOnboarding} />
+        )}
         <GoalsSection goals={goals} allValue={allValue} cur={cur}
           onAdd={onAddGoal} onUpdate={onUpdateGoal} onRemove={onRemoveGoal} />
       </div>
@@ -1522,7 +1534,7 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
           )}
         </div>
 
-        <div className="mt-3 text-4xl font-extrabold tracking-tight">{money(totals.value, cur)}</div>
+        <div className="mt-3 text-4xl font-extrabold tracking-tight tabular-nums">{money(totals.value, cur)}</div>
         <div className="mt-1.5 flex items-center gap-2 text-sm font-semibold">
           {flat ? <Activity size={16} /> : up ? <TrendingUp size={16} /> : <TrendingDown size={16} />}
           {money(totals.pl, cur)} ({pct(totals.plPct)})
@@ -1538,7 +1550,31 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
             <div className="h-full bg-white rounded-full transition-all duration-500" style={{ width: `${progress}%` }} />
           </div>
         </div>
+
+        {/* social comparison, right where you look first */}
+        <button onClick={goFriends} className="mt-4 w-full text-left bg-white/15 hover:bg-white/20 rounded-2xl px-3.5 py-3 transition">
+          {social && social.rank != null ? (
+            <div className="text-sm font-bold flex items-center gap-2">
+              <span className={`inline-flex items-center justify-center min-w-[2rem] h-7 px-1.5 rounded-full text-xs font-extrabold ${social.rank === 1 ? "bg-amber-300 text-amber-900" : "bg-white text-emerald-700"}`}>#{social.rank}</span>
+              You’re #{social.rank} of {social.n} friends this year
+            </div>
+          ) : (
+            <div className="text-sm font-bold">
+              {social && social.friendsCount === 0 ? "Add friends to see where you rank" : social && !social.shared ? "Share your portfolio to get ranked" : "Comparing with friends…"}
+            </div>
+          )}
+          <div className="text-[11px] text-white/85 mt-1 tabular-nums flex flex-wrap gap-x-3">
+            <span>You {(social && social.mine != null) ? pct(social.mine) : ytd.m != null ? pct(ytd.m) : "—"}</span>
+            <span>Friends {social && social.friendsAvg != null ? pct(social.friendsAvg) : "—"}</span>
+            <span>{benchOf(data).label} {ytd.b != null ? pct(ytd.b) : "—"}</span>
+            <span className="opacity-70">YTD</span>
+          </div>
+        </button>
       </div>
+
+      {!data.onboardingDismissed && (
+        <OnboardingCard user={user} active={active} data={data} onImport={goImport} onAddManually={goPositions} goFriends={goFriends} onDismiss={onDismissOnboarding} />
+      )}
 
       {/* quick stats row */}
       <div className="grid grid-cols-3 gap-3">
@@ -1556,7 +1592,8 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
         onYtd={(m, b) => setYtd({ m, b })} />
 
       {/* friends benchmark */}
-      <FriendsBenchmark user={user} myYtd={ytd.m} benchYtd={ytd.b} benchLabel={benchOf(data).label} onGoFriends={goFriends} />
+      <FriendsBenchmark user={user} myYtd={ytd.m} benchYtd={ytd.b} benchLabel={benchOf(data).label} onGoFriends={goFriends}
+        onSummary={setSocial} hidden />
 
       {/* best / worst + concentration */}
       <MoversCard active={active} cur={cur} fx={fx} />
@@ -1591,27 +1628,11 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
         ) : pricesAt > 0 ? (
           <p className="text-[11px] text-slate-400 mb-1">Prices fetched {fmtTime(pricesAt)}</p>
         ) : null}
-        <div className="h-40 -mx-2 cursor-pointer active:opacity-80" onClick={() => setShowHistory(true)}>
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={chartData} margin={{ top: 8, right: 10, left: 10, bottom: 0 }}>
-              <defs>
-                <linearGradient id="hg" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={th.hex} stopOpacity={0.25} />
-                  <stop offset="100%" stopColor={th.hex} stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <XAxis dataKey="label" tick={{ fill: "#94a3b8", fontSize: 10 }} axisLine={false} tickLine={false} />
-              <YAxis hide domain={["auto", "auto"]} />
-              <ReferenceLine y={Math.round(totals.cost)} stroke="#cbd5e1" strokeDasharray="4 4" />
-              <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid #e2e8f0", fontSize: 12 }}
-                formatter={(v) => [money(v, cur), "Value"]} />
-              <Area type="monotone" dataKey="value" stroke={th.hex} strokeWidth={2.5} fill="url(#hg)" />
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
-        <p className="text-xs text-slate-400 mt-1">
-          Each price update adds a point. Dashed line is what you invested. Foreign holdings converted at{" "}
-          {fx && fx.at ? `live FX rates (updated ${fmtDateTime(fx.at)})` : "approximate FX rates — tap Update prices for live rates"}.
+        <PerformanceChart holdings={active.holdings} cur={cur} liveValue={totals.value} liveCost={totals.cost}
+          bench={benchOf(data)} onBench={onBenchmark} height={190} compact initialRange="1mo" onExpand={() => setShowHistory(true)} />
+        <p className="text-[10px] text-slate-300 mt-2">
+          Foreign holdings converted at{" "}
+          {fx && fx.at ? `live FX rates (updated ${fmtDateTime(fx.at)})` : "approximate FX rates — tap Update for live rates"}.
         </p>
       </div>
 
@@ -1628,6 +1649,18 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
         onAdd={onAddGoal} onUpdate={onUpdateGoal} onRemove={onRemoveGoal} />
       </div>{/* /right column */}
       </div>{/* /grid */}
+    </div>
+  );
+}
+
+/* Loading placeholder: a few shimmering lines in a card. */
+function Skeleton({ lines = 3, className = "" }) {
+  return (
+    <div className={`bg-white rounded-3xl p-5 shadow-sm border border-slate-100 ${className}`} aria-busy="true">
+      <div className="skel h-4 w-1/3 mb-3" />
+      {Array.from({ length: lines }).map((_, i) => (
+        <div key={i} className="skel h-3 mb-2" style={{ width: `${85 - i * 15}%` }} />
+      ))}
     </div>
   );
 }
@@ -1802,7 +1835,9 @@ function PeriodReturns({ active, cur, liveValue, liveCost, bench: BENCH, onBench
         <BenchPicker value={BENCH} onChange={onBench} />
       </div>
       {state === "loading" ? (
-        <p className="text-sm text-slate-400 flex items-center gap-2"><RefreshCw size={13} className="animate-spin" /> Working out your returns…</p>
+        <div className="grid grid-cols-5 gap-1.5" aria-busy="true">
+          {[0, 1, 2, 3, 4].map((i) => <div key={i} className="bg-slate-50 rounded-2xl p-2.5"><div className="skel h-2.5 w-2/3 mx-auto mb-2" /><div className="skel h-4 w-3/4 mx-auto mb-1.5" /><div className="skel h-2.5 w-1/2 mx-auto" /></div>)}
+        </div>
       ) : state === "none" || !rows ? (
         <p className="text-sm text-slate-400">Not enough price history yet — check back after the next market day.</p>
       ) : (
@@ -1825,6 +1860,83 @@ function PeriodReturns({ active, cur, liveValue, liveCost, bench: BENCH, onBench
         </div>
       )}
       <p className="text-[10px] text-slate-300 mt-2">Returns exclude money you added or withdrew during the period. {BENCH.label} via {BENCH.symbol} in its own currency; “no data” means the price source doesn't know that ticker.</p>
+    </div>
+  );
+}
+
+/* First-run checklist: Add portfolio → Add friends → Compare. Lives on the
+   Overview until all three are done (or dismissed). Status comes from
+   what actually exists — holdings, mutual friends, a leaderboard row. */
+function OnboardingCard({ user, active, data, onImport, onAddManually, goFriends, onDismiss }) {
+  const [friendsN, setFriendsN] = useState(null);
+  const [onBoard, setOnBoard] = useState(null);
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      try {
+        const [{ data: out }, { data: inc }, { data: row }] = await Promise.all([
+          supabase.from("friends").select("friend_id").eq("user_id", user.id),
+          supabase.from("friends").select("user_id").eq("friend_id", user.id),
+          supabase.from("leaderboard").select("user_id").eq("user_id", user.id).maybeSingle(),
+        ]);
+        if (dead) return;
+        const incSet = new Set((inc || []).map((r) => r.user_id));
+        setFriendsN((out || []).filter((r) => incSet.has(r.friend_id)).length);
+        setOnBoard(!!row);
+      } catch (e) { if (!dead) { setFriendsN(0); setOnBoard(false); } }
+    })();
+    return () => { dead = true; };
+  }, [user.id, active.holdings.length]);
+  const real = active.holdings.filter((h) => !h.sample).length;
+  const steps = [
+    { id: "portfolio", title: "Add your portfolio", done: real > 0,
+      hint: real > 0 ? `${real} position${real === 1 ? "" : "s"} added` : "Screenshot your broker app — RichR reads it in ~20 s.",
+      actions: real > 0 ? [] : [["Import from screenshot", onImport, true], ["Add manually", onAddManually, false]] },
+    { id: "friends", title: "Add friends", done: (friendsN || 0) > 0,
+      hint: friendsN == null ? "" : friendsN > 0 ? `${friendsN} mutual friend${friendsN === 1 ? "" : "s"}` : "Friends who add you back can see what you share — and you them.",
+      actions: (friendsN || 0) > 0 ? [] : [["Find friends", goFriends, true]] },
+    { id: "compare", title: "Compare", done: !!onBoard,
+      hint: onBoard ? "You're on the leaderboard" : "Share your return % (never amounts) to see where you rank.",
+      actions: onBoard ? [] : [["Share & compare", goFriends, true]] },
+  ];
+  const doneN = steps.filter((s) => s.done).length;
+  if (friendsN === null || onBoard === null) return null;
+  if (doneN === 3) return null;
+  return (
+    <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="font-bold text-slate-700">Get set up</h3>
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] font-semibold text-slate-400">{doneN}/3</span>
+          <button onClick={onDismiss} className="text-slate-300 hover:text-slate-500" aria-label="Hide"><X size={14} /></button>
+        </div>
+      </div>
+      <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden mb-4">
+        <div className="h-full bg-emerald-500 rounded-full transition-all" style={{ width: `${(doneN / 3) * 100}%` }} />
+      </div>
+      <div className="space-y-3">
+        {steps.map((st, i) => (
+          <div key={st.id} className="flex items-start gap-3">
+            <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${st.done ? "bg-emerald-500 text-white" : "bg-slate-100 text-slate-500"}`}>
+              {st.done ? <Check size={13} /> : i + 1}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className={`text-sm font-semibold ${st.done ? "text-slate-400 line-through" : "text-slate-700"}`}>{st.title}</div>
+              <p className="text-[11px] text-slate-400 leading-snug">{st.hint}</p>
+              {st.actions.length > 0 && (
+                <div className="flex gap-2 mt-2 flex-wrap">
+                  {st.actions.map(([label, fn, primary]) => (
+                    <button key={label} onClick={fn}
+                      className={`text-xs font-semibold px-3 py-1.5 rounded-full ${primary ? "bg-gradient-to-r from-emerald-500 to-teal-500 text-white shadow" : "bg-slate-100 text-slate-600"}`}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1887,7 +1999,7 @@ function ScoreCard({ active, cur, fx, liveValue, liveCost, log, onLog }) {
             )}
           </div>
           {res == null ? (
-            <p className="text-xs text-slate-400 mt-1">Calculating…</p>
+            <div className="mt-2 space-y-1.5" aria-busy="true"><div className="skel h-3 w-3/4" /><div className="skel h-3 w-1/2" /></div>
           ) : res.score == null ? (
             <p className="text-xs text-slate-400 mt-1">Add a few positions and give it a day of price history.</p>
           ) : (
@@ -1944,7 +2056,7 @@ function ScoreCard({ active, cur, fx, liveValue, liveCost, log, onLog }) {
    Friends' numbers are their published time-weighted YTD returns on the
    leaderboard (mutual friends only — RLS). Mine is my own published row
    if I've shared, otherwise my local cash-flow-adjusted YTD. */
-function FriendsBenchmark({ user, myYtd, benchYtd, benchLabel, onGoFriends }) {
+function FriendsBenchmark({ user, myYtd, benchYtd, benchLabel, onGoFriends, onSummary, hidden }) {
   const [rows, setRows] = useState(null); // [{userId, name, ret}]
   useEffect(() => {
     let dead = false;
@@ -1966,16 +2078,19 @@ function FriendsBenchmark({ user, myYtd, benchYtd, benchLabel, onGoFriends }) {
     return () => { dead = true; };
   }, [user.id]);
 
-  if (rows === null) return null;
-  const meRow = rows.find((r) => r.userId === user.id);
+  const meRow = rows ? rows.find((r) => r.userId === user.id) : null;
   const mine = meRow ? meRow.ret : myYtd;
-  const friends = rows.filter((r) => r.userId !== user.id);
+  const friends = rows ? rows.filter((r) => r.userId !== user.id) : [];
   const friendsAvg = friends.length ? friends.reduce((a, r) => a + r.ret, 0) / friends.length : null;
   let rank = null;
   if (mine != null && friends.length) {
     const all = [...friends.map((f) => f.ret), mine].sort((a, b) => b - a);
     rank = all.indexOf(mine) + 1;
   }
+  useEffect(() => {
+    if (rows && onSummary) onSummary({ mine, friendsAvg, rank, n: friends.length + 1, shared: !!meRow, friendsCount: friends.length });
+  }, [rows, mine, friendsAvg, rank]);
+  if (rows === null || hidden) return null;
   const Cell = ({ label, v, tone, hint }) => (
     <div className="bg-slate-50 rounded-2xl p-2.5 text-center min-w-0">
       <div className="text-[10px] font-semibold text-slate-400 truncate">{label}</div>
@@ -2895,7 +3010,7 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpe
             </h3>
 
             {loadingLists ? (
-              <p className="text-sm text-slate-400">Loading…</p>
+              <div className="space-y-2" aria-busy="true"><div className="skel h-3 w-1/2" /><div className="skel h-3 w-2/5" /><div className="skel h-3 w-1/3" /></div>
             ) : (
               <>
                 {/* rubric 1: mutual friends — tap to view profile */}
@@ -2993,7 +3108,7 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpe
       </div>
 
       {shown === null ? (
-        <div className="bg-white rounded-3xl p-6 text-center text-slate-400 text-sm shadow-sm border border-slate-100">Loading…</div>
+        <Skeleton lines={4} />
       ) : shown.length === 0 ? (
         <div className="bg-white rounded-3xl p-8 text-center shadow-sm border border-slate-100">
           <Trophy size={24} className="mx-auto text-amber-300 mb-3" />
@@ -4325,8 +4440,12 @@ const cutSeries = (points, range) => {
   return points;
 };
 
-function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCost, hex, bench: BENCH = DEFAULT_BENCH, onBench }) {
-  const [range, setRange] = useState("1d");
+/* The performance chart: reconstructed daily history with 1D…ALL ranges,
+   gain/loss for the range, and an optional benchmark overlay. Used on the
+   Overview (compact) and in the fullscreen history sheet (tall). */
+function PerformanceChart({ holdings, cur, liveValue, liveCost, bench: BENCH = DEFAULT_BENCH, onBench, height = 256, compact = false, initialRange = "1mo", onExpand }) {
+  const open = true;
+  const [range, setRange] = useState(initialRange);
   const [pts, setPts] = useState(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState(null);
@@ -4376,9 +4495,7 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
       if (!dead) setLoading(false);
     })();
     return () => { dead = true; };
-  }, [open, range, cur, holdings]);
-
-  if (!open) return null;
+  }, [open, range, holdingsKey(holdings, cur)]); // key, not the array: price refreshes must not refetch
 
   const intraday = range === "1d" || range === "1w";
   const fmtTick = (t) => {
@@ -4424,98 +4541,113 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
   }
 
   return (
+    <div>
+    <div className="flex items-end justify-between gap-2">
+      <div>
+        {!compact && <div className="text-2xl font-bold text-slate-800 tabular-nums">{money(last, cur)}</div>}
+        <div className={`text-sm font-semibold flex items-center gap-1 mt-0.5 tabular-nums ${up ? "text-emerald-600" : "text-rose-500"}`}>
+          {up ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
+          {up ? "+" : ""}{money(diff, cur)} ({up ? "+" : ""}{diffPct.toFixed(2)}%)
+          <span className="text-slate-400 font-normal ml-1">{sub}</span>
+        </div>
+      </div>
+      {onExpand && (
+        <button onClick={onExpand} className="text-[11px] font-semibold text-slate-400 hover:text-slate-600 shrink-0">Expand ↗</button>
+      )}
+    </div>
+
+    <div className="-mx-2 mt-3" style={{ height }}>
+      {loading ? (
+        <div className="h-full flex flex-col justify-end gap-2 px-2 pb-2" aria-busy="true">
+          <div className="skel h-2 w-full" /><div className="skel h-2 w-11/12" /><div className="skel h-2 w-4/5" />
+        </div>
+      ) : err ? (
+        <div className="h-full flex items-center justify-center text-sm text-rose-500 text-center px-6">{err}</div>
+      ) : cmp ? (
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={cmp} margin={{ top: 8, right: 10, left: 10, bottom: 0 }}>
+            <XAxis dataKey="t" tickFormatter={fmtTick} minTickGap={40}
+              tick={{ fill: "#94a3b8", fontSize: 10 }} axisLine={false} tickLine={false} />
+            <YAxis domain={["auto", "auto"]} tickFormatter={(v) => `${v > 0 ? "+" : ""}${v}%`} width={44}
+              tick={{ fill: "#94a3b8", fontSize: 10 }} axisLine={false} tickLine={false} />
+            <ReferenceLine y={0} stroke="#cbd5e1" strokeDasharray="4 4" />
+            <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid #e2e8f0", fontSize: 12 }}
+              labelFormatter={(t) => fmtDateTime(t)}
+              formatter={(v, k) => [v == null ? "—" : `${v > 0 ? "+" : ""}${v}%`, k === "mine" ? "You" : BENCH.label]} />
+            <Line type="monotone" dataKey="spx" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 4" dot={false} isAnimationActive={false} connectNulls />
+            <Line type="monotone" dataKey="mine" stroke={up ? "#10b981" : "#f43f5e"} strokeWidth={2.5} dot={false} isAnimationActive={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      ) : (
+        <ResponsiveContainer width="100%" height="100%">
+          <AreaChart data={chart} margin={{ top: 8, right: 10, left: 10, bottom: 0 }}>
+            <defs>
+              <linearGradient id="phg" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={up ? "#10b981" : "#f43f5e"} stopOpacity={0.25} />
+                <stop offset="100%" stopColor={up ? "#10b981" : "#f43f5e"} stopOpacity={0} />
+              </linearGradient>
+            </defs>
+            <XAxis dataKey="t" tickFormatter={fmtTick} minTickGap={40}
+              tick={{ fill: "#94a3b8", fontSize: 10 }} axisLine={false} tickLine={false} />
+            <YAxis hide domain={["auto", "auto"]} />
+            {!intraday && chart.length > 0 && (
+              <ReferenceLine y={chart[chart.length - 1].cost} stroke="#cbd5e1" strokeDasharray="4 4" />
+            )}
+            <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid #e2e8f0", fontSize: 12 }}
+              labelFormatter={(t) => fmtDateTime(t)}
+              formatter={(v, k) => [money(v, cur), k === "value" ? "Value" : "Invested"]} />
+            <Area type="monotone" dataKey="value" stroke={up ? "#10b981" : "#f43f5e"}
+              strokeWidth={2.5} fill="url(#phg)" isAnimationActive={false} />
+          </AreaChart>
+        </ResponsiveContainer>
+      )}
+    </div>
+
+    <div className="flex items-center gap-1.5 mt-3">
+      {PH_RANGES.map((r) => (
+        <button key={r.id} onClick={() => setRange(r.id)}
+          className={`flex-1 text-[11px] font-bold py-2 rounded-full transition ${
+            range === r.id ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-500"}`}>
+          {r.label}
+        </button>
+      ))}
+    </div>
+    <div className={`mt-2 w-full flex items-center justify-between gap-2 text-xs font-semibold px-3 py-2 rounded-xl border transition ${
+        compare ? "bg-slate-800 text-white border-slate-800" : "bg-white text-slate-600 border-slate-200"}`}>
+      <button onClick={() => setCompare((v) => !v)} className="flex items-center gap-2">
+        <span className={`w-9 h-5 rounded-full p-0.5 ${compare ? "bg-emerald-500" : "bg-slate-200"}`}>
+          <span className={`block w-4 h-4 bg-white rounded-full shadow transform transition ${compare ? "translate-x-4" : ""}`} />
+        </span>
+        Compare
+      </button>
+      {onBench && <BenchPicker value={BENCH} onChange={onBench} dark={compare} />}
+      <span className={`ml-auto ${compare ? "text-slate-300" : "text-slate-400"}`}>
+        {compare
+          ? (benchPct == null ? (bench === null ? "loading…" : "no data") : `${BENCH.short} ${benchPct > 0 ? "+" : ""}${benchPct}% · you ${diffPct > 0 ? "+" : ""}${diffPct.toFixed(2)}%`)
+          : ""}
+      </span>
+    </div>
+
+    <p className="text-[10px] text-slate-300 mt-3">
+      Reconstructed from official daily closes and intraday bars, converted at historical FX.
+      Excludes dividends and fees. The last point is your live value.
+      {compare ? " Compare mode shows % change from the start of the range; your line ignores money added or withdrawn." : ""}
+    </p>
+    </div>
+  );
+}
+
+function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCost, hex, bench, onBench }) {
+  if (!open) return null;
+  return (
     <div className="fixed inset-0 z-[80] bg-slate-50 overflow-y-auto">
       <div className="max-w-md mx-auto p-4 pb-10">
         <div className="flex items-center gap-2 mb-3">
           <button onClick={onClose} className="p-2 -ml-2 text-slate-500"><ChevronLeft size={22} /></button>
           <h2 className="font-bold text-lg text-slate-700">Portfolio history</h2>
         </div>
-
         <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
-          <div className="text-2xl font-bold text-slate-800">{money(last, cur)}</div>
-          <div className={`text-sm font-semibold flex items-center gap-1 mt-0.5 ${up ? "text-emerald-600" : "text-rose-500"}`}>
-            {up ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
-            {up ? "+" : ""}{money(diff, cur)} ({up ? "+" : ""}{diffPct.toFixed(2)}%)
-            <span className="text-slate-400 font-normal ml-1">{sub}</span>
-          </div>
-
-          <div className="h-64 -mx-2 mt-4">
-            {loading ? (
-              <div className="h-full flex items-center justify-center text-sm text-slate-400">
-                <RefreshCw size={15} className="animate-spin mr-2" /> Building accurate history…
-              </div>
-            ) : err ? (
-              <div className="h-full flex items-center justify-center text-sm text-rose-500 text-center px-6">{err}</div>
-            ) : cmp ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={cmp} margin={{ top: 8, right: 10, left: 10, bottom: 0 }}>
-                  <XAxis dataKey="t" tickFormatter={fmtTick} minTickGap={40}
-                    tick={{ fill: "#94a3b8", fontSize: 10 }} axisLine={false} tickLine={false} />
-                  <YAxis domain={["auto", "auto"]} tickFormatter={(v) => `${v > 0 ? "+" : ""}${v}%`} width={44}
-                    tick={{ fill: "#94a3b8", fontSize: 10 }} axisLine={false} tickLine={false} />
-                  <ReferenceLine y={0} stroke="#cbd5e1" strokeDasharray="4 4" />
-                  <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid #e2e8f0", fontSize: 12 }}
-                    labelFormatter={(t) => fmtDateTime(t)}
-                    formatter={(v, k) => [v == null ? "—" : `${v > 0 ? "+" : ""}${v}%`, k === "mine" ? "You" : BENCH.label]} />
-                  <Line type="monotone" dataKey="spx" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 4" dot={false} isAnimationActive={false} connectNulls />
-                  <Line type="monotone" dataKey="mine" stroke={up ? "#10b981" : "#f43f5e"} strokeWidth={2.5} dot={false} isAnimationActive={false} />
-                </ComposedChart>
-              </ResponsiveContainer>
-            ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={chart} margin={{ top: 8, right: 10, left: 10, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="phg" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor={up ? "#10b981" : "#f43f5e"} stopOpacity={0.25} />
-                      <stop offset="100%" stopColor={up ? "#10b981" : "#f43f5e"} stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <XAxis dataKey="t" tickFormatter={fmtTick} minTickGap={40}
-                    tick={{ fill: "#94a3b8", fontSize: 10 }} axisLine={false} tickLine={false} />
-                  <YAxis hide domain={["auto", "auto"]} />
-                  {!intraday && chart.length > 0 && (
-                    <ReferenceLine y={chart[chart.length - 1].cost} stroke="#cbd5e1" strokeDasharray="4 4" />
-                  )}
-                  <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid #e2e8f0", fontSize: 12 }}
-                    labelFormatter={(t) => fmtDateTime(t)}
-                    formatter={(v, k) => [money(v, cur), k === "value" ? "Value" : "Invested"]} />
-                  <Area type="monotone" dataKey="value" stroke={up ? "#10b981" : "#f43f5e"}
-                    strokeWidth={2.5} fill="url(#phg)" isAnimationActive={false} />
-                </AreaChart>
-              </ResponsiveContainer>
-            )}
-          </div>
-
-          <div className="flex items-center gap-1.5 mt-3">
-            {PH_RANGES.map((r) => (
-              <button key={r.id} onClick={() => setRange(r.id)}
-                className={`flex-1 text-[11px] font-bold py-2 rounded-full transition ${
-                  range === r.id ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-500"}`}>
-                {r.label}
-              </button>
-            ))}
-          </div>
-          <div className={`mt-2 w-full flex items-center justify-between gap-2 text-xs font-semibold px-3 py-2 rounded-xl border transition ${
-              compare ? "bg-slate-800 text-white border-slate-800" : "bg-white text-slate-600 border-slate-200"}`}>
-            <button onClick={() => setCompare((v) => !v)} className="flex items-center gap-2">
-              <span className={`w-9 h-5 rounded-full p-0.5 ${compare ? "bg-emerald-500" : "bg-slate-200"}`}>
-                <span className={`block w-4 h-4 bg-white rounded-full shadow transform transition ${compare ? "translate-x-4" : ""}`} />
-              </span>
-              Compare
-            </button>
-            {onBench && <BenchPicker value={BENCH} onChange={onBench} dark={compare} />}
-            <span className={`ml-auto ${compare ? "text-slate-300" : "text-slate-400"}`}>
-              {compare
-                ? (benchPct == null ? (bench === null ? "loading…" : "no data") : `${BENCH.short} ${benchPct > 0 ? "+" : ""}${benchPct}% · you ${diffPct > 0 ? "+" : ""}${diffPct.toFixed(2)}%`)
-                : ""}
-            </span>
-          </div>
-
-          <p className="text-[10px] text-slate-300 mt-3">
-            Reconstructed from official daily closes and intraday bars, converted at historical FX.
-            Excludes dividends and fees. The last point is your live value.
-            {compare ? " Compare mode shows % change from the start of the range; your line ignores money added or withdrawn." : ""}
-          </p>
+          <PerformanceChart holdings={holdings} cur={cur} liveValue={liveValue} liveCost={liveCost} bench={bench} onBench={onBench} height={300} initialRange="1y" />
         </div>
       </div>
     </div>
@@ -5040,7 +5172,7 @@ function GroupsTab({ user, active, cur, fx, say, onOpenTicker, username }) {
       </div>
 
       {groups === null ? (
-        <div className="bg-white rounded-3xl p-6 text-center text-slate-400 text-sm shadow-sm border border-slate-100">Loading…</div>
+        <Skeleton lines={3} />
       ) : groups.length === 0 ? (
         <div className="bg-white rounded-3xl p-8 text-center shadow-sm border border-slate-100">
           <MessageCircle size={24} className="mx-auto text-indigo-300 mb-3" />
@@ -5493,7 +5625,7 @@ function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpe
       {/* messages */}
       <div className="flex-1 px-4 pb-3">
         {posts === null ? (
-          <p className="text-sm text-slate-400 text-center mt-8">Loading…</p>
+          <div className="mt-8 space-y-3" aria-busy="true"><div className="skel h-10 w-3/4" /><div className="skel h-10 w-2/3 ml-auto" /><div className="skel h-10 w-1/2" /></div>
         ) : tops.length === 0 ? (
           <div className="text-center mt-10">
             <MessageCircle size={24} className="mx-auto text-indigo-300 mb-2" />
@@ -5649,6 +5781,128 @@ function MembersSheet({ group, members, names, user, isOwner, mutuals, onAdd, on
   );
 }
 
+
+/* ================= SHARE CARD (PNG) ================= */
+/* Draws an "investing card" on a canvas — percentages only — and hands it
+   to the phone's share sheet (WhatsApp, Instagram, Discord…) or downloads
+   it. Everything is computed on-device from what the user already shares. */
+async function buildShareCardBlob({ username, name, mascot, ytd, rank, n, holdings, top, score, isPublic, style }) {
+  const W = 1080, H = 1350;
+  const c = document.createElement("canvas"); c.width = W; c.height = H;
+  const x = c.getContext("2d");
+  // background
+  const g = x.createLinearGradient(0, 0, W, H); g.addColorStop(0, "#0f172a"); g.addColorStop(1, "#134e4a");
+  x.fillStyle = g; x.fillRect(0, 0, W, H);
+  // soft glow
+  const rg = x.createRadialGradient(W * 0.8, H * 0.15, 20, W * 0.8, H * 0.15, 520); rg.addColorStop(0, "rgba(16,185,129,0.35)"); rg.addColorStop(1, "rgba(16,185,129,0)");
+  x.fillStyle = rg; x.fillRect(0, 0, W, H);
+  const font = (w, size) => `${w} ${size}px Inter, system-ui, -apple-system, sans-serif`;
+  x.textBaseline = "alphabetic";
+  // brand
+  x.fillStyle = "#ffffff"; x.font = font(800, 56); x.fillText("Rich", 80, 130);
+  const rw = x.measureText("Rich").width; x.fillStyle = "#34d399"; x.fillText("R", 80 + rw, 130);
+  x.fillStyle = "rgba(255,255,255,0.6)"; x.font = font(500, 26); x.fillText("Grow your wealth with friends", 80, 172);
+  // identity
+  x.font = font(400, 88); x.fillText(mascot || "👤", 80, 320);
+  x.fillStyle = "#ffffff"; x.font = font(800, 54); x.fillText(name || `@${username}`, 200, 285);
+  x.fillStyle = "rgba(255,255,255,0.7)"; x.font = font(500, 30); x.fillText(`@${username}`, 200, 330);
+  // big YTD
+  const up = (ytd || 0) >= 0;
+  x.fillStyle = up ? "#34d399" : "#fb7185"; x.font = font(800, 150);
+  x.fillText(ytd != null ? `${up ? "+" : "−"}${Math.abs(ytd).toFixed(1)}%` : "—", 80, 520);
+  x.fillStyle = "rgba(255,255,255,0.7)"; x.font = font(600, 30); x.fillText("YTD · time-weighted return", 84, 570);
+  // rank line
+  x.fillStyle = "#ffffff"; x.font = font(700, 40);
+  x.fillText(rank != null ? `#${rank} among ${n} friends` : "Comparing with friends", 80, 650);
+  // tiles
+  const tiles = [["RichR Score", score != null ? String(score) : "—"], ["Holdings", holdings != null ? String(holdings) : "—"], ["Style", style || "Investor"]];
+  tiles.forEach(([l, v], i) => {
+    const tx = 80 + i * 310, ty = 700;
+    x.fillStyle = "rgba(255,255,255,0.08)"; roundRect(x, tx, ty, 290, 130, 28); x.fill();
+    x.fillStyle = "#ffffff"; x.font = font(800, v.length > 9 ? 34 : v.length > 6 ? 40 : 48); x.fillText(v, tx + 28, ty + 72);
+    x.fillStyle = "rgba(255,255,255,0.6)"; x.font = font(600, 24); x.fillText(l, tx + 28, ty + 108);
+  });
+  // allocation
+  x.fillStyle = "rgba(255,255,255,0.6)"; x.font = font(700, 24); x.fillText("TOP HOLDINGS · ALLOCATION", 80, 900);
+  const rows = (top || []).slice(0, 5);
+  rows.forEach((h, i) => {
+    const y = 940 + i * 66;
+    x.fillStyle = "#ffffff"; x.font = font(700, 30); x.fillText(h.ticker, 80, y + 30);
+    x.fillStyle = "rgba(255,255,255,0.12)"; roundRect(x, 260, y + 6, 620, 26, 13); x.fill();
+    x.fillStyle = "#34d399"; roundRect(x, 260, y + 6, Math.max(26, 620 * Math.min(1, (h.pct || 0) / 100)), 26, 13); x.fill();
+    x.fillStyle = "rgba(255,255,255,0.8)"; x.font = font(600, 28); x.textAlign = "right"; x.fillText(`${h.pct}%`, 1000, y + 30); x.textAlign = "left";
+  });
+  if (!rows.length) { x.fillStyle = "rgba(255,255,255,0.5)"; x.font = font(500, 28); x.fillText("Holdings not shared", 80, 975); }
+  // footer
+  x.fillStyle = "rgba(255,255,255,0.5)"; x.font = font(500, 26);
+  x.fillText(isPublic ? `rich-r.vercel.app/u/${username}` : "rich-r.vercel.app", 80, 1290);
+  x.textAlign = "right"; x.fillText("Percentages only · no amounts", 1000, 1290); x.textAlign = "left";
+  return new Promise((res) => c.toBlob(res, "image/png"));
+}
+function roundRect(x, X, Y, w, h, r) {
+  x.beginPath(); x.moveTo(X + r, Y); x.arcTo(X + w, Y, X + w, Y + h, r); x.arcTo(X + w, Y + h, X, Y + h, r); x.arcTo(X, Y + h, X, Y, r); x.arcTo(X, Y, X + w, Y, r); x.closePath();
+}
+
+/* Gather what the card needs (my published row + rank among mutual
+   friends), draw it, and share/download. */
+async function shareProfileCard({ user, data, active, cur, fx, say, setPreview }) {
+  if (!data.username) { say("Claim a username first (Profile)."); return; }
+  const share = shareOf(data);
+  try {
+    if (document.fonts && document.fonts.load) await document.fonts.load("800 50px Inter").catch(() => {});
+    const [{ data: me }, { data: out }, { data: inc }, { data: board }, { data: prof }] = await Promise.all([
+      supabase.from("leaderboard").select("return_pct, holdings, top_holdings, score, name, profile").eq("user_id", user.id).maybeSingle(),
+      supabase.from("friends").select("friend_id").eq("user_id", user.id),
+      supabase.from("friends").select("user_id").eq("friend_id", user.id),
+      supabase.from("leaderboard").select("user_id, return_pct"),
+      supabase.from("profiles").select("is_public").eq("user_id", user.id).maybeSingle(),
+    ]);
+    const incSet = new Set((inc || []).map((r) => r.user_id));
+    const mutual = new Set((out || []).map((r) => r.friend_id).filter((id) => incSet.has(id)));
+    const friendRets = (board || []).filter((b) => mutual.has(b.user_id) && b.return_pct != null).map((b) => Number(b.return_pct));
+    const ytd = me && me.return_pct != null ? Number(me.return_pct) : null;
+    let rank = null;
+    if (ytd != null && friendRets.length) rank = [...friendRets, ytd].sort((a, b) => b - a).indexOf(ytd) + 1;
+    // local fallbacks when not published (what the user would share)
+    const total = active.holdings.reduce((s, h) => s + holdingValue(h, cur, fx), 0);
+    const localTop = byValueDesc(active.holdings, cur, fx).slice(0, 5).map((h) => ({ ticker: h.ticker, pct: total > 0 ? Number(((holdingValue(h, cur, fx) / total) * 100).toFixed(1)) : 0 }));
+    const p = profileOf(data.profile);
+    const blob = await buildShareCardBlob({
+      username: data.username, name: data.userName, mascot: p ? p.mascot : "👤",
+      ytd, rank, n: friendRets.length + 1,
+      holdings: share.positions ? active.holdings.length : null,
+      top: share.topHoldings ? (me && Array.isArray(me.top_holdings) && me.top_holdings.length ? me.top_holdings : localTop) : [],
+      score: share.score && me && me.score != null ? me.score : null,
+      isPublic: !!(prof && prof.is_public),
+      style: p ? p.label : "Investor",
+    });
+    const file = new File([blob], `richr-${data.username}.png`, { type: "image/png" });
+    if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: "My RichR profile", text: `@${data.username} on RichR` });
+    } else {
+      setPreview(URL.createObjectURL(blob));
+    }
+  } catch (e) {
+    if (e && e.name === "AbortError") return;
+    say("Couldn't build the card — try again.");
+  }
+}
+
+/* Fallback when the share sheet isn't available (desktop): show + download. */
+function ShareCardPreview({ url, username, onClose }) {
+  return (
+    <div className="fixed inset-0 bg-slate-900/60 z-[90] flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-3xl p-4 max-w-sm w-full" onClick={(e) => e.stopPropagation()}>
+        <img src={url} alt="Your RichR card" className="rounded-2xl w-full" />
+        <div className="flex gap-2 mt-3">
+          <a href={url} download={`richr-${username}.png`} className="flex-1 text-center bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-sm font-semibold py-2.5 rounded-full shadow">Download PNG</a>
+          <button onClick={onClose} className="flex-1 bg-slate-100 text-slate-600 text-sm font-semibold py-2.5 rounded-full">Close</button>
+        </div>
+        <p className="text-[10px] text-slate-400 mt-2 text-center">On a phone this opens the share sheet directly.</p>
+      </div>
+    </div>
+  );
+}
 
 /* ================= PUBLIC PROFILE (/u/<username>) ================= */
 /* Served without sign-in. All data comes from get_public_profile(), which

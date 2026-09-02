@@ -1,2 +1,29 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 @import "tailwindcss";
+
+/* ---------- RichR design tokens & polish ---------- */
+:root { color-scheme: light; }
+html { -webkit-text-size-adjust: 100%; }
+body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background: #f8fafc; color: #1e293b; -webkit-font-smoothing: antialiased; }
+/* numbers line up in tables and tiles */
+.tabular-nums, .font-bold, .font-extrabold { font-variant-numeric: tabular-nums; }
+/* cards fade in once instead of popping */
+@keyframes richr-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.rounded-3xl.bg-white, .rounded-2xl.bg-white { animation: richr-in .25s ease-out both; }
+@media (prefers-reduced-motion: reduce) { .rounded-3xl.bg-white, .rounded-2xl.bg-white { animation: none; } }
+/* skeleton shimmer */
+@keyframes richr-shimmer { 0% { background-position: -400px 0; } 100% { background-position: 400px 0; } }
+.skel { border-radius: 9999px; background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 37%, #f1f5f9 63%); background-size: 800px 100%; animation: richr-shimmer 1.4s linear infinite; }
+/* buttons: consistent press feedback */
+button { -webkit-tap-highlight-color: transparent; }
+button:active { transform: translateY(0.5px); }
+button:disabled { cursor: not-allowed; }
+/* focus rings that don't look broken */
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid #34d399; outline-offset: 2px; border-radius: 12px; }
+/* inputs */
+input, select, textarea { font: inherit; }
+input::placeholder, textarea::placeholder { color: #94a3b8; }
+/* thin scrollbars on horizontal chip rows */
+.overflow-x-auto::-webkit-scrollbar { height: 0; }
+/* safe-area for the bottom nav on phones */
+nav.fixed.bottom-0 { padding-bottom: env(safe-area-inset-bottom); }
