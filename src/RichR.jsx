@@ -3,7 +3,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   Plus, RefreshCw, Trash2, Users, BookOpen, Home, Briefcase, Check, X,
   Clock, HelpCircle, Pencil, Trophy, Share2, TrendingUp, TrendingDown,
-  ChevronDown, ChevronLeft, ChevronRight, Lock, Target, Sparkles, Flag, Activity, Calendar, Camera, Upload, Search, Star, ExternalLink, User
+  ChevronDown, ChevronLeft, ChevronRight, Lock, Target, Sparkles, Flag, Activity, Calendar, Camera, Upload, Search, Star, ExternalLink, User, MessageCircle, Send, UserPlus, LogOut, CornerDownRight
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine
@@ -388,6 +388,8 @@ export default function RichR({ user, onSignOut }) {
      or "Edit" on the Friends share card) — so its Back control returns you
      there instead of always to Portfolio. */
   const prevTabRef = useRef("portfolio");
+  const [researchQuery, setResearchQuery] = useState(""); // prefilled when a $TICKER chip is tapped
+  const openTicker = (t) => { setResearchQuery(String(t || "").toUpperCase()); setTab("research"); };
   const openProfile = () => { if (tab !== "profile") prevTabRef.current = tab; setTab("profile"); };
   const closeProfile = () => setTab(prevTabRef.current === "profile" ? "portfolio" : prevTabRef.current);
   const [sub, setSub] = useState("overview"); // Portfolio tab sections: overview | holdings | analysis
@@ -798,6 +800,7 @@ export default function RichR({ user, onSignOut }) {
   const tabs = [
     { id: "portfolio", label: "Portfolio", icon: Briefcase },
     { id: "research", label: "Research", icon: Search },
+    { id: "groups", label: "Groups", icon: MessageCircle },
     { id: "friends", label: "Friends", icon: Users },
     { id: "profile", label: "Profile", icon: User },
   ];
@@ -916,7 +919,10 @@ export default function RichR({ user, onSignOut }) {
         )}
         {tab === "research" && <ResearchTab cur={cur} say={say} onUpsert={upsertHolding}
           companyInfo={data.companyInfo || {}} onSaveInfo={saveCompanyInfo}
-          watchlist={data.watchlist || []} onWatch={addWatch} onUnwatch={removeWatchByTicker} />}
+          watchlist={data.watchlist || []} onWatch={addWatch} onUnwatch={removeWatchByTicker}
+          initialQuery={researchQuery} onConsumeQuery={() => setResearchQuery("")} />}
+        {tab === "groups" && <GroupsTab user={user} active={active} cur={cur} fx={data.fx || DEFAULT_FX} say={say}
+          username={data.username} onOpenTicker={openTicker} />}
         {tab === "friends" && <FriendsTab data={data} active={active} totals={totals} cur={cur} say={say} user={user}
           onEditSharing={openProfile} />}
         {tab === "profile" && (
@@ -961,7 +967,7 @@ export default function RichR({ user, onSignOut }) {
 }
 
 /* ================= PROFILE ================= */
-const TAB_LABEL = { portfolio: "Portfolio", research: "Research", friends: "Friends", profile: "Profile" };
+const TAB_LABEL = { portfolio: "Portfolio", research: "Research", groups: "Groups", friends: "Friends", profile: "Profile" };
 
 function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onProfile, onPhilosophy, onShare, active, totals, onBack, backLabel, onSignOut }) {
   const prof = profileOf(data.profile);
@@ -3659,7 +3665,7 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
 /* Look up any stock on demand: search → live quote (via the get-quote
    edge function) → add to portfolio or watch. No seed_tickers bloat;
    each lookup fetches its own price when you open it. */
-function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo, watchlist, onWatch, onUnwatch }) {
+function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo, watchlist, onWatch, onUnwatch, initialQuery, onConsumeQuery }) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
@@ -3687,6 +3693,25 @@ function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo, watchlist, o
       setSearching(false);
     }, 350);
   };
+
+  /* Arrived here from a $TICKER chip in a group chat: search it and open
+     the exact symbol match if there is one. */
+  useEffect(() => {
+    if (!initialQuery) return;
+    const t = initialQuery.toUpperCase();
+    setQ(t);
+    (async () => {
+      setSearching(true);
+      try {
+        const { data, error } = await supabase.functions.invoke("search-symbols", { body: { q: t } });
+        const rs = !error && data && Array.isArray(data.results) ? data.results : [];
+        const exact = rs.find((r) => String(r.symbol || "").toUpperCase() === t) || rs[0];
+        if (exact) choose(exact); else setResults(rs.slice(0, 8));
+      } catch (e) { /* leave the query typed for the user */ }
+      setSearching(false);
+      if (onConsumeQuery) onConsumeQuery();
+    })();
+  }, [initialQuery]);
 
   const choose = async (r) => {
     setSel(r); setResults([]); setQuote(null); setLoadingQuote(true);
@@ -3989,6 +4014,562 @@ function ProfileSheet({ r, me, onClose }) {
             )}
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ================= GROUPS (private chats between mutual friends) ================= */
+/* Everything here is gated by RLS in Supabase (see
+   supabase/migrations/20260902_group_chats.sql): you only ever receive
+   groups you belong to, and you can only add people who are your MUTUAL
+   friends. The UI mirrors those rules but never has to enforce them. */
+
+const TICKER_RE = /\$([A-Za-z][A-Za-z0-9.\-]{0,9})/g;
+const extractTickers = (body) => {
+  const out = new Set();
+  String(body || "").replace(TICKER_RE, (_, t) => { out.add(t.toUpperCase()); return _; });
+  return [...out];
+};
+const REACTIONS = ["👍", "🚀", "🤔", "🔥"];
+const timeAgo = (t) => {
+  const s = Math.max(0, (Date.now() - new Date(t).getTime()) / 1000);
+  if (s < 60) return "now";
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  if (s < 7 * 86400) return `${Math.floor(s / 86400)}d`;
+  return fmtDate(t);
+};
+
+/* Mutual friends = people in my list who also have me in theirs. */
+async function loadMutualFriends(userId) {
+  const [{ data: out }, { data: inc }] = await Promise.all([
+    supabase.from("friends").select("friend_id").eq("user_id", userId),
+    supabase.from("friends").select("user_id").eq("friend_id", userId),
+  ]);
+  const incSet = new Set((inc || []).map((r) => r.user_id));
+  const ids = (out || []).map((r) => r.friend_id).filter((id) => incSet.has(id));
+  if (!ids.length) return [];
+  const { data: profs } = await supabase.from("profiles").select("user_id, username").in("user_id", ids);
+  return ids.map((id) => ({ id, username: ((profs || []).find((p) => p.user_id === id) || {}).username || "unknown" }));
+}
+
+/* Body text with $TICKER turned into tappable chips. */
+function PostBody({ text, onTicker }) {
+  const parts = [];
+  let last = 0, m;
+  const re = new RegExp(TICKER_RE.source, "g");
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) parts.push(text.slice(last, m.index));
+    const t = m[1].toUpperCase();
+    parts.push(
+      <button key={m.index} onClick={(e) => { e.stopPropagation(); onTicker(t); }}
+        className="inline-block align-baseline text-[12px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded-md mx-0.5">
+        ${t}
+      </button>
+    );
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return <span className="whitespace-pre-wrap break-words">{parts}</span>;
+}
+
+function GroupsTab({ user, active, cur, fx, say, onOpenTicker, username }) {
+  const [groups, setGroups] = useState(null);   // [{id,name,created_by,members,lastPost}]
+  const [open, setOpen] = useState(null);       // group object being viewed
+  const [creating, setCreating] = useState(false);
+  const [mutuals, setMutuals] = useState(null);
+
+  const loadGroups = async () => {
+    try {
+      const { data: gs, error } = await supabase.from("groups").select("id, name, created_by, created_at").order("created_at", { ascending: false });
+      if (error) throw error;
+      const ids = (gs || []).map((g) => g.id);
+      let members = [], last = [];
+      if (ids.length) {
+        const [{ data: m }, { data: l }] = await Promise.all([
+          supabase.from("group_members").select("group_id, user_id").in("group_id", ids),
+          supabase.from("group_posts").select("group_id, body, position, created_at, user_id").in("group_id", ids).is("parent_id", null).order("created_at", { ascending: false }).limit(200),
+        ]);
+        members = m || []; last = l || [];
+      }
+      setGroups((gs || []).map((g) => ({
+        ...g,
+        members: members.filter((m) => m.group_id === g.id).map((m) => m.user_id),
+        lastPost: last.find((p) => p.group_id === g.id) || null,
+      })).sort((a, b) => {
+        const ta = a.lastPost ? new Date(a.lastPost.created_at).getTime() : new Date(a.created_at).getTime();
+        const tb = b.lastPost ? new Date(b.lastPost.created_at).getTime() : new Date(b.created_at).getTime();
+        return tb - ta;
+      }));
+    } catch (e) {
+      console.error("RichR groups load failed:", e);
+      setGroups([]);
+    }
+  };
+  useEffect(() => { loadGroups(); loadMutualFriends(user.id).then(setMutuals); }, []);
+
+  const createGroup = async (name, memberIds) => {
+    const { data: g, error } = await supabase.from("groups").insert({ name, created_by: user.id }).select("id, name, created_by, created_at").single();
+    if (error || !g) { say("Couldn't create the group — try again."); return; }
+    const { error: e1 } = await supabase.from("group_members").insert({ group_id: g.id, user_id: user.id, added_by: user.id });
+    if (e1) { say("Couldn't join your own group — try again."); return; }
+    if (memberIds.length) {
+      const { error: e2 } = await supabase.from("group_members").insert(memberIds.map((id) => ({ group_id: g.id, user_id: id, added_by: user.id })));
+      if (e2) say("Group created, but some friends couldn't be added (only mutual friends can join).");
+    }
+    setCreating(false);
+    await loadGroups();
+    setOpen({ ...g, members: [user.id, ...memberIds], lastPost: null });
+    say(`“${name}” is ready — say hi!`);
+  };
+
+  if (open) {
+    return (
+      <GroupChat group={open} user={user} active={active} cur={cur} fx={fx} say={say} username={username}
+        mutuals={mutuals || []} onOpenTicker={onOpenTicker}
+        onBack={() => { setOpen(null); loadGroups(); }}
+        onGroupChanged={(g) => { if (g) setOpen(g); else { setOpen(null); loadGroups(); } }} />
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-3xl bg-gradient-to-br from-indigo-500 to-violet-600 text-white p-6 shadow-lg shadow-indigo-200">
+        <div className="flex items-center gap-2 font-bold"><MessageCircle size={17} /> Talk it through</div>
+        <p className="text-sm text-indigo-50 mt-1.5 leading-relaxed">
+          Private groups with your friends — discuss ideas, share a position with your thesis, tag tickers like <span className="font-semibold">$NVDA</span>.
+          Only people you've both added can be in a group, and only members can read it.
+        </p>
+        <button onClick={() => setCreating(true)} disabled={!mutuals}
+          className="mt-4 bg-white text-indigo-600 font-semibold text-sm px-5 py-2.5 rounded-full shadow flex items-center gap-1.5 disabled:opacity-60">
+          <Plus size={15} /> New group
+        </button>
+      </div>
+
+      {groups === null ? (
+        <div className="bg-white rounded-3xl p-6 text-center text-slate-400 text-sm shadow-sm border border-slate-100">Loading…</div>
+      ) : groups.length === 0 ? (
+        <div className="bg-white rounded-3xl p-8 text-center shadow-sm border border-slate-100">
+          <MessageCircle size={24} className="mx-auto text-indigo-300 mb-3" />
+          <p className="font-semibold text-slate-600 mb-1">No groups yet</p>
+          <p className="text-sm text-slate-400">
+            {mutuals && mutuals.length === 0
+              ? "Add friends (and get added back) in the Friends tab first — groups are for mutual friends."
+              : "Start one with a few friends, or wait to be added to theirs."}
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {groups.map((g) => (
+            <button key={g.id} onClick={() => setOpen(g)}
+              className="w-full text-left bg-white rounded-2xl p-4 flex items-center gap-3 shadow-sm border border-slate-100 active:bg-slate-50">
+              <div className="w-11 h-11 rounded-2xl bg-indigo-50 text-indigo-500 flex items-center justify-center font-bold text-lg shrink-0">
+                {g.name.trim().slice(0, 1).toUpperCase()}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-baseline justify-between gap-2">
+                  <div className="font-semibold text-slate-700 text-sm truncate">{g.name}</div>
+                  <div className="text-[11px] text-slate-400 shrink-0">{timeAgo(g.lastPost ? g.lastPost.created_at : g.created_at)}</div>
+                </div>
+                <div className="text-xs text-slate-400 truncate">
+                  {g.lastPost
+                    ? (g.lastPost.position ? `📈 shared ${g.lastPost.position.ticker}` : g.lastPost.body)
+                    : `${g.members.length} member${g.members.length === 1 ? "" : "s"} · no messages yet`}
+                </div>
+              </div>
+              <ChevronRight size={16} className="text-slate-300 shrink-0" />
+            </button>
+          ))}
+        </div>
+      )}
+      <p className="text-[11px] text-slate-400 leading-relaxed">
+        Messages are visible to group members only. Sharing a position posts the ticker, your buy date, return % and thesis — never amounts.
+        Nothing here is investment advice; it's friends talking.
+      </p>
+
+      {creating && (
+        <NewGroupModal mutuals={mutuals || []} onClose={() => setCreating(false)} onCreate={createGroup} />
+      )}
+    </div>
+  );
+}
+
+function NewGroupModal({ mutuals, onClose, onCreate }) {
+  const [name, setName] = useState("");
+  const [picked, setPicked] = useState(new Set());
+  const [busy, setBusy] = useState(false);
+  const toggle = (id) => setPicked((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const valid = name.trim().length > 0;
+  return (
+    <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
+      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto overscroll-contain p-5" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-bold text-lg text-slate-700">New group</h3>
+          <button onClick={onClose} className="w-8 h-8 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center"><X size={14} /></button>
+        </div>
+        <label className="block text-xs font-semibold text-slate-400 mb-1.5">GROUP NAME</label>
+        <input autoFocus value={name} onChange={(e) => setName(e.target.value.slice(0, 60))} placeholder="e.g. Nordic banks club"
+          className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm mb-4" />
+        <label className="block text-xs font-semibold text-slate-400 mb-1.5">ADD FRIENDS · {picked.size} picked</label>
+        {mutuals.length === 0 ? (
+          <p className="text-sm text-slate-400 mb-4">You have no mutual friends yet. You can still create the group and add people later.</p>
+        ) : (
+          <div className="border border-slate-100 rounded-2xl divide-y divide-slate-50 overflow-hidden mb-4">
+            {mutuals.map((f) => {
+              const on = picked.has(f.id);
+              return (
+                <button key={f.id} onClick={() => toggle(f.id)}
+                  className="w-full flex items-center justify-between px-3 py-2.5 text-sm bg-white active:bg-slate-50">
+                  <span className="font-semibold text-slate-600">@{f.username}</span>
+                  <span className={`w-5 h-5 rounded-full border flex items-center justify-center ${on ? "bg-emerald-500 border-emerald-500 text-white" : "border-slate-300"}`}>
+                    {on && <Check size={12} />}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+        <button onClick={async () => { setBusy(true); await onCreate(name.trim(), [...picked]); setBusy(false); }} disabled={!valid || busy}
+          className="w-full bg-gradient-to-r from-indigo-500 to-violet-500 text-white font-semibold text-sm py-3 rounded-full shadow disabled:opacity-50">
+          {busy ? "Creating…" : "Create group"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpenTicker, onBack, onGroupChanged }) {
+  const [posts, setPosts] = useState(null);
+  const [reactions, setReactions] = useState([]);   // [{post_id,user_id,emoji}]
+  const [names, setNames] = useState({});          // user_id -> username
+  const [members, setMembers] = useState(group.members || []);
+  const [text, setText] = useState("");
+  const [replyTo, setReplyTo] = useState(null);    // post being replied to
+  const [sharing, setSharing] = useState(false);   // position picker open
+  const [showMembers, setShowMembers] = useState(false);
+  const [sending, setSending] = useState(false);
+  const bottomRef = useRef(null);
+  const isOwner = group.created_by === user.id;
+
+  const load = async (silent) => {
+    try {
+      const [{ data: ps, error }, { data: ms }] = await Promise.all([
+        supabase.from("group_posts").select("id, user_id, parent_id, body, tickers, position, created_at").eq("group_id", group.id).order("created_at", { ascending: true }).limit(500),
+        supabase.from("group_members").select("user_id").eq("group_id", group.id),
+      ]);
+      if (error) throw error;
+      const memberIds = (ms || []).map((m) => m.user_id);
+      setMembers(memberIds);
+      const ids = [...new Set([...memberIds, ...(ps || []).map((p) => p.user_id)])];
+      const missing = ids.filter((id) => !names[id]);
+      if (missing.length) {
+        const { data: profs } = await supabase.from("profiles").select("user_id, username").in("user_id", missing);
+        setNames((n) => { const c = { ...n }; (profs || []).forEach((p) => { c[p.user_id] = p.username; }); missing.forEach((id) => { if (!c[id]) c[id] = "unknown"; }); return c; });
+      }
+      const postIds = (ps || []).map((p) => p.id);
+      if (postIds.length) {
+        const { data: rs } = await supabase.from("post_reactions").select("post_id, user_id, emoji").in("post_id", postIds);
+        setReactions(rs || []);
+      } else setReactions([]);
+      setPosts(ps || []);
+    } catch (e) {
+      console.error("RichR chat load failed:", e);
+      if (!silent) say("Couldn't load this group.");
+      setPosts((p) => p || []);
+    }
+  };
+  useEffect(() => { load(); }, [group.id]);
+  // Poll while the chat is open and the app is visible — simple, no realtime setup needed.
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      load(true);
+    }, 8000);
+    return () => clearInterval(id);
+  }, [group.id]);
+  const firstScroll = useRef(true);
+  useEffect(() => {
+    if (posts && bottomRef.current) {
+      bottomRef.current.scrollIntoView({ behavior: firstScroll.current ? "auto" : "smooth", block: "end" });
+      firstScroll.current = false;
+    }
+  }, [posts && posts.length]);
+
+  const send = async (extra) => {
+    const body = text.trim();
+    if (!body && !extra) return;
+    setSending(true);
+    const row = {
+      group_id: group.id, user_id: user.id, body,
+      tickers: [...new Set([...extractTickers(body), ...((extra && extra.position) ? [extra.position.ticker] : [])])],
+      parent_id: replyTo ? replyTo.id : null,
+      ...(extra || {}),
+    };
+    const { error } = await supabase.from("group_posts").insert(row);
+    setSending(false);
+    if (error) { say("Couldn't send — try again."); return; }
+    setText(""); setReplyTo(null); setSharing(false);
+    await load(true);
+  };
+
+  const react = async (post, emoji) => {
+    const mine = reactions.find((r) => r.post_id === post.id && r.user_id === user.id && r.emoji === emoji);
+    // optimistic
+    setReactions((rs) => mine ? rs.filter((r) => r !== mine) : [...rs, { post_id: post.id, user_id: user.id, emoji }]);
+    if (mine) await supabase.from("post_reactions").delete().match({ post_id: post.id, user_id: user.id, emoji });
+    else await supabase.from("post_reactions").insert({ post_id: post.id, user_id: user.id, emoji });
+  };
+
+  const removePost = async (post) => {
+    const { error } = await supabase.from("group_posts").delete().eq("id", post.id);
+    if (error) { say("Couldn't delete."); return; }
+    await load(true);
+  };
+
+  const addMember = async (id, uname) => {
+    const { error } = await supabase.from("group_members").insert({ group_id: group.id, user_id: id, added_by: user.id });
+    if (error) { say(error.code === "23505" ? `@${uname} is already in the group.` : "Couldn't add — only mutual friends can join."); return; }
+    say(`Added @${uname}.`);
+    await load(true);
+  };
+  const removeMember = async (id, uname) => {
+    const { error } = await supabase.from("group_members").delete().match({ group_id: group.id, user_id: id });
+    if (error) { say("Couldn't remove."); return; }
+    say(`Removed @${uname}.`);
+    await load(true);
+  };
+  const leave = async () => {
+    const { error } = await supabase.from("group_members").delete().match({ group_id: group.id, user_id: user.id });
+    if (error) { say("Couldn't leave — try again."); return; }
+    say(`You left “${group.name}”.`);
+    onGroupChanged(null);
+  };
+  const deleteGroup = async () => {
+    const { error } = await supabase.from("groups").delete().eq("id", group.id);
+    if (error) { say("Couldn't delete the group."); return; }
+    say(`Deleted “${group.name}”.`);
+    onGroupChanged(null);
+  };
+  const rename = async (name) => {
+    const n = (name || "").trim().slice(0, 60);
+    if (!n || n === group.name) return;
+    const { error } = await supabase.from("groups").update({ name: n }).eq("id", group.id);
+    if (error) { say("Couldn't rename."); return; }
+    onGroupChanged({ ...group, name: n });
+  };
+
+  // thread structure: top-level posts in order, replies grouped under their parent
+  const tops = (posts || []).filter((p) => !p.parent_id);
+  const repliesOf = (id) => (posts || []).filter((p) => p.parent_id === id);
+  const uname = (id) => (id === user.id ? (username || names[id] || "you") : (names[id] || "…"));
+
+  const renderPost = (p, isReply) => {
+    const mine = p.user_id === user.id;
+    const rs = reactions.filter((r) => r.post_id === p.id);
+    const counts = REACTIONS.map((e) => ({ e, n: rs.filter((r) => r.emoji === e).length, me: rs.some((r) => r.emoji === e && r.user_id === user.id) })).filter((c) => c.n > 0 || !isReply);
+    return (
+      <div key={p.id} className={`${isReply ? "ml-6 mt-1.5" : "mt-3"} group`}>
+        <div className="flex items-baseline gap-2 mb-0.5">
+          {isReply && <CornerDownRight size={11} className="text-slate-300 self-center" />}
+          <span className={`text-xs font-bold ${mine ? "text-indigo-600" : "text-slate-600"}`}>@{uname(p.user_id)}</span>
+          <span className="text-[10px] text-slate-400">{timeAgo(p.created_at)}</span>
+          {(mine || isOwner) && (
+            <button onClick={() => removePost(p)} className="text-[10px] text-slate-300 hover:text-rose-400 ml-auto">delete</button>
+          )}
+        </div>
+        <div className={`rounded-2xl px-3.5 py-2.5 text-[15px] leading-relaxed ${mine ? "bg-indigo-50 text-slate-700" : "bg-white border border-slate-100 text-slate-700"}`}>
+          {p.position && <PositionShareCard pos={p.position} onTicker={onOpenTicker} />}
+          {p.body && <PostBody text={p.body} onTicker={onOpenTicker} />}
+        </div>
+        <div className="flex items-center gap-1 mt-1 flex-wrap">
+          {REACTIONS.map((e) => {
+            const c = counts.find((x) => x.e === e) || { n: 0, me: false };
+            if (isReply && c.n === 0) return null;
+            return (
+              <button key={e} onClick={() => react(p, e)}
+                className={`text-[11px] px-1.5 py-0.5 rounded-full border ${c.me ? "bg-indigo-100 border-indigo-200 text-indigo-700" : "bg-white border-slate-100 text-slate-500"} ${c.n === 0 ? "opacity-50" : ""}`}>
+                {e}{c.n > 0 ? ` ${c.n}` : ""}
+              </button>
+            );
+          })}
+          {!isReply && (
+            <button onClick={() => { setReplyTo(p); setSharing(false); }}
+              className="text-[11px] font-semibold text-slate-400 px-1.5 py-0.5 ml-1">Reply</button>
+          )}
+        </div>
+        {!isReply && repliesOf(p.id).map((r) => renderPost(r, true))}
+      </div>
+    );
+  };
+
+  return (
+    <div className="-mx-4 -mt-6 min-h-[calc(100vh-5rem)] flex flex-col">
+      {/* sticky header */}
+      <div className="sticky top-0 z-30 bg-slate-50/95 backdrop-blur border-b border-slate-200 px-4 py-2.5 flex items-center gap-2"
+        style={{ paddingTop: "max(0.625rem, env(safe-area-inset-top))" }}>
+        <button onClick={onBack} className="flex items-center gap-0.5 text-sm font-semibold text-indigo-600 -ml-1 shrink-0"><ChevronLeft size={20} /> Groups</button>
+        <button onClick={() => setShowMembers(true)} className="flex-1 min-w-0 text-center">
+          <div className="font-bold text-slate-700 text-sm truncate">{group.name}</div>
+          <div className="text-[11px] text-slate-400">{members.length} member{members.length === 1 ? "" : "s"} · tap for details</div>
+        </button>
+        <div className="w-14 shrink-0" />
+      </div>
+
+      {/* messages */}
+      <div className="flex-1 px-4 pb-3">
+        {posts === null ? (
+          <p className="text-sm text-slate-400 text-center mt-8">Loading…</p>
+        ) : tops.length === 0 ? (
+          <div className="text-center mt-10">
+            <MessageCircle size={24} className="mx-auto text-indigo-300 mb-2" />
+            <p className="text-sm font-semibold text-slate-600">Nothing yet</p>
+            <p className="text-xs text-slate-400 mt-1">Say hi, share a position, or tag a ticker with $ — e.g. “what do you think of $ASML?”</p>
+          </div>
+        ) : tops.map((p) => renderPost(p, false))}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* composer */}
+      <div className="sticky bottom-[4.5rem] z-30 bg-white border-t border-slate-200 px-3 pt-2 pb-2">
+        {replyTo && (
+          <div className="flex items-center justify-between text-[11px] text-slate-500 bg-slate-50 rounded-xl px-2.5 py-1.5 mb-2">
+            <span className="truncate">Replying to <b>@{uname(replyTo.user_id)}</b>: {replyTo.position ? `shared ${replyTo.position.ticker}` : replyTo.body}</span>
+            <button onClick={() => setReplyTo(null)} className="ml-2 text-slate-400"><X size={12} /></button>
+          </div>
+        )}
+        {sharing && (
+          <SharePositionPicker holdings={active.holdings} cur={cur} fx={fx}
+            onPick={(pos) => send({ position: pos })} onClose={() => setSharing(false)} />
+        )}
+        <div className="flex items-end gap-2">
+          <button onClick={() => { setSharing((v) => !v); }} title="Share a position"
+            className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${sharing ? "bg-indigo-100 text-indigo-600" : "bg-slate-100 text-slate-500"}`}>
+            <TrendingUp size={17} />
+          </button>
+          <textarea value={text} onChange={(e) => setText(e.target.value.slice(0, 2000))} rows={1}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }}
+            placeholder={replyTo ? "Write a reply…" : "Message… use $TICKER to tag"}
+            className="flex-1 border border-slate-200 rounded-2xl px-3.5 py-2.5 text-[15px] resize-none max-h-32" />
+          <button onClick={() => send()} disabled={sending || !text.trim()}
+            className="w-10 h-10 rounded-full bg-gradient-to-r from-indigo-500 to-violet-500 text-white flex items-center justify-center shrink-0 disabled:opacity-40">
+            <Send size={16} />
+          </button>
+        </div>
+      </div>
+
+      {showMembers && (
+        <MembersSheet group={group} members={members} names={names} user={user} isOwner={isOwner} mutuals={mutuals}
+          onAdd={addMember} onRemove={removeMember} onLeave={leave} onDelete={deleteGroup} onRename={rename}
+          onClose={() => setShowMembers(false)} />
+      )}
+    </div>
+  );
+}
+
+/* A shared position inside a message: ticker, buy date, return %, thesis. No amounts. */
+function PositionShareCard({ pos, onTicker }) {
+  const up = (pos.plPct || 0) >= 0;
+  return (
+    <button onClick={() => onTicker(pos.ticker)} className="w-full text-left bg-white border border-indigo-100 rounded-xl p-3 mb-2 active:bg-indigo-50">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-[10px] font-bold text-indigo-500 tracking-wide">SHARED POSITION</div>
+          <div className="font-bold text-slate-700 truncate">{pos.ticker} <span className="font-medium text-slate-400 text-sm">{pos.name}</span></div>
+          <div className="text-[11px] text-slate-400">{pos.buyDate ? `Bought ${fmtDate(pos.buyDate, { day: "numeric", month: "short", year: "numeric" })}` : "Open position"}{pos.type ? ` · ${pos.type}` : ""}</div>
+        </div>
+        {pos.plPct != null && (
+          <div className={`font-bold text-sm shrink-0 ${up ? "text-emerald-600" : "text-rose-500"}`}>{pct(pos.plPct)}</div>
+        )}
+      </div>
+      {pos.thesis && <p className="text-[13px] text-slate-600 italic mt-1.5 leading-snug">“{pos.thesis}”</p>}
+    </button>
+  );
+}
+
+function SharePositionPicker({ holdings, cur, fx, onPick, onClose }) {
+  if (!holdings.length) {
+    return <p className="text-[11px] text-slate-400 bg-slate-50 rounded-xl px-2.5 py-2 mb-2">You have no positions to share yet.</p>;
+  }
+  return (
+    <div className="bg-slate-50 rounded-2xl p-2 mb-2 max-h-48 overflow-y-auto">
+      <div className="text-[10px] font-bold text-slate-400 px-1.5 pb-1">SHARE A POSITION — ticker, buy date, return % and your thesis (no amounts)</div>
+      {byValueDesc(holdings.filter((h) => !h.sample), cur, fx).map((h) => {
+        const cp = h.currentPrice > 0 ? h.currentPrice : h.buyPrice;
+        const plPct = h.buyPrice > 0 ? ((cp - h.buyPrice) / h.buyPrice) * 100 : null;
+        return (
+          <button key={h.id}
+            onClick={() => onPick({ ticker: h.ticker, name: h.name || h.ticker, type: h.type || "Stock", buyDate: h.buyDate || null, thesis: (h.thesis || "").slice(0, 280), plPct: plPct != null ? Number(plPct.toFixed(2)) : null, currency: h.currency || cur })}
+            className="w-full flex items-center justify-between px-2 py-2 rounded-xl text-sm bg-white mb-1 border border-slate-100 active:bg-indigo-50">
+            <span className="font-semibold text-slate-700 truncate">{h.ticker} <span className="font-normal text-slate-400">{h.name}</span></span>
+            {plPct != null && <span className={`text-xs font-bold shrink-0 ml-2 ${plPct >= 0 ? "text-emerald-600" : "text-rose-500"}`}>{pct(plPct)}</span>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function MembersSheet({ group, members, names, user, isOwner, mutuals, onAdd, onRemove, onLeave, onDelete, onRename, onClose }) {
+  const [confirm, setConfirm] = useState(null); // "leave" | "delete"
+  const addable = (mutuals || []).filter((f) => !members.includes(f.id));
+  return (
+    <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
+      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto overscroll-contain p-5" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-3">
+          {isOwner ? (
+            <input defaultValue={group.name} onBlur={(e) => onRename(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+              className="font-bold text-lg text-slate-700 bg-transparent border-b border-dashed border-slate-300 focus:border-indigo-400 outline-none min-w-0 flex-1 mr-2" />
+          ) : (
+            <h3 className="font-bold text-lg text-slate-700 truncate">{group.name}</h3>
+          )}
+          <button onClick={onClose} className="w-8 h-8 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center shrink-0"><X size={14} /></button>
+        </div>
+        {isOwner && <p className="text-[11px] text-slate-400 mb-3">You created this group — tap the name to rename it.</p>}
+
+        <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1">Members · {members.length}</div>
+        <div className="border border-slate-100 rounded-2xl divide-y divide-slate-50 overflow-hidden mb-4">
+          {members.map((id) => (
+            <div key={id} className="flex items-center justify-between px-3 py-2.5 text-sm">
+              <span className="font-semibold text-slate-600">@{names[id] || "…"}{id === user.id ? " (you)" : ""}{id === group.created_by ? " · creator" : ""}</span>
+              {isOwner && id !== user.id && (
+                <button onClick={() => onRemove(id, names[id])} className="text-xs font-semibold text-slate-400 bg-slate-100 px-2.5 py-1 rounded-full">Remove</button>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1 flex items-center gap-1"><UserPlus size={12} /> Add friends</div>
+        {addable.length === 0 ? (
+          <p className="text-sm text-slate-400 mb-4">All your mutual friends are already here. Only people who've added you back can be added.</p>
+        ) : (
+          <div className="border border-slate-100 rounded-2xl divide-y divide-slate-50 overflow-hidden mb-4">
+            {addable.map((f) => (
+              <button key={f.id} onClick={() => onAdd(f.id, f.username)}
+                className="w-full flex items-center justify-between px-3 py-2.5 text-sm bg-white active:bg-slate-50">
+                <span className="font-semibold text-slate-600">@{f.username}</span>
+                <span className="text-xs font-semibold text-indigo-600">Add</span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {confirm ? (
+          <div className="bg-rose-50 rounded-2xl p-3 text-sm">
+            <p className="text-rose-700 font-semibold mb-2">{confirm === "delete" ? "Delete this group for everyone? Messages are gone for good." : "Leave this group?"}</p>
+            <div className="flex gap-2">
+              <button onClick={confirm === "delete" ? onDelete : onLeave} className="flex-1 bg-rose-500 text-white rounded-xl py-2 text-sm font-semibold">Yes, {confirm}</button>
+              <button onClick={() => setConfirm(null)} className="flex-1 bg-white text-slate-600 rounded-xl py-2 text-sm font-semibold border border-slate-200">Cancel</button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex gap-2">
+            <button onClick={() => setConfirm("leave")} className="flex-1 bg-slate-100 text-slate-600 rounded-xl py-2.5 text-sm font-semibold flex items-center justify-center gap-1.5"><LogOut size={14} /> Leave group</button>
+            {isOwner && (
+              <button onClick={() => setConfirm("delete")} className="flex-1 bg-rose-50 text-rose-500 rounded-xl py-2.5 text-sm font-semibold flex items-center justify-center gap-1.5"><Trash2 size={14} /> Delete group</button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
