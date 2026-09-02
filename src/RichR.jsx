@@ -1184,7 +1184,7 @@ export default function RichR({ user, onSignOut }) {
             onAddGoal={addGoal} onUpdateGoal={updateGoal} onRemoveGoal={removeGoal}
             onBenchmark={(benchmark) => patch(() => ({ benchmark }))}
             onScoreLog={(scoreLog) => patch(() => ({ scoreLog }))}
-            user={user} goFriends={() => setTab("friends")}
+            user={user} goFriends={() => setTab("friends")} goCommunities={() => setTab("groups")}
             onDismissOnboarding={() => patch(() => ({ onboardingDismissed: true }))}
             onOpenProfile={openProfile}
             onRankLog={(rankLog) => patch(() => ({ rankLog }))}
@@ -1550,7 +1550,7 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
 }
 
 /* ================= HOME ================= */
-function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, goImport, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, priceDataAt, onAddGoal, onUpdateGoal, onRemoveGoal, onBenchmark, onScoreLog, user, goFriends, onDismissOnboarding, onOpenProfile, onRankLog, onOpenTicker }) {
+function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, goImport, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, priceDataAt, onAddGoal, onUpdateGoal, onRemoveGoal, onBenchmark, onScoreLog, user, goFriends, goCommunities = null, onDismissOnboarding, onOpenProfile, onRankLog, onOpenTicker }) {
   const [ytd, setYtd] = useState({ m: null, b: null });
   const [social, setSocial] = useState(null); // { mine, friendsAvg, rank, n, shared, friendsCount }
   const [streak, setStreak] = useState(0);
@@ -1708,6 +1708,16 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
         </div>
       </section>
 
+      {/* ===== the feed — friends, communities, sentiment, rankings ===== */}
+      <section className="border-t border-slate-100 pt-6">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="section-title">Feed</h3>
+          <button onClick={goFriends} className="text-xs font-semibold text-emerald-700">Leaderboard →</button>
+        </div>
+        <HomeFeed user={user} onOpenTicker={onOpenTicker} goFriends={goFriends} goCommunities={goCommunities}
+          rankMove={(() => { const br = data.boardRanks; if (!br || !br.cur || !br.prev) return null; const to = br.cur[user.id], from = br.prev[user.id]; return to && from && to !== from ? { from, to, up: to < from } : null; })()} />
+      </section>
+
       {/* ===== standing among friends — the RichR bit ===== */}
       <section className="border-t border-slate-100 pt-6">
         <Standing social={social} ytd={ytd} benchLabel={benchOf(data).short} avatars={social && social.avatars} onClick={goFriends} />
@@ -1725,14 +1735,6 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
 
       <RecheckCalls onOpenTicker={onOpenTicker} />
 
-      {/* ===== what friends are doing — activity is the content ===== */}
-      <section className="border-t border-slate-100 pt-6">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="section-title">Friends' activity</h3>
-          <button onClick={goFriends} className="text-xs font-semibold text-emerald-700">Leaderboard →</button>
-        </div>
-        <HomeFeed user={user} onOpenTicker={onOpenTicker} goFriends={goFriends} />
-      </section>
 
       <div className="lg:grid lg:grid-cols-2 lg:gap-10 space-y-8 lg:space-y-0">
         <div className="space-y-8">
@@ -5430,10 +5432,20 @@ function PerformanceChart({ holdings, cur, liveValue, liveCost, bench: BENCH = D
     return fmtDate(d);
   };
 
-  const chart = (pts || []).map((p) => ({ t: p.t, value: p.value, cost: p.cost }));
+  /* The history service returns 0 for days before the first buy date. Those
+     days are "no portfolio yet", not "worth nothing" — start the chart at the
+     earliest real valuation instead of drawing a €0 / −100% floor. */
+  const rawChart = (pts || []).map((p) => ({ t: p.t, value: p.value, cost: p.cost }));
+  const firstLive = rawChart.findIndex((p) => p.value > 0);
+  const chart = firstLive > 0 ? rawChart.slice(firstLive) : (firstLive === 0 ? rawChart : []);
+  const trimmedStart = firstLive > 0;
   if (chart.length && liveValue > 0) {
     chart.push({ t: new Date().toISOString(), value: Math.round(liveValue * 100) / 100, cost: liveCost });
+  } else if (!chart.length && liveValue > 0 && pts) {
+    chart.push({ t: new Date().toISOString(), value: Math.round(liveValue * 100) / 100, cost: liveCost });
   }
+  const spanDays = chart.length > 1 ? (new Date(chart[chart.length - 1].t) - new Date(chart[0].t)) / 86400000 : 0;
+  const shortHistory = !loading && !err && pts && spanDays < 2;
 
   /* Headline gain for the range: measured from the first day the portfolio
      existed within the range, and cash-flow adjusted (money you added is
@@ -5447,7 +5459,7 @@ function PerformanceChart({ holdings, cur, liveValue, liveCost, bench: BENCH = D
   const diffPct = first ? (diff / first) * 100 : 0;
   const up = diff >= 0;
   const rangeSub = (PH_RANGES.find((r) => r.id === range) || {}).sub || "";
-  const youngerThanRange = firstIdx > 0 && range !== "all";
+  const youngerThanRange = trimmedStart && range !== "all";
   const sub = youngerThanRange && firstPt ? `Since ${fmtDate(firstPt.t)}` : rangeSub;
 
   /* Compare mode: both lines as % change from the start of the range.
@@ -5535,6 +5547,11 @@ function PerformanceChart({ holdings, cur, liveValue, liveCost, bench: BENCH = D
       )}
     </div>
 
+    {shortHistory && (
+      <p className="text-[11px] text-slate-500 bg-slate-50 rounded-xl px-3 py-2 mt-2 leading-snug">
+        Your history starts {chart.length ? fmtDate(chart[0].t) : "today"}. Positions imported without a purchase date are dated today — set the real buy dates (Holdings › tap a position › edit) and the chart will reconstruct the months before.
+      </p>
+    )}
     {/* Range control: one segmented bar, the active range lifted in white. */}
     <div className="mt-3 bg-slate-100 rounded-xl p-1 flex" role="tablist" aria-label="Chart range">
       {PH_RANGES.filter((r) => !(compact && r.id === "1d")).map((r) => (
@@ -6912,11 +6929,13 @@ function CallsList({ userId, calls: given = null, limit = 8, title = "CALLS", on
   );
 }
 
-/* ---------- Home: what your friends are doing ---------- */
-function HomeFeed({ user, onOpenTicker, goFriends }) {
+/* ---------- Home feed: friends, communities, sentiment, rankings — one stream ---------- */
+function HomeFeed({ user, onOpenTicker, goFriends, goCommunities, rankMove = null }) {
   const [items, setItems] = useState(null);
   const [trending, setTrending] = useState([]);
+  const [top, setTop] = useState(null);
   const [scope, setScope] = useState("friends"); // friends | community (when no friends yet)
+  const [groupNames, setGroupNames] = useState({});
   useEffect(() => {
     let dead = false;
     (async () => {
@@ -6924,24 +6943,30 @@ function HomeFeed({ user, onOpenTicker, goFriends }) {
       const sinceIso = new Date(Date.now() - 14 * 86400000).toISOString();
       const who = ids.length ? ids : null;
       if (!who) setScope("community");
-      const q = (t, sel, ord = "created_at") => {
-        let b = supabase.from(t).select(sel).gte("created_at", sinceIso).order(ord, { ascending: false }).limit(80);
-        if (who) b = b.in("user_id", who);
-        else b = b.neq("user_id", user.id);
+      const q = (t, sel) => {
+        let b = supabase.from(t).select(sel).gte("created_at", sinceIso).order("created_at", { ascending: false }).limit(80);
+        if (who) b = b.in("user_id", who); else b = b.neq("user_id", user.id);
         return b;
       };
-      const [{ data: ev }, { data: cs }, { data: ps }] = await Promise.all([
+      const [{ data: ev }, { data: cs }, { data: ps }, { data: gp }, { data: gs }, { data: ts }] = await Promise.all([
         who ? q("portfolio_events", "id, user_id, kind, ticker, from_pct, to_pct, created_at") : Promise.resolve({ data: [] }),
         q("stock_calls", "id, user_id, ticker, vote, reason, created_at, reaffirmed"),
         q("stock_posts", "id, user_id, ticker, body, parent_id, created_at"),
+        // my communities' posts (RLS = member only): polls, calls, shares and plain posts
+        supabase.from("group_posts").select("id, group_id, user_id, body, card, position, tickers, created_at").is("parent_id", null).gte("created_at", sinceIso).order("created_at", { ascending: false }).limit(40),
+        supabase.from("groups").select("id, name"),
+        supabase.rpc("top_sentiment", { lim: 5 }),
       ]);
       if (dead) return;
+      const gn = {}; (gs || []).forEach((g) => { gn[g.id] = g.name; }); setGroupNames(gn);
+      setTop(Array.isArray(ts) ? ts : []);
       const all = [
         ...(ev || []).map((e) => ({ t: "event", id: "e" + e.id, user_id: e.user_id, ticker: e.ticker, created_at: e.created_at, e })),
         ...latestCalls((cs || []).filter((c) => !c.reaffirmed)).map((c) => ({ t: "call", id: "c" + c.id, user_id: c.user_id, ticker: c.ticker, created_at: c.created_at, c })),
         ...(ps || []).filter((p) => !p.parent_id).map((p) => ({ t: "post", id: "p" + p.id, user_id: p.user_id, ticker: p.ticker, created_at: p.created_at, p })),
+        ...(gp || []).map((g) => ({ t: "group", id: "g" + g.id, user_id: g.user_id, ticker: (g.card && g.card.ticker) || (g.position && g.position.ticker) || (g.tickers && g.tickers[0]) || null, created_at: g.created_at, g })),
       ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-      setItems(all.slice(0, 25));
+      setItems(all.slice(0, 30));
       const weekAgo = Date.now() - 7 * 86400000;
       const cnt = {};
       all.filter((x) => x.ticker && new Date(x.created_at).getTime() > weekAgo).forEach((x) => { cnt[x.ticker] = (cnt[x.ticker] || 0) + 1; });
@@ -6951,18 +6976,68 @@ function HomeFeed({ user, onOpenTicker, goFriends }) {
   }, [user.id]);
   const names = useNames((items || []).map((x) => x.user_id));
   const [showAll, setShowAll] = useState(false);
+  const me = user.id;
+  const who = (id) => (id === me ? "You" : "@" + (names[id] || "…"));
 
-  if (items === null) return <Skeleton lines={3} />;
+  if (items === null) return <Skeleton lines={4} />;
+
   const line = (x) => {
-    if (x.t === "event") return eventText(x.e);
+    if (x.t === "event") return <>{eventText(x.e)}</>;
     if (x.t === "call") return <>{VOTE_META[x.c.vote].dot} rated <b>{x.c.ticker}</b> a <b>{VOTE_META[x.c.vote].label}</b>{x.c.reason ? <span className="text-slate-500"> — “{x.c.reason}”</span> : ""}</>;
-    return <>on <b>{x.p.ticker}</b>: <span className="text-slate-600">{x.p.body.length > 140 ? x.p.body.slice(0, 140) + "…" : x.p.body}</span></>;
+    if (x.t === "post") return <>on <b>{x.p.ticker}</b>: <span className="text-slate-600">{x.p.body.length > 160 ? x.p.body.slice(0, 160) + "…" : x.p.body}</span></>;
+    const g = x.g, c = g.card;
+    const where = groupNames[g.group_id] ? <span className="text-slate-400"> in {groupNames[g.group_id]}</span> : null;
+    if (c && c.kind === "poll") return <>asked <b>what's your call on {c.ticker}?</b>{where}</>;
+    if (c && c.kind === "vote") return <>shared their call {VOTE_META[c.vote].dot} <b>{VOTE_META[c.vote].label} on {c.ticker}</b>{where}{c.reason ? <span className="text-slate-500"> — “{c.reason}”</span> : ""}</>;
+    if (c && c.kind === "performance") return <>shared their performance{where}: <b><Ret v={c.ret} /></b>{c.score != null ? <> · Score {c.score}</> : ""}</>;
+    if (c && c.kind === "stock") return <>shared <b>{c.ticker}</b>{where}</>;
+    if (g.position) return <>shared their <b>{g.position.ticker}</b> position{where}{g.position.thesis ? <span className="text-slate-500 italic"> — “{g.position.thesis.slice(0, 120)}”</span> : ""}</>;
+    return <>{where ? <>posted{where}: </> : "posted: "}<span className="text-slate-600">{(g.body || "").length > 160 ? g.body.slice(0, 160) + "…" : g.body}</span></>;
   };
-  const shown = showAll ? items : items.slice(0, 8);
+  const shown = showAll ? items : items.slice(0, 10);
+
   return (
-    <div>
+    <div className="space-y-4">
+      {/* rank movement — reputation is performance */}
+      {rankMove && (
+        <button onClick={goFriends} className="w-full text-left flex items-center gap-3 bg-slate-900 text-white rounded-2xl px-4 py-3">
+          <Trophy size={16} className="text-amber-300 shrink-0" />
+          <span className="flex-1 text-sm"><b>You moved #{rankMove.from} → #{rankMove.to}</b> among friends{rankMove.up ? " — nice." : "."}</span>
+          <ChevronRight size={16} className="text-slate-500" />
+        </button>
+      )}
+
+      {/* RichR Sentiment — the app-wide pulse, horizontally */}
+      {top && top.length > 0 && (
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[10px] font-bold tracking-wide text-slate-400">RICHR SENTIMENT · MOST VOTED</span>
+            <span className="text-[10px] text-slate-400">one person, one vote</span>
+          </div>
+          <div className="flex gap-2 overflow-x-auto -mx-4 px-4 pb-1" style={{ scrollbarWidth: "none" }}>
+            {top.map((r) => {
+              const total = Number(r.total); const small = total < MIN_SAMPLE;
+              const lead = VOTE_ORDER.slice().sort((a, b) => Number(r[b]) - Number(r[a]))[0];
+              return (
+                <button key={r.ticker} onClick={() => onOpenTicker(r.ticker)} className="shrink-0 w-44 bg-white border border-slate-200 rounded-2xl p-3 text-left active:bg-slate-50">
+                  <div className="flex items-center gap-2"><Logo h={{ ticker: r.ticker }} size={26} rounded="rounded-lg" /><span className="font-bold text-slate-900 text-sm">{r.ticker}</span></div>
+                  <div className="mt-2 h-1.5 bg-slate-100 rounded-full overflow-hidden flex">
+                    {!small && VOTE_ORDER.map((k) => Number(r[k]) > 0 && <div key={k} className={`${VOTE_META[k].bar} h-full`} style={{ width: `${(Number(r[k]) / total) * 100}%` }} />)}
+                  </div>
+                  <div className="mt-1.5 text-[11px] tabular-nums">
+                    {small ? <span className="text-slate-500">{total} vote{total === 1 ? "" : "s"} · vote to reveal</span>
+                      : <><b className={VOTE_META[lead].text}>{pctOf(Number(r[lead]), total)}% {VOTE_META[lead].label}</b><span className="text-slate-400"> · {total.toLocaleString()} votes</span></>}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* trending among friends / on RichR */}
       {trending.length > 0 && (
-        <div className="flex items-center gap-1.5 flex-wrap mb-3">
+        <div className="flex items-center gap-1.5 flex-wrap">
           <span className="text-[10px] font-bold text-slate-400 mr-1">TRENDING{scope === "community" ? " ON RICHR" : " AMONG FRIENDS"}</span>
           {trending.map(([t, n]) => (
             <button key={t} onClick={() => onOpenTicker && onOpenTicker(t)} className="text-xs font-semibold text-slate-700 bg-white border border-slate-200 px-2.5 py-1 rounded-full hover:border-slate-300">
@@ -6971,27 +7046,38 @@ function HomeFeed({ user, onOpenTicker, goFriends }) {
           ))}
         </div>
       )}
+
+      {/* the stream */}
       {items.length === 0 ? (
-        <div className="text-sm text-slate-500">
-          {scope === "community" ? "It's quiet on RichR right now." : "Your friends have been quiet this fortnight."}{" "}
+        <div className="card text-sm text-slate-500">
+          {scope === "community" ? "It's quiet on RichR right now — vote on a stock or post to a community to get things going." : "Your friends have been quiet this fortnight."}{" "}
           <button onClick={goFriends} className="font-semibold text-emerald-700">{scope === "community" ? "Add friends →" : "See friends →"}</button>
         </div>
       ) : (
-        <div className="divide-y divide-slate-100">
-          {shown.map((x) => (
-            <div key={x.id} className="py-2.5 flex items-start gap-2.5">
-              <Avatar name={names[x.user_id] || "?"} size={28} />
-              <div className="flex-1 min-w-0 text-[13px] text-slate-700 leading-snug">
-                <span className="font-bold">@{names[x.user_id] || "…"}</span> {line(x)}
-                <div className="text-[10px] text-slate-400 mt-0.5">{timeAgo(x.created_at)}{x.ticker && <> · <button onClick={() => onOpenTicker && onOpenTicker(x.ticker)} className="font-semibold text-emerald-700">open {x.ticker}</button></>}</div>
+        <div className="card divide-y divide-slate-100 py-1">
+          {shown.map((x) => {
+            const poll = x.t === "group" && x.g.card && x.g.card.kind === "poll";
+            return (
+              <div key={x.id} className="py-3 flex items-start gap-2.5">
+                <Avatar name={x.user_id === me ? (SOCIAL_ME.username || "you") : (names[x.user_id] || "?")} size={30} />
+                <div className="flex-1 min-w-0">
+                  <div className="text-[13px] text-slate-700 leading-snug"><span className="font-bold text-slate-900">{who(x.user_id)}</span> {line(x)}</div>
+                  {poll && <div className="mt-2 bg-slate-50 rounded-xl p-3"><SentimentMini ticker={x.g.card.ticker} name={x.g.card.name} onOpenTicker={onOpenTicker} headline={false} /></div>}
+                  {x.t === "group" && x.g.body && x.g.card && <div className="text-[13px] text-slate-600 mt-1">“{x.g.body}”</div>}
+                  <div className="text-[10px] text-slate-400 mt-1 flex items-center gap-2">
+                    <span>{timeAgo(x.created_at)}</span>
+                    {x.ticker && <button onClick={() => onOpenTicker && onOpenTicker(x.ticker)} className="font-semibold text-emerald-700">open {x.ticker}</button>}
+                    {x.t === "group" && goCommunities && <button onClick={goCommunities} className="font-semibold text-slate-500">reply in community</button>}
+                  </div>
+                </div>
               </div>
-            </div>
-          ))}
-          {items.length > 8 && !showAll && <button onClick={() => setShowAll(true)} className="text-xs font-semibold text-emerald-700 pt-2">Show more</button>}
+            );
+          })}
+          {items.length > 10 && !showAll && <button onClick={() => setShowAll(true)} className="text-xs font-semibold text-emerald-700 py-2">Show more</button>}
         </div>
       )}
       {scope === "community" && items.length > 0 && (
-        <p className="text-[11px] text-slate-400 mt-2">Showing RichR-wide activity until you have mutual friends. <button onClick={goFriends} className="font-semibold text-emerald-700">Add friends →</button></p>
+        <p className="text-[11px] text-slate-400">Showing RichR-wide activity until you have mutual friends. <button onClick={goFriends} className="font-semibold text-emerald-700">Add friends →</button></p>
       )}
     </div>
   );
