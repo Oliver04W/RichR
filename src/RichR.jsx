@@ -1556,7 +1556,7 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
           {social && social.rank != null ? (
             <div className="text-sm font-bold flex items-center gap-2">
               <span className={`inline-flex items-center justify-center min-w-[2rem] h-7 px-1.5 rounded-full text-xs font-extrabold ${social.rank === 1 ? "bg-amber-300 text-amber-900" : "bg-white text-emerald-700"}`}>#{social.rank}</span>
-              You’re #{social.rank} of {social.n} friends this year
+              You’re #{social.rank} of {social.n} sharing this year
             </div>
           ) : (
             <div className="text-sm font-bold">
@@ -4510,12 +4510,20 @@ function PerformanceChart({ holdings, cur, liveValue, liveCost, bench: BENCH = D
     chart.push({ t: new Date().toISOString(), value: Math.round(liveValue * 100) / 100, cost: liveCost });
   }
 
-  const first = chart.length ? chart[0].value : 0;
-  const last = chart.length ? chart[chart.length - 1].value : 0;
-  const diff = last - first;
+  /* Headline gain for the range: measured from the first day the portfolio
+     existed within the range, and cash-flow adjusted (money you added is
+     not a gain). */
+  const firstIdx = chart.findIndex((p) => p.value > 0);
+  const firstPt = firstIdx >= 0 ? chart[firstIdx] : null;
+  const lastPt = chart.length ? chart[chart.length - 1] : null;
+  const first = firstPt ? firstPt.value : 0;
+  const last = lastPt ? lastPt.value : 0;
+  const diff = firstPt && lastPt ? (last - first) - ((lastPt.cost || 0) - (firstPt.cost || 0)) : 0;
   const diffPct = first ? (diff / first) * 100 : 0;
   const up = diff >= 0;
-  const sub = (PH_RANGES.find((r) => r.id === range) || {}).sub || "";
+  const rangeSub = (PH_RANGES.find((r) => r.id === range) || {}).sub || "";
+  const youngerThanRange = firstIdx > 0 && range !== "all";
+  const sub = youngerThanRange && firstPt ? `Since ${fmtDate(firstPt.t)}` : rangeSub;
 
   /* Compare mode: both lines as % change from the start of the range.
      Portfolio is cash-flow adjusted (deposits don't count as gains);
