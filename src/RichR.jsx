@@ -6,7 +6,8 @@ import {
   ChevronDown, ChevronLeft, ChevronRight, Lock, Target, Sparkles, Flag, Activity, Calendar, Camera, Upload, Search, Star, ExternalLink, User, MessageCircle, Send, UserPlus, LogOut, CornerDownRight
 } from "lucide-react";
 import {
-  AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine
+  AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine,
+  ComposedChart, Line, PieChart, Pie, Cell
 } from "recharts";
 import { supabase } from "./supabase";
 
@@ -389,6 +390,7 @@ export default function RichR({ user, onSignOut }) {
      there instead of always to Portfolio. */
   const prevTabRef = useRef("portfolio");
   const [researchQuery, setResearchQuery] = useState(""); // prefilled when a $TICKER chip is tapped
+  const [importOnce, setImportOnce] = useState(false);    // open the import modal on arrival in Holdings
   const openTicker = (t) => { setResearchQuery(String(t || "").toUpperCase()); setTab("research"); };
   const openProfile = () => { if (tab !== "profile") prevTabRef.current = tab; setTab("profile"); };
   const closeProfile = () => setTab(prevTabRef.current === "profile" ? "portfolio" : prevTabRef.current);
@@ -897,7 +899,7 @@ export default function RichR({ user, onSignOut }) {
             onSwitch={(id) => patch(() => ({ activeId: id }))}
             onAddPortfolio={addPortfolio} onDeletePortfolio={deletePortfolio}
             onRename={(name) => patchActive(() => ({ name }))}
-            goPositions={() => setSub("holdings")} onLoadSample={loadSample}
+            goPositions={() => setSub("holdings")} goImport={() => { setImportOnce(true); setSub("holdings"); }} onLoadSample={loadSample}
             goals={data.goals || []} allValue={allValue} fx={data.fx || DEFAULT_FX}
             autoRefresh={!!data.autoRefresh} onToggleAuto={() => patch((d) => ({ autoRefresh: !d.autoRefresh }))}
             pricesAt={data.pricesAt || 0} priceDataAt={data.priceDataAt || 0}
@@ -909,7 +911,8 @@ export default function RichR({ user, onSignOut }) {
             companyInfo={data.companyInfo || {}} onSaveInfo={saveCompanyInfo}
             onUpsert={upsertHolding} onRemove={removeHolding} onSetPrice={setPrice} onLoadSample={loadSample} onClosePosition={closePosition}
             watchlist={data.watchlist || []} onRemoveWatch={removeWatch} onSetWatchPrice={setWatchPrice}
-            goResearch={() => setTab("research")} />
+            goResearch={() => setTab("research")}
+            openImport={importOnce} onImportOpened={() => setImportOnce(false)} />
         )}
         {tab === "portfolio" && sub === "analysis" && (
           <InsightsTab active={active} totals={totals} cur={cur} fx={data.fx || DEFAULT_FX} say={say}
@@ -1134,7 +1137,7 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
 }
 
 /* ================= HOME ================= */
-function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, priceDataAt, onAddGoal, onUpdateGoal, onRemoveGoal }) {
+function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, goImport, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, priceDataAt, onAddGoal, onUpdateGoal, onRemoveGoal }) {
   const [renaming, setRenaming] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const up = totals.pl >= 0;
@@ -1199,16 +1202,20 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
             Add your first position and write down why you bought it. Prices update live, and once you have a few positions you can share your progress with friends.
           </p>
           <div className="flex gap-2 flex-wrap">
+            <button onClick={goImport}
+              className="bg-white text-emerald-600 text-sm font-semibold px-5 py-2.5 rounded-full shadow flex items-center gap-1.5">
+              <Camera size={15} /> Import from screenshot
+            </button>
             <button onClick={goPositions}
-              className="bg-white text-emerald-600 text-sm font-semibold px-5 py-2.5 rounded-full shadow">
-              Add a position
+              className="bg-emerald-700/40 text-white text-sm font-semibold px-5 py-2.5 rounded-full">
+              Add manually
             </button>
             <button onClick={onLoadSample}
               className="bg-emerald-700/40 text-white text-sm font-semibold px-5 py-2.5 rounded-full">
               Try sample data
             </button>
           </div>
-          <p className="text-[11px] text-emerald-100 mt-3">Sample data is clearly marked and can't be shared to the leaderboard — replace it with real positions when you're ready.</p>
+          <p className="text-[11px] text-emerald-100 mt-3">Fastest: screenshot your broker app (Nordnet, Avanza, Interactive Brokers…), upload it, confirm the holdings — about 20 seconds. Sample data is clearly marked and can't be shared.</p>
         </div>
         <GoalsSection goals={goals} allValue={allValue} cur={cur}
           onAdd={onAddGoal} onUpdate={onUpdateGoal} onRemove={onRemoveGoal} />
@@ -1265,6 +1272,12 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
         <StatCard label="Invested" value={moneyShort(totals.cost, cur)} />
         <StatCard label="Return" value={pct(totals.plPct)} tone={th.stat} />
       </div>
+
+      {/* period returns vs S&P 500 */}
+      <PeriodReturns active={active} cur={cur} liveValue={totals.value} liveCost={totals.cost} />
+
+      {/* best / worst + concentration */}
+      <MoversCard active={active} cur={cur} fx={fx} />
       </div>{/* /left column */}
 
       <div className="space-y-4">
@@ -1324,6 +1337,9 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
         holdings={active.holdings} cur={cur}
         liveValue={totals.value} liveCost={totals.cost} hex={th.hex} />
 
+      {/* allocation donut */}
+      <AllocationCard active={active} cur={cur} fx={fx} />
+
       {/* goals */}
       <GoalsSection goals={goals} allValue={allValue} cur={cur}
         onAdd={onAddGoal} onUpdate={onUpdateGoal} onRemove={onRemoveGoal} />
@@ -1342,10 +1358,219 @@ function StatCard({ label, value, tone = "text-slate-700" }) {
   );
 }
 
+/* ================= DASHBOARD CARDS ================= */
+/* Cash-flow-adjusted period return: what your money did, ignoring what you
+   put in or took out during the window.  r = (Δvalue − Δcost) / value₀  */
+const periodReturn = (series, fromIdx) => {
+  if (!series || fromIdx < 0 || fromIdx >= series.length - 1) return null;
+  const a = series[fromIdx], b = series[series.length - 1];
+  if (!a || !b || !(a.value > 0)) return null;
+  return (((b.value - a.value) - ((b.cost || 0) - (a.cost || 0))) / a.value) * 100;
+};
+/* index of the last point on/before a given time */
+const idxOnOrBefore = (series, t) => {
+  let i = -1;
+  for (let k = 0; k < series.length; k++) { if (new Date(series[k].t).getTime() <= t) i = k; else break; }
+  return i;
+};
+const BENCH = { symbol: "SPY", label: "S&P 500" };
+
+/* Cache the daily series per holdings signature so switching tabs doesn't
+   refetch; both the tiles and the history sheet read from it. */
+const histCache = { key: "", portfolio: null, bench: null, at: 0 };
+const holdingsKey = (holdings, cur) => cur + "|" + (holdings || []).map((h) => `${h.ticker}:${h.shares}:${h.buyPrice}:${h.buyDate || ""}`).join(",");
+
+async function loadDailySeries(holdings, cur) {
+  const key = holdingsKey(holdings, cur);
+  if (histCache.key === key && Date.now() - histCache.at < 10 * 60000 && histCache.portfolio) return histCache;
+  const body = {
+    display: cur, range: "1y",
+    holdings: (holdings || []).map((h) => ({
+      ticker: h.ticker, shares: Number(h.shares) || 0, buyPrice: Number(h.buyPrice) || 0,
+      buyDate: h.buyDate || null, sellDate: h.sellDate || null, currency: h.currency || cur,
+    })),
+  };
+  const [pf, bm] = await Promise.all([
+    supabase.functions.invoke("portfolio-history", { body }),
+    supabase.functions.invoke("get-history", { body: { symbol: BENCH.symbol, currency: "USD", range: "1y" } }),
+  ]);
+  const portfolio = (!pf.error && pf.data && pf.data.ok && Array.isArray(pf.data.points)) ? pf.data.points : null;
+  const bench = (!bm.error && bm.data && bm.data.ok && Array.isArray(bm.data.points)) ? bm.data.points : null;
+  Object.assign(histCache, { key, portfolio, bench, at: Date.now() });
+  return histCache;
+}
+
+function PeriodReturns({ active, cur, liveValue, liveCost }) {
+  const [rows, setRows] = useState(null); // [{label, mine, bench}]
+  const [state, setState] = useState("loading");
+  const key = holdingsKey(active.holdings, cur);
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      setState("loading");
+      try {
+        const { portfolio, bench } = await loadDailySeries(active.holdings, cur);
+        if (dead) return;
+        if (!portfolio || !portfolio.length) { setState("none"); return; }
+        const series = [...portfolio, { t: new Date().toISOString(), value: liveValue, cost: liveCost }];
+        const bseries = bench && bench.length ? bench : null;
+        const now = Date.now();
+        const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+        const jan1 = new Date(new Date().getFullYear(), 0, 1).getTime();
+        const windows = [
+          { label: "Today", from: startOfToday.getTime() - 1 },
+          { label: "1 week", from: now - 7 * 86400000 },
+          { label: "1 month", from: now - 30 * 86400000 },
+          { label: "YTD", from: jan1 },
+        ];
+        const bRet = (from) => {
+          if (!bseries) return null;
+          const i = idxOnOrBefore(bseries, from);
+          const a = i >= 0 ? bseries[i] : bseries[0];
+          const b = bseries[bseries.length - 1];
+          return a && b && a.c > 0 ? ((b.c - a.c) / a.c) * 100 : null;
+        };
+        setRows(windows.map((w) => {
+          let i = idxOnOrBefore(series, w.from);
+          // portfolio younger than the window: measure from its first point
+          if (i < 0) i = 0;
+          const mine = periodReturn(series, i);
+          return { label: w.label, mine, bench: bRet(w.from), since: series[i] ? series[i].t : null };
+        }));
+        setState("ok");
+      } catch (e) { if (!dead) setState("none"); }
+    })();
+    return () => { dead = true; };
+  }, [key, Math.round(liveValue)]);
+
+  return (
+    <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="font-bold text-slate-700">Performance</h3>
+        <span className="text-[11px] text-slate-400">vs {BENCH.label}</span>
+      </div>
+      {state === "loading" ? (
+        <p className="text-sm text-slate-400 flex items-center gap-2"><RefreshCw size={13} className="animate-spin" /> Working out your returns…</p>
+      ) : state === "none" || !rows ? (
+        <p className="text-sm text-slate-400">Not enough price history yet — check back after the next market day.</p>
+      ) : (
+        <div className="grid grid-cols-4 gap-2">
+          {rows.map((r) => {
+            const has = r.mine != null;
+            const up = (r.mine || 0) >= 0;
+            const beat = has && r.bench != null ? r.mine - r.bench : null;
+            return (
+              <div key={r.label} className="bg-slate-50 rounded-2xl p-2.5 text-center">
+                <div className="text-[10px] font-semibold text-slate-400">{r.label}</div>
+                <div className={`font-bold text-sm mt-0.5 ${!has ? "text-slate-300" : up ? "text-emerald-600" : "text-rose-500"}`}>{has ? pct(r.mine) : "—"}</div>
+                <div className={`text-[10px] font-semibold mt-0.5 ${beat == null ? "text-slate-300" : beat >= 0 ? "text-emerald-500" : "text-slate-400"}`}
+                  title={r.bench != null ? `${BENCH.label}: ${pct(r.bench)}` : ""}>
+                  {beat == null ? "" : `${beat >= 0 ? "+" : "−"}${Math.abs(beat).toFixed(1)} vs S&P`}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <p className="text-[10px] text-slate-300 mt-2">Returns exclude money you added or withdrew during the period. S&P 500 via SPY in USD.</p>
+    </div>
+  );
+}
+
+function MoversCard({ active, cur, fx }) {
+  const priced = active.holdings.filter((h) => h.currentPrice > 0 && h.buyPrice > 0)
+    .map((h) => ({ h, r: ((h.currentPrice - h.buyPrice) / h.buyPrice) * 100 }));
+  if (!priced.length) return null;
+  const sorted = [...priced].sort((a, b) => b.r - a.r);
+  const best = sorted[0], worst = sorted[sorted.length - 1];
+  const total = active.holdings.reduce((s, h) => s + holdingValue(h, cur, fx), 0);
+  const weights = byValueDesc(active.holdings, cur, fx).map((h) => total > 0 ? holdingValue(h, cur, fx) / total : 0);
+  const top1 = (weights[0] || 0) * 100;
+  const top3 = weights.slice(0, 3).reduce((a, b) => a + b, 0) * 100;
+  const hhi = weights.reduce((a, w) => a + w * w, 0); // 1 = single position, 1/n = equal weights
+  const effN = hhi > 0 ? 1 / hhi : 0;
+  const conc = top1 >= 40 ? "Very concentrated" : top1 >= 25 ? "Concentrated" : top3 >= 50 ? "Focused" : "Diversified";
+  const Row = ({ label, item, tone }) => (
+    <div className="flex items-center gap-3">
+      <Logo h={item.h} size={34} rounded="rounded-xl" />
+      <div className="flex-1 min-w-0">
+        <div className="text-[10px] font-semibold text-slate-400">{label}</div>
+        <div className="text-sm font-semibold text-slate-700 truncate">{item.h.name || item.h.ticker}</div>
+      </div>
+      <div className={`font-bold text-sm ${tone}`}>{pct(item.r)}</div>
+    </div>
+  );
+  return (
+    <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100 space-y-3">
+      <Row label="BEST PERFORMER" item={best} tone={best.r >= 0 ? "text-emerald-600" : "text-rose-500"} />
+      {sorted.length > 1 && <Row label="WORST PERFORMER" item={worst} tone={worst.r >= 0 ? "text-emerald-600" : "text-rose-500"} />}
+      <div className="border-t border-slate-100 pt-3 flex items-center justify-between gap-3">
+        <div>
+          <div className="text-[10px] font-semibold text-slate-400">CONCENTRATION</div>
+          <div className="text-sm font-semibold text-slate-700">{conc}</div>
+        </div>
+        <div className="text-right text-[11px] text-slate-400 leading-snug">
+          Top position {top1.toFixed(0)}% · top 3 {top3.toFixed(0)}%<br />
+          ≈ {effN.toFixed(1)} equally-weighted positions
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const ALLOC_COLORS = ["#10b981", "#6366f1", "#f59e0b", "#0ea5e9", "#ec4899", "#8b5cf6", "#14b8a6", "#94a3b8"];
+function AllocationCard({ active, cur, fx }) {
+  const total = active.holdings.reduce((s, h) => s + holdingValue(h, cur, fx), 0);
+  if (!(total > 0)) return null;
+  const sorted = byValueDesc(active.holdings, cur, fx);
+  const top = sorted.slice(0, 7).map((h) => ({ name: h.ticker, value: holdingValue(h, cur, fx) }));
+  const rest = sorted.slice(7).reduce((s, h) => s + holdingValue(h, cur, fx), 0);
+  const data = rest > 0 ? [...top, { name: "Other", value: rest }] : top;
+  // by asset type too (Stock / ETF / …)
+  const byType = {};
+  active.holdings.forEach((h) => { const t = h.type || "Stock"; byType[t] = (byType[t] || 0) + holdingValue(h, cur, fx); });
+  const types = Object.entries(byType).sort((a, b) => b[1] - a[1]);
+  return (
+    <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+      <h3 className="font-bold text-slate-700 mb-1">Allocation</h3>
+      <div className="flex items-center gap-3">
+        <div className="w-36 h-36 shrink-0">
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie data={data} dataKey="value" nameKey="name" innerRadius={42} outerRadius={64} paddingAngle={2} stroke="none" isAnimationActive={false}>
+                {data.map((_, i) => <Cell key={i} fill={ALLOC_COLORS[i % ALLOC_COLORS.length]} />)}
+              </Pie>
+              <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid #e2e8f0", fontSize: 12 }}
+                formatter={(v, n) => [`${((v / total) * 100).toFixed(1)}%`, n]} />
+            </PieChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="flex-1 min-w-0 space-y-1">
+          {data.map((d, i) => (
+            <div key={d.name} className="flex items-center gap-2 text-xs">
+              <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: ALLOC_COLORS[i % ALLOC_COLORS.length] }} />
+              <span className="font-semibold text-slate-600 truncate flex-1">{d.name}</span>
+              <span className="text-slate-500 font-semibold">{((d.value / total) * 100).toFixed(1)}%</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      {types.length > 1 && (
+        <div className="mt-3 flex gap-1.5 flex-wrap">
+          {types.map(([t, v]) => (
+            <span key={t} className="text-[11px] font-semibold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md">{t} {((v / total) * 100).toFixed(0)}%</span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ================= POSITIONS ================= */
-function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRemove, onSetPrice, onLoadSample, onClosePosition, watchlist, onRemoveWatch, onSetWatchPrice, goResearch }) {
+function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRemove, onSetPrice, onLoadSample, onClosePosition, watchlist, onRemoveWatch, onSetWatchPrice, goResearch, openImport, onImportOpened }) {
   const [editing, setEditing] = useState(null);
   const [importing, setImporting] = useState(false);
+  useEffect(() => { if (openImport) { setImporting(true); if (onImportOpened) onImportOpened(); } }, [openImport]);
   const [detail, setDetail] = useState(null);
   const [view, setView] = useState("holdings"); // "holdings" | "watchlist"
   const [buying, setBuying] = useState(null);   // watchlist item being converted to a position
@@ -3542,6 +3767,25 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
   const [pts, setPts] = useState(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState(null);
+  const [compare, setCompare] = useState(false);   // overlay S&P 500
+  const [bench, setBench] = useState(null);        // [{t, c}]
+
+  /* Benchmark closes for the same range (SPY via get-history). */
+  useEffect(() => {
+    if (!open || !compare) return;
+    let dead = false;
+    const map = { "1d": "1d", "1w": "5d", "1mo": "1mo", "6mo": "6mo", "1y": "1y" };
+    (async () => {
+      try {
+        const { data, error } = await supabase.functions.invoke("get-history", {
+          body: { symbol: BENCH.symbol, currency: "USD", range: map[range] || "1y" },
+        });
+        if (dead) return;
+        setBench(!error && data && data.ok && Array.isArray(data.points) ? data.points : null);
+      } catch (e) { if (!dead) setBench(null); }
+    })();
+    return () => { dead = true; };
+  }, [open, compare, range]);
 
   useEffect(() => {
     if (!open) return;
@@ -3593,6 +3837,28 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
   const up = diff >= 0;
   const sub = (PH_RANGES.find((r) => r.id === range) || {}).sub || "";
 
+  /* Compare mode: both lines as % change from the start of the range.
+     Portfolio is cash-flow adjusted (deposits don't count as gains);
+     the benchmark's value at each portfolio timestamp is the last close
+     on/before it. */
+  let cmp = null, benchPct = null;
+  if (compare && chart.length > 1) {
+    const c0 = chart[0];
+    const b0 = bench && bench.length ? (bench[idxOnOrBefore(bench, new Date(c0.t).getTime())] || bench[0]) : null;
+    cmp = chart.map((p) => {
+      const mine = c0.value > 0 ? (((p.value - c0.value) - ((p.cost || 0) - (c0.cost || 0))) / c0.value) * 100 : 0;
+      let spx = null;
+      if (b0 && b0.c > 0) {
+        const i = idxOnOrBefore(bench, new Date(p.t).getTime());
+        const b = i >= 0 ? bench[i] : null;
+        if (b) spx = ((b.c - b0.c) / b0.c) * 100;
+      }
+      return { t: p.t, mine: Number(mine.toFixed(2)), spx: spx != null ? Number(spx.toFixed(2)) : null };
+    });
+    const lastB = [...cmp].reverse().find((x) => x.spx != null);
+    benchPct = lastB ? lastB.spx : null;
+  }
+
   return (
     <div className="fixed inset-0 z-[80] bg-slate-50 overflow-y-auto">
       <div className="max-w-md mx-auto p-4 pb-10">
@@ -3616,6 +3882,21 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
               </div>
             ) : err ? (
               <div className="h-full flex items-center justify-center text-sm text-rose-500 text-center px-6">{err}</div>
+            ) : cmp ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={cmp} margin={{ top: 8, right: 10, left: 10, bottom: 0 }}>
+                  <XAxis dataKey="t" tickFormatter={fmtTick} minTickGap={40}
+                    tick={{ fill: "#94a3b8", fontSize: 10 }} axisLine={false} tickLine={false} />
+                  <YAxis domain={["auto", "auto"]} tickFormatter={(v) => `${v > 0 ? "+" : ""}${v}%`} width={44}
+                    tick={{ fill: "#94a3b8", fontSize: 10 }} axisLine={false} tickLine={false} />
+                  <ReferenceLine y={0} stroke="#cbd5e1" strokeDasharray="4 4" />
+                  <Tooltip contentStyle={{ borderRadius: 12, border: "1px solid #e2e8f0", fontSize: 12 }}
+                    labelFormatter={(t) => fmtDateTime(t)}
+                    formatter={(v, k) => [v == null ? "—" : `${v > 0 ? "+" : ""}${v}%`, k === "mine" ? "You" : BENCH.label]} />
+                  <Line type="monotone" dataKey="spx" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 4" dot={false} isAnimationActive={false} connectNulls />
+                  <Line type="monotone" dataKey="mine" stroke={up ? "#10b981" : "#f43f5e"} strokeWidth={2.5} dot={false} isAnimationActive={false} />
+                </ComposedChart>
+              </ResponsiveContainer>
             ) : (
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={chart} margin={{ top: 8, right: 10, left: 10, bottom: 0 }}>
@@ -3650,10 +3931,21 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
               </button>
             ))}
           </div>
+          <button onClick={() => setCompare((v) => !v)}
+            className={`mt-2 w-full flex items-center justify-between text-xs font-semibold px-3 py-2 rounded-xl border transition ${
+              compare ? "bg-slate-800 text-white border-slate-800" : "bg-white text-slate-600 border-slate-200"}`}>
+            <span>Compare with {BENCH.label}</span>
+            <span className={compare ? "text-slate-300" : "text-slate-400"}>
+              {compare
+                ? (benchPct == null ? (bench === null ? "loading…" : "no data") : `S&P ${benchPct > 0 ? "+" : ""}${benchPct}% · you ${diffPct > 0 ? "+" : ""}${diffPct.toFixed(2)}%`)
+                : "off"}
+            </span>
+          </button>
 
           <p className="text-[10px] text-slate-300 mt-3">
             Reconstructed from official daily closes and intraday bars, converted at historical FX.
             Excludes dividends and fees. The last point is your live value.
+            {compare ? " Compare mode shows % change from the start of the range; your line ignores money added or withdrawn." : ""}
           </p>
         </div>
       </div>
