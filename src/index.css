@@ -11,6 +11,8 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background: #
 @keyframes richr-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 .rounded-3xl.bg-white, .rounded-2xl.bg-white { animation: richr-in .25s ease-out both; }
 @media (prefers-reduced-motion: reduce) { .rounded-3xl.bg-white, .rounded-2xl.bg-white { animation: none; } }
+@keyframes richr-up { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { [style*="richr-up"] { animation: none !important; } }
 /* skeleton shimmer */
 @keyframes richr-shimmer { 0% { background-position: -400px 0; } 100% { background-position: 400px 0; } }
 .skel { border-radius: 9999px; background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 37%, #f1f5f9 63%); background-size: 800px 100%; animation: richr-shimmer 1.4s linear infinite; }
