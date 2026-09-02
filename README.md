@@ -26,9 +26,14 @@ create table if not exists leaderboard (
   return_pct numeric not null default 0,
   holdings   int not null default 0,
   updated_at timestamptz default now()
+  -- every column except user_id/name is nullable: users pick what they share
 );
 alter table leaderboard enable row level security;
-create policy "board is readable"  on leaderboard for select to authenticated using (true);
+-- readable by yourself and MUTUAL friends only (both directions in `friends`)
+create policy "read self and mutual friends" on leaderboard for select to authenticated using (
+  user_id = auth.uid() or exists (
+    select 1 from friends a join friends b on b.user_id = a.friend_id and b.friend_id = a.user_id
+    where a.user_id = auth.uid() and a.friend_id = leaderboard.user_id));
 create policy "insert own row"     on leaderboard for insert to authenticated with check (auth.uid() = user_id);
 create policy "update own row"     on leaderboard for update to authenticated using (auth.uid() = user_id);
 ```
@@ -45,10 +50,11 @@ After the first deploy, in Supabase → Authentication → URL Configuration:
 - **Site URL**: `https://<your-app>.vercel.app`
 - **Redirect URLs**: add `https://<your-app>.vercel.app/*`
 
+See `supabase/migrations/` for the sharing-controls and nudges migrations.
+
 ## Notes
-- Portfolio data is stored in the browser (localStorage), keyed per Google
-  account. Different devices don't sync yet — that's the next milestone
-  (move portfolios into Supabase with per-user RLS).
+- Portfolio data lives in `public.user_data` (JSONB, per-user RLS) with
+  localStorage as an offline cache, so it follows you across devices.
 - Prices/FX read the `prices` and `fx_rates` tables; anon SELECT policies
   are already in place.
 - Local dev: `npm install && npm run dev`, and add `http://localhost:5173`
