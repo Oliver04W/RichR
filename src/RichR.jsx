@@ -5622,21 +5622,21 @@ function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo, watchlist, o
 
   /* Arrived here from a $TICKER chip in a group chat: search it and open
      the exact symbol match if there is one. */
+  const openExact = async (raw) => {
+    const t = String(raw || "").toUpperCase();
+    if (!t) return;
+    setQ(t); setSearching(true);
+    try {
+      const { data, error } = await supabase.functions.invoke("search-symbols", { body: { q: t } });
+      const rs = !error && data && Array.isArray(data.results) ? data.results : [];
+      const exact = rs.find((r) => String(r.symbol || "").toUpperCase() === t) || rs[0];
+      if (exact) choose(exact); else setResults(rs.slice(0, 8));
+    } catch (e) { /* leave the query typed for the user */ }
+    setSearching(false);
+  };
   useEffect(() => {
     if (!initialQuery) return;
-    const t = initialQuery.toUpperCase();
-    setQ(t);
-    (async () => {
-      setSearching(true);
-      try {
-        const { data, error } = await supabase.functions.invoke("search-symbols", { body: { q: t } });
-        const rs = !error && data && Array.isArray(data.results) ? data.results : [];
-        const exact = rs.find((r) => String(r.symbol || "").toUpperCase() === t) || rs[0];
-        if (exact) choose(exact); else setResults(rs.slice(0, 8));
-      } catch (e) { /* leave the query typed for the user */ }
-      setSearching(false);
-      if (onConsumeQuery) onConsumeQuery();
-    })();
+    openExact(initialQuery).then(() => { if (onConsumeQuery) onConsumeQuery(); });
   }, [initialQuery]);
 
   const choose = async (r) => {
@@ -5754,7 +5754,7 @@ function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo, watchlist, o
 
           <StockSocial key={"soc-" + sel.symbol} ticker={sel.symbol} name={sel.name}
             price={quote ? quote.price : null} currency={(quote && quote.currency) || sel.currency}
-            onOpenTicker={(t) => { search(t); }} />
+            onOpenTicker={openExact} />
 
           <div className="mt-4 flex items-center gap-2">
             <button onClick={() => startAdd(sel)}
@@ -5772,7 +5772,7 @@ function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo, watchlist, o
 
       {!sel && (
         <>
-          <DiscoverSentiment onOpenTicker={(t) => search(t)} />
+          <DiscoverSentiment onOpenTicker={openExact} />
           <div className="bg-white rounded-2xl p-8 text-center shadow-sm border border-slate-100">
             <Search size={24} className="mx-auto text-slate-300 mb-3" />
             <p className="text-sm text-slate-400">Search any instrument above to see its price, RichR Sentiment and the discussion. Nothing is added until you choose to.</p>
