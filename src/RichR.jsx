@@ -1104,7 +1104,7 @@ export default function RichR({ user, onSignOut }) {
 
       {/* Phone-width everywhere, except the Overview on a big screen, which
           spreads into two columns (see HomeTab). */}
-      <div className={`mx-auto px-4 pb-28 pt-6 transition-[max-width] ${
+      <div className={`mx-auto px-4 pb-36 pt-6 transition-[max-width] ${
         tab === "portfolio" && sub === "overview" && active.holdings.length > 0 ? "max-w-md lg:max-w-5xl" : "max-w-md"}`}>
         {/* header: a restrained wordmark; the personality comes from the content */}
         <div className="flex items-center justify-between mb-6">
@@ -1240,8 +1240,9 @@ export default function RichR({ user, onSignOut }) {
       {/* universal Create — floats above the tab bar (not inside a community chat, where the composer lives) */}
       {["portfolio", "research", "friends"].includes(tab) && !create && (
         <button onClick={() => setCreate("menu")} aria-label="Create"
-          className="fixed right-4 bottom-[5.5rem] z-40 h-12 pl-4 pr-5 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-[15px] flex items-center gap-1.5 shadow-lg shadow-emerald-200 active:scale-95 transition lg:right-[max(1rem,calc(50%-32rem))]">
-          <Plus size={20} /> Create
+          className="fab fixed z-40 h-11 pl-3.5 pr-4 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-[14px] flex items-center gap-1.5 lg:right-[max(1.25rem,calc(50%-32rem))]"
+          style={{ right: 20, bottom: "calc(4.25rem + 14px + env(safe-area-inset-bottom, 0px))" }}>
+          <Plus size={18} strokeWidth={2.5} /> Create
         </button>
       )}
       {create === "menu" && <CreateMenu onPick={setCreate} onClose={() => setCreate(null)} />}
@@ -6034,10 +6035,10 @@ function BottomSheet({ title, onClose, children, back = null }) {
 }
 
 const CREATE_ACTIONS = [
-  { id: "post", label: "Create post", sub: "Share a take with a community or on a stock", icon: PenLine, tone: "bg-emerald-600 text-white", primary: true },
-  { id: "poll", label: "Buy / Hold / Sell poll", sub: "Ask what people think of a stock", icon: Vote, tone: "bg-slate-900 text-white", primary: true },
-  { id: "position", label: "Add position", sub: "A stock you hold — shares and price", icon: Plus, tone: "bg-slate-100 text-slate-700" },
-  { id: "transaction", label: "Add transaction", sub: "Bought more or sold some of a position", icon: ArrowLeftRight, tone: "bg-slate-100 text-slate-700" },
+  { id: "post", label: "Create Post", sub: "Share a take with a community or on a stock", icon: PenLine, tone: "bg-emerald-600 text-white", primary: true },
+  { id: "poll", label: "Buy / Hold / Sell Poll", sub: "Ask what people think of a stock", icon: Vote, tone: "bg-slate-900 text-white", primary: true },
+  { id: "position", label: "Add Position", sub: "A stock you hold — shares and price", icon: Plus, tone: "bg-slate-100 text-slate-700" },
+  { id: "transaction", label: "Add Transaction", sub: "Bought more or sold some of a position", icon: ArrowLeftRight, tone: "bg-slate-100 text-slate-700" },
 ];
 
 function CreateMenu({ onPick, onClose }) {
