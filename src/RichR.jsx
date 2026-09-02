@@ -1190,7 +1190,7 @@ export default function RichR({ user, onSignOut }) {
             analysis={(data.analysis || {})[active.id]} onSave={saveAnalysis}
             news={(data.news || {})[active.id]} onSaveNews={saveNews} />
         )}
-        {tab === "research" && <ResearchTab cur={cur} say={say} onUpsert={upsertHolding}
+        {tab === "research" && <ResearchTab cur={cur} say={say} onUpsert={upsertHolding} holdings={active.holdings} fx={data.fx || DEFAULT_FX}
           companyInfo={data.companyInfo || {}} onSaveInfo={saveCompanyInfo}
           watchlist={data.watchlist || []} onWatch={addWatch} onUnwatch={removeWatchByTicker}
           initialQuery={researchQuery} onConsumeQuery={() => setResearchQuery("")} />}
@@ -2656,13 +2656,13 @@ function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRe
       )}
 
       {editing && (
-        <PositionModal holding={editing === "new" ? null : editing} cur={cur}
+        <PositionModal holding={editing === "new" ? null : editing} cur={cur} fx={fx} holdings={active.holdings}
           onClose={() => setEditing(null)}
-          onSave={(h) => { onUpsert(h); setEditing(null); }} />
+          onSave={(h) => { onUpsert(h); if (editing !== "new") setEditing(null); }} />
       )}
 
       {buying && (
-        <PositionModal cur={cur} title="Buy — new position"
+        <PositionModal cur={cur} fx={fx} holdings={active.holdings} title="Buy — new position"
           holding={{
             id: uid(), ticker: buying.ticker, name: buying.name || buying.ticker, domain: "",
             type: buying.type || "Stock", currency: buying.currency || cur,
@@ -2671,7 +2671,7 @@ function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRe
             currentPrice: buying.currentPrice || 0, thesis: "", verdict: "open",
           }}
           onClose={() => setBuying(null)}
-          onSave={(h) => { onUpsert(h); onRemoveWatch(buying.id); setBuying(null); }} />
+          onSave={(h) => { onUpsert(h); onRemoveWatch(buying.id); }} />
       )}
     </div>
   );
@@ -2803,114 +2803,360 @@ function PositionCard({ h, cur, fx, onOpen, onEdit, onRemove, onSetPrice, weight
   );
 }
 
-function PositionModal({ holding, cur, onClose, onSave, title }) {
-  const [f, setF] = useState(
-    holding || { id: uid(), ticker: "", name: "", domain: "", type: "Stock", currency: cur, shares: "", buyPrice: "", buyDate: new Date().toISOString().slice(0, 10), currentPrice: 0, thesis: "", verdict: "open" }
-  );
-  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+/* ================= ADD / EDIT POSITION ================= */
+/* Progressive disclosure: search → pick a stock → shares & price → add.
+   Everything derivable (value, currency, name, current price) is filled in
+   for you; date, type, currency and thesis live behind "More details". */
+const EXCHANGE_BY_SUFFIX = {
+  HE: "Nasdaq Helsinki", ST: "Nasdaq Stockholm", CO: "Nasdaq Copenhagen", OL: "Oslo Børs",
+  AS: "Euronext Amsterdam", PA: "Euronext Paris", BR: "Euronext Brussels", LS: "Euronext Lisbon", MI: "Borsa Italiana",
+  DE: "Xetra", F: "Frankfurt", VI: "Vienna", SW: "SIX Swiss", L: "London", TO: "Toronto", V: "TSX Venture",
+  T: "Tokyo", HK: "Hong Kong", AX: "ASX", SA: "B3 São Paulo", MC: "Madrid", IR: "Dublin", TA: "Tel Aviv",
+};
+const exchangeOf = (symbol, currency) => {
+  const s = String(symbol || "").toUpperCase();
+  const i = s.lastIndexOf(".");
+  if (i > 0) return EXCHANGE_BY_SUFFIX[s.slice(i + 1)] || s.slice(i + 1);
+  return currency === "USD" ? "US" : "";
+};
+const isFund = (r) => /fund|etf/i.test(r.type || "") || /\bETF\b|UCITS|Index/i.test(r.name || "");
 
-  /* global symbol search (stocks & ETFs via the search-symbols edge function) */
-  const [results, setResults] = useState([]);
+function PositionModal({ holding, cur, fx = null, holdings = [], onClose, onSave, title }) {
+  const editing = !!(holding && holding.ticker && Number(holding.shares) > 0); // real edit, not a prefilled "buy"
+  const blank = () => ({ id: uid(), ticker: "", name: "", domain: "", type: "Stock", currency: cur, shares: "", buyPrice: "", buyDate: new Date().toISOString().slice(0, 10), currentPrice: 0, thesis: "", verdict: "open" });
+  const [f, setF] = useState(holding ? { ...blank(), ...holding } : blank());
+  const [step, setStep] = useState(holding && holding.ticker ? "fields" : "search"); // search | fields | done
+  const [more, setMore] = useState(editing);
+  const [touched, setTouched] = useState({});
+  const [dupChoice, setDupChoice] = useState("merge"); // merge | separate
+  const [added, setAdded] = useState([]);              // this session's additions
+  const [quote, setQuote] = useState(null);            // live price for the picked stock
+  const [quoteState, setQuoteState] = useState("idle"); // idle | loading | ok | none
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const sharesRef = useRef(null), priceRef = useRef(null), searchRef = useRef(null);
+
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const esc = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", esc);
+    return () => { document.body.style.overflow = prev; window.removeEventListener("keydown", esc); };
+  }, []);
+
+  /* ---------- 1. search ---------- */
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState(null);   // null = nothing searched yet
   const [searching, setSearching] = useState(false);
-  const searchTimer = useRef(null);
-  const searchSymbols = (raw) => {
-    if (searchTimer.current) clearTimeout(searchTimer.current);
-    const q = (raw || "").trim();
-    if (q.length < 2) { setResults([]); setSearching(false); return; }
-    searchTimer.current = setTimeout(async () => {
-      setSearching(true);
+  const [searchErr, setSearchErr] = useState(false);
+  const [hi, setHi] = useState(0);
+  const timer = useRef(null);
+  const reqId = useRef(0);
+  const search = (raw) => {
+    setQ(raw);
+    if (timer.current) clearTimeout(timer.current);
+    const term = raw.trim();
+    if (term.length < 2) { setResults(null); setSearching(false); setSearchErr(false); return; }
+    setSearching(true);
+    const my = ++reqId.current;
+    timer.current = setTimeout(async () => {
       try {
-        const { data, error } = await supabase.functions.invoke("search-symbols", { body: { q } });
-        setResults(!error && data && Array.isArray(data.results) ? data.results.slice(0, 8) : []);
-      } catch (e) { setResults([]); }
-      setSearching(false);
-    }, 350);
+        const { data, error } = await supabase.functions.invoke("search-symbols", { body: { q: term } });
+        if (my !== reqId.current) return;
+        if (error) throw error;
+        const seen = new Set();
+        const rows = (data && Array.isArray(data.results) ? data.results : []).filter((r) => {
+          const k = String(r.symbol || "").toUpperCase(); if (!k || seen.has(k)) return false; seen.add(k); return true;
+        }).slice(0, 7);
+        setResults(rows); setSearchErr(false); setHi(0);
+      } catch (e) { if (my === reqId.current) { setResults([]); setSearchErr(true); } }
+      if (my === reqId.current) setSearching(false);
+    }, 250);
   };
   const pick = (r) => {
-    setF((s) => ({
-      ...s,
-      ticker: r.symbol,
-      name: r.name || s.name,
-      currency: r.currency || s.currency,
-      type: r.type || s.type,
-    }));
-    setResults([]);
+    const sym = String(r.symbol || "").toUpperCase();
+    setF((s) => ({ ...s, ticker: sym, name: r.name || sym, currency: r.currency || s.currency, type: isFund(r) ? (/etf/i.test(r.type || r.name || "") ? "ETF" : "Fund") : "Stock", domain: "" }));
+    setResults(null); setQ(""); setStep("fields"); setTouched({});
+    setTimeout(() => sharesRef.current && sharesRef.current.focus(), 50);
   };
-  const valid = f.ticker.trim() && Number(f.shares) > 0 && Number(f.buyPrice) > 0;
+  const useTyped = () => pick({ symbol: q.trim().toUpperCase(), name: q.trim().toUpperCase(), currency: cur, type: "Stock" });
+  const onSearchKey = (e) => {
+    if (!results || !results.length) { if (e.key === "Enter" && q.trim().length >= 1 && searchErr) useTyped(); return; }
+    if (e.key === "ArrowDown") { e.preventDefault(); setHi((i) => Math.min(results.length - 1, i + 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setHi((i) => Math.max(0, i - 1)); }
+    else if (e.key === "Enter") { e.preventDefault(); pick(results[hi] || results[0]); }
+  };
+
+  /* ---------- 2. live price → sensible default for "price paid" ---------- */
+  useEffect(() => {
+    if (step !== "fields" || !f.ticker) return;
+    let dead = false;
+    setQuoteState("loading"); setQuote(null);
+    (async () => {
+      try {
+        const { data, error } = await supabase.functions.invoke("get-quote", { body: { symbol: f.ticker, currency: f.currency } });
+        if (dead) return;
+        if (!error && data && data.ok && Number(data.price) > 0) {
+          setQuote(data); setQuoteState("ok");
+          setF((s) => ({ ...s, currentPrice: Number(data.price), currency: data.currency || s.currency, buyPrice: editing || (Number(s.buyPrice) > 0) ? s.buyPrice : Number(data.price) }));
+        } else setQuoteState("none");
+      } catch (e) { if (!dead) setQuoteState("none"); }
+    })();
+    return () => { dead = true; };
+  }, [step, f.ticker]);
+
+  /* ---------- duplicates ---------- */
+  const dup = step === "fields" && !editing
+    ? (holdings || []).find((h) => h.id !== f.id && String(h.ticker).toUpperCase() === String(f.ticker).toUpperCase() && !h.sample) || null
+    : null;
+
+  /* ---------- validation & derived values ---------- */
+  const shares = Number(f.shares), price = Number(f.buyPrice);
+  const errs = {
+    shares: !(shares > 0) ? "Enter how many shares you hold" : null,
+    buyPrice: !(price > 0) ? "Enter the average price you paid" : null,
+  };
+  const valid = f.ticker.trim() && !errs.shares && !errs.buyPrice;
+  const value = shares > 0 && price > 0 ? shares * price : 0;
+  const ccy = f.currency || cur;
+  const valueHome = fx && ccy !== cur ? fxConvert(value, ccy, cur, fx) : null;
+  const liveVal = quote && shares > 0 ? shares * Number(quote.price) : null;
+
   const save = () => {
-    if (!valid) return;
-    // Editing and saving a sample position makes it yours — drop the flag.
+    setTouched({ shares: true, buyPrice: true });
+    if (!valid) { (errs.shares ? sharesRef : priceRef).current?.focus(); return; }
     const { sample, ...rest } = f;
-    onSave({ ...rest, ticker: f.ticker.trim().toUpperCase(), name: f.name.trim() || f.ticker.trim().toUpperCase(),
-      currency: f.currency || cur, shares: Number(f.shares), buyPrice: Number(f.buyPrice), currentPrice: Number(f.currentPrice) || 0 });
+    let out = { ...rest, ticker: f.ticker.trim().toUpperCase(), name: (f.name || "").trim() || f.ticker.trim().toUpperCase(),
+      currency: ccy, shares, buyPrice: price, currentPrice: Number(f.currentPrice) || 0, buyDate: f.buyDate || new Date().toISOString().slice(0, 10) };
+    if (dup && dupChoice === "merge") {
+      const s0 = Number(dup.shares) || 0, p0 = Number(dup.buyPrice) || 0;
+      const total = s0 + shares;
+      out = { ...dup, shares: total, buyPrice: total > 0 ? (s0 * p0 + shares * price) / total : price,
+        currentPrice: Number(f.currentPrice) || dup.currentPrice || 0,
+        buyDate: [dup.buyDate, out.buyDate].filter(Boolean).sort()[0] || out.buyDate,
+        thesis: dup.thesis || out.thesis };
+    }
+    onSave(out, { another: true });
+    if (editing) return; // parent closes
+    setAdded((a) => [...a, { ticker: out.ticker, shares: dup && dupChoice === "merge" ? shares : out.shares, value, ccy, merged: !!(dup && dupChoice === "merge") }]);
+    setStep("done");
   };
-  const label = "block text-xs font-semibold text-slate-400 mb-1.5";
-  const input = "w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm bg-white";
+  const another = () => {
+    setF(blank()); setQuote(null); setQuoteState("idle"); setDupChoice("merge"); setTouched({}); setMore(false);
+    setStep("search");
+    setTimeout(() => searchRef.current && searchRef.current.focus(), 50);
+  };
+
+  const label = "block text-xs font-semibold text-slate-500 mb-1.5";
+  const input = "w-full border border-slate-200 rounded-xl px-3.5 h-12 text-[16px] bg-white outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 transition tabular-nums";
+  const err = (k) => touched[k] && errs[k];
+  const heading = title || (editing ? "Edit position" : step === "done" ? "Added" : "Add position");
 
   return (
     <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl max-h-[92vh] overflow-y-auto overscroll-contain"
+      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl max-h-[92vh] overflow-y-auto overscroll-contain flex flex-col"
         onClick={(e) => e.stopPropagation()}>
-        <div className="p-5 border-b border-slate-100 flex items-center justify-between">
-          <h3 className="font-bold text-lg text-slate-700">{title || (holding ? "Edit position" : "New position")}</h3>
-          <button onClick={onClose} className="w-8 h-8 rounded-xl bg-slate-100 flex items-center justify-center text-slate-500">
-            <X size={15} />
-          </button>
+        <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between shrink-0">
+          <h3 className="font-bold text-lg text-slate-800">{heading}</h3>
+          <button onClick={onClose} aria-label="Close" className="w-8 h-8 rounded-xl bg-slate-100 flex items-center justify-center text-slate-500"><X size={15} /></button>
         </div>
-        <div className="p-5 space-y-4">
-          <div className="grid grid-cols-2 gap-3">
-            <div className="relative"><label className={label}>TICKER — TYPE TO SEARCH</label>
-              <input value={f.ticker}
-                onChange={(e) => { set("ticker", e.target.value); searchSymbols(e.target.value); }}
-                placeholder="NVDA or apple" className={input + " uppercase"} />
-              {(searching || results.length > 0) && (
-                <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-[60] max-h-56 overflow-y-auto">
-                  {searching && <div className="px-3 py-2 text-xs text-slate-400">Searching…</div>}
-                  {results.map((r) => (
-                    <button key={r.symbol} type="button" onClick={() => pick(r)}
-                      className="w-full text-left px-3 py-2 hover:bg-slate-50 active:bg-slate-100 border-b border-slate-50 last:border-0">
-                      <div className="text-sm font-semibold text-slate-700">{r.symbol}
-                        <span className="ml-1.5 text-[10px] font-bold text-sky-600 bg-sky-50 px-1.5 py-0.5 rounded-full">{r.currency}</span>
-                        <span className="ml-1 text-[10px] font-semibold text-slate-400">{r.type}</span>
-                      </div>
-                      <div className="text-xs text-slate-400 truncate">{r.name}</div>
-                    </button>
-                  ))}
+
+        {/* ---------- STEP 1: find the stock ---------- */}
+        {step === "search" && (
+          <div className="p-5">
+            <div className="relative">
+              <Search size={17} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input ref={searchRef} value={q} onChange={(e) => search(e.target.value)} onKeyDown={onSearchKey} autoFocus
+                placeholder="Company or ticker — e.g. Nvidia, ASML, NOKIA.HE"
+                className="w-full border border-slate-200 rounded-2xl pl-10 pr-3.5 h-14 text-[16px] outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 transition"
+                autoCapitalize="characters" autoCorrect="off" spellCheck={false} enterKeyHint="search" />
+              {q && <button onClick={() => search("")} aria-label="Clear" className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 p-1"><X size={14} /></button>}
+            </div>
+
+            <div className="mt-3 min-h-[120px]">
+              {searching && (
+                <div className="space-y-2 py-1" aria-busy="true">
+                  {[0, 1, 2].map((i) => <div key={i} className="flex items-center gap-3 px-1 py-2"><div className="skel w-9 h-9 !rounded-xl" /><div className="flex-1 space-y-1.5"><div className="skel h-3 w-1/3" /><div className="skel h-2.5 w-2/3" /></div></div>)}
+                </div>
+              )}
+              {!searching && results && results.length > 0 && (
+                <div className="divide-y divide-slate-100 -mx-2" role="listbox">
+                  {results.map((r, i) => {
+                    const held = (holdings || []).find((h) => String(h.ticker).toUpperCase() === String(r.symbol).toUpperCase());
+                    return (
+                      <button key={r.symbol} role="option" aria-selected={i === hi} onMouseEnter={() => setHi(i)} onClick={() => pick(r)}
+                        className={`w-full text-left flex items-center gap-3 px-2 py-2.5 rounded-xl transition ${i === hi ? "bg-slate-50" : ""}`}>
+                        <Logo h={{ ticker: r.symbol, name: r.name }} size={38} rounded="rounded-xl" />
+                        <div className="flex-1 min-w-0">
+                          <div className="font-bold text-slate-900 text-[15px] leading-tight truncate">{r.name || r.symbol}</div>
+                          <div className="text-xs text-slate-500 mt-0.5 truncate">
+                            <span className="font-semibold text-slate-700">{r.symbol}</span>
+                            {exchangeOf(r.symbol, r.currency) && <> · {exchangeOf(r.symbol, r.currency)}</>}
+                            {r.currency && <> · {r.currency}</>}
+                            {isFund(r) && <> · {/etf/i.test(r.type || r.name) ? "ETF" : "Fund"}</>}
+                          </div>
+                        </div>
+                        {held && <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded-full shrink-0">Held</span>}
+                        <ChevronRight size={16} className="text-slate-300 shrink-0" />
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {!searching && results && results.length === 0 && !searchErr && (
+                <div className="text-center py-6">
+                  <p className="text-sm font-semibold text-slate-600">No match for “{q.trim()}”</p>
+                  <p className="text-xs text-slate-400 mt-1 leading-relaxed">Try the ticker instead of the name — non-US listings need the exchange suffix, e.g. <b>NOKIA.HE</b>, <b>ASML.AS</b>, <b>VOLV-B.ST</b>.</p>
+                  <button onClick={useTyped} className="btn-secondary mt-3 text-xs">Use “{q.trim().toUpperCase()}” as the ticker anyway</button>
+                </div>
+              )}
+              {!searching && searchErr && (
+                <div className="text-center py-6">
+                  <p className="text-sm font-semibold text-rose-500">Search is unavailable right now</p>
+                  <p className="text-xs text-slate-400 mt-1">You can still add the position by ticker.</p>
+                  <button onClick={useTyped} disabled={!q.trim()} className="btn-secondary mt-3 text-xs disabled:opacity-50">Continue with “{q.trim().toUpperCase()}”</button>
+                </div>
+              )}
+              {!searching && results === null && (
+                <div className="text-center py-6 text-xs text-slate-400 leading-relaxed">
+                  Stocks, ETFs and funds on US and European exchanges.<br />Pick one and you'll only need shares and price — value, currency and today's price are filled in for you.
+                  {(holdings || []).length > 0 && (
+                    <div className="flex flex-wrap justify-center gap-1.5 mt-4">
+                      <span className="w-full text-[10px] font-bold text-slate-400 mb-0.5">ADD TO A POSITION YOU HOLD</span>
+                      {byValueDesc(holdings.filter((h) => !h.sample), cur, fx || DEFAULT_FX).slice(0, 6).map((h) => (
+                        <button key={h.id} onClick={() => pick({ symbol: h.ticker, name: h.name, currency: h.currency, type: h.type })}
+                          className="text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-full">{h.ticker}</button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
-            <div><label className={label}>TYPE</label>
-              <select value={f.type} onChange={(e) => set("type", e.target.value)} className={input}>
-                {TYPES.map((t) => <option key={t}>{t}</option>)}
-              </select></div>
+            {added.length > 0 && (
+              <p className="text-[11px] text-emerald-700 bg-emerald-50 rounded-xl px-3 py-2 mt-2">Added this time: {added.map((a) => a.ticker).join(", ")}</p>
+            )}
           </div>
-          <div><label className={label}>NAME (OPTIONAL)</label>
-            <input value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="Nvidia" className={input} /></div>
-          <div className="grid grid-cols-3 gap-3">
-            <div><label className={label}>SHARES</label>
-              <input type="number" value={f.shares} onChange={(e) => set("shares", e.target.value)} placeholder="10" className={input} /></div>
-            <div><label className={label}>BUY ({sym(f.currency || cur)})</label>
-              <input type="number" value={f.buyPrice} onChange={(e) => set("buyPrice", e.target.value)} placeholder="120" className={input} /></div>
-            <div><label className={label}>DATE</label>
-              <input type="date" value={f.buyDate} onChange={(e) => set("buyDate", e.target.value)} className={input} /></div>
+        )}
+
+        {/* ---------- STEP 2: shares & price ---------- */}
+        {step === "fields" && (
+          <div className="p-5 space-y-4" style={{ animation: "richr-in .2s ease-out both" }}>
+            {/* picked stock */}
+            <div className="flex items-center gap-3">
+              <Logo h={f} size={44} rounded="rounded-xl" />
+              <div className="flex-1 min-w-0">
+                <div className="font-bold text-slate-900 text-[15px] leading-tight truncate">{f.name || f.ticker}</div>
+                <div className="text-xs text-slate-500 mt-0.5 truncate">
+                  <span className="font-semibold text-slate-700">{f.ticker}</span>
+                  {exchangeOf(f.ticker, ccy) && <> · {exchangeOf(f.ticker, ccy)}</>} · {ccy}
+                  {quoteState === "loading" && <span className="text-slate-400"> · price…</span>}
+                  {quoteState === "ok" && quote && <span className="text-slate-600"> · now <span className="font-semibold tabular-nums">{money(quote.price, quote.currency || ccy)}</span></span>}
+                </div>
+              </div>
+              {!editing && <button onClick={() => { setStep("search"); setTimeout(() => searchRef.current && searchRef.current.focus(), 50); }} className="text-xs font-semibold text-emerald-700 shrink-0">Change</button>}
+            </div>
+
+            {/* duplicate: add to existing or separate lot */}
+            {dup && (
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-[13px] text-slate-700">
+                You already hold <b>{dup.shares} {dup.ticker}</b> at {money(dup.buyPrice, dup.currency || cur)} avg.
+                <div className="flex gap-2 mt-2">
+                  {[["merge", "Add to that position"], ["separate", "Keep as separate lot"]].map(([id, l]) => (
+                    <button key={id} onClick={() => setDupChoice(id)}
+                      className={`flex-1 text-xs font-bold h-9 rounded-lg border transition ${dupChoice === id ? "bg-slate-900 text-white border-slate-900" : "bg-white border-slate-200 text-slate-600"}`}>{l}</button>
+                  ))}
+                </div>
+                {dupChoice === "merge" && shares > 0 && price > 0 && (
+                  <p className="text-[11px] text-slate-500 mt-2 tabular-nums">→ {Number(dup.shares) + shares} shares at {money(((Number(dup.shares) * Number(dup.buyPrice)) + shares * price) / (Number(dup.shares) + shares), ccy)} avg</p>
+                )}
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={label} htmlFor="pm-shares">Shares</label>
+                <input id="pm-shares" ref={sharesRef} type="text" inputMode="decimal" value={f.shares} autoFocus={!editing}
+                  onChange={(e) => set("shares", e.target.value.replace(",", "."))} onBlur={() => setTouched((t) => ({ ...t, shares: true }))}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); priceRef.current && priceRef.current.focus(); } }}
+                  placeholder="0" enterKeyHint="next" className={input + (err("shares") ? " border-rose-300" : "")} />
+                {err("shares") && <p className="text-[11px] text-rose-500 mt-1">{errs.shares}</p>}
+              </div>
+              <div>
+                <label className={label} htmlFor="pm-price">Avg. price paid ({sym(ccy)})</label>
+                <input id="pm-price" ref={priceRef} type="text" inputMode="decimal" value={f.buyPrice}
+                  onChange={(e) => set("buyPrice", e.target.value.replace(",", "."))} onBlur={() => setTouched((t) => ({ ...t, buyPrice: true }))}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); save(); } }}
+                  placeholder={quote ? String(quote.price) : "0.00"} enterKeyHint="done" className={input + (err("buyPrice") ? " border-rose-300" : "")} />
+                {err("buyPrice") ? <p className="text-[11px] text-rose-500 mt-1">{errs.buyPrice}</p>
+                  : quote && Number(f.buyPrice) === Number(quote.price) ? <p className="text-[11px] text-slate-400 mt-1">Today's price — change it to what you actually paid.</p>
+                  : quote ? <button onClick={() => set("buyPrice", Number(quote.price))} className="text-[11px] text-emerald-700 font-semibold mt-1">Use today's {money(quote.price, ccy)}</button> : null}
+              </div>
+            </div>
+
+            {/* live preview */}
+            <div className="bg-slate-50 rounded-xl px-4 py-3 tabular-nums">
+              <div className="flex items-baseline justify-between gap-3">
+                <div className="text-xs text-slate-500 truncate">{f.ticker}{f.name && f.name !== f.ticker ? ` · ${f.name}` : ""}</div>
+                <div className="text-xs text-slate-500 shrink-0">{shares > 0 ? shares : "—"} × {price > 0 ? money(price, ccy) : "—"}</div>
+              </div>
+              <div className="flex items-baseline justify-between gap-3 mt-1">
+                <div className="text-sm font-semibold text-slate-700">Position value</div>
+                <div className="text-right">
+                  <div className="text-lg font-bold text-slate-900">{value > 0 ? money(value, ccy) : "—"}</div>
+                  {valueHome != null && value > 0 && <div className="text-[11px] text-slate-400">≈ {money(valueHome, cur)}</div>}
+                </div>
+              </div>
+              {liveVal != null && value > 0 && Math.abs(liveVal - value) > 0.005 && (
+                <div className="text-[11px] mt-1 text-right">worth <span className="font-semibold text-slate-600">{money(liveVal, ccy)}</span> today (<Ret v={((liveVal - value) / value) * 100} />)</div>
+              )}
+            </div>
+
+            {/* more details, folded away */}
+            <button onClick={() => setMore((v) => !v)} className="flex items-center gap-1 text-xs font-semibold text-slate-500">
+              <ChevronDown size={14} className={`transition ${more ? "rotate-180" : ""}`} /> {more ? "Fewer details" : "More details — date, type, currency, thesis"}
+            </button>
+            {more && (
+              <div className="space-y-3" style={{ animation: "richr-in .2s ease-out both" }}>
+                <div className="grid grid-cols-3 gap-3">
+                  <div><label className={label}>Bought on</label>
+                    <input type="date" value={f.buyDate} max={new Date().toISOString().slice(0, 10)} onChange={(e) => set("buyDate", e.target.value)} className={input + " px-2 text-sm"} /></div>
+                  <div><label className={label}>Type</label>
+                    <select value={f.type} onChange={(e) => set("type", e.target.value)} className={input + " px-2 text-sm"}>{TYPES.map((t) => <option key={t}>{t}</option>)}</select></div>
+                  <div><label className={label}>Currency</label>
+                    <select value={ccy} onChange={(e) => set("currency", e.target.value)} className={input + " px-2 text-sm"}>{CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code}</option>)}</select></div>
+                </div>
+                <div><label className={label}>Name</label>
+                  <input value={f.name} onChange={(e) => set("name", e.target.value)} className={input + " text-sm"} /></div>
+                <div><label className={label}>Why did you buy it? <span className="font-normal text-slate-400">(optional — you can write it later)</span></label>
+                  <textarea value={f.thesis} onChange={(e) => set("thesis", e.target.value)} rows={3} placeholder="What has to be true for this to work?"
+                    className="w-full border border-slate-200 rounded-xl px-3.5 py-2.5 text-sm bg-white outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 resize-y leading-relaxed" /></div>
+              </div>
+            )}
+
+            <button onClick={save} disabled={!valid && Object.keys(touched).length > 0}
+              className="btn-primary w-full h-12 text-[15px] disabled:opacity-50">
+              {editing ? "Save changes" : dup && dupChoice === "merge" ? `Add to ${f.ticker}` : "Add position"}
+            </button>
+            {added.length > 0 && <p className="text-[11px] text-slate-400 text-center -mt-1">Added this time: {added.map((a) => a.ticker).join(", ")}</p>}
           </div>
-          <div><label className={label}>TRADING CURRENCY — THE CURRENCY THIS IS BOUGHT AND PRICED IN</label>
-            <select value={f.currency || cur} onChange={(e) => set("currency", e.target.value)} className={input}>
-              {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code}</option>)}
-            </select></div>
-          <div>
-            <label className={label}>WHY DID YOU BUY IT?</label>
-            <textarea value={f.thesis} onChange={(e) => set("thesis", e.target.value)} rows={4}
-              placeholder="What has to be true for this to work? What's your edge or catalyst?"
-              className={input + " resize-y leading-relaxed"} />
-          </div>
-        </div>
-        <div className="p-5 pt-0">
-          <button onClick={save} disabled={!valid}
-            className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-3 rounded-2xl shadow disabled:opacity-50">
-            {holding ? "Save changes" : "Add position"}
-          </button>
-        </div>
+        )}
+
+        {/* ---------- STEP 3: done ---------- */}
+        {step === "done" && added.length > 0 && (() => {
+          const a = added[added.length - 1];
+          return (
+            <div className="p-6 text-center" style={{ animation: "richr-in .2s ease-out both" }}>
+              <div className="w-14 h-14 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto"><Check size={26} /></div>
+              <div className="font-bold text-slate-900 text-lg mt-3">{a.merged ? `Added to ${a.ticker}` : `${a.ticker} added`}</div>
+              <div className="text-sm text-slate-500 mt-1 tabular-nums">{a.shares} share{a.shares === 1 ? "" : "s"} · {money(a.value, a.ccy)}</div>
+              {added.length > 1 && <div className="text-[11px] text-slate-400 mt-2">{added.length} positions added: {added.map((x) => x.ticker).join(", ")}</div>}
+              <div className="grid grid-cols-2 gap-2 mt-6">
+                <button onClick={another} className="btn-secondary h-12 text-[15px]"><Plus size={15} /> Add another</button>
+                <button onClick={onClose} className="btn-primary h-12 text-[15px]">Done</button>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-4">Prices refresh automatically. Tap the position later to add your thesis.</p>
+            </div>
+          );
+        })()}
       </div>
     </div>
   );
@@ -5315,7 +5561,7 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
 /* Look up any stock on demand: search → live quote (via the get-quote
    edge function) → add to portfolio or watch. No seed_tickers bloat;
    each lookup fetches its own price when you open it. */
-function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo, watchlist, onWatch, onUnwatch, initialQuery, onConsumeQuery }) {
+function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo, watchlist, onWatch, onUnwatch, initialQuery, onConsumeQuery, holdings = [], fx = null }) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
@@ -5502,9 +5748,9 @@ function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo, watchlist, o
       )}
 
       {adding && (
-        <PositionModal holding={adding} cur={cur}
+        <PositionModal holding={adding} cur={cur} fx={fx} holdings={holdings}
           onClose={() => setAdding(null)}
-          onSave={(h) => { onUpsert(h); setAdding(null); say(`Added ${h.ticker} to your portfolio.`); }} />
+          onSave={(h) => { onUpsert(h); say(`Added ${h.ticker} to your portfolio.`); }} />
       )}
     </div>
   );
