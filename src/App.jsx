@@ -16,6 +16,11 @@ export default function App() {
   const m = typeof window !== "undefined" && window.location.pathname.match(/^\/u\/([a-z0-9_]{3,20})\/?$/i);
   if (m) return <PublicProfile username={m[1]} />;
 
+  // Local-only demo session (never active on the deployed host): lets the UI be
+  // exercised without an account — every backend call simply comes back empty.
+  const demo = typeof window !== "undefined" && /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname) && new URLSearchParams(window.location.search).get("demo") === "1";
+  if (demo) return <RichR user={{ id: "00000000-0000-4000-8000-000000000000", email: "demo@richr.local" }} onSignOut={() => {}} />;
+
   if (session === undefined) return <Splash />;
   if (!session) return <Login />;
   return <RichR user={session.user} onSignOut={() => supabase.auth.signOut()} />;
