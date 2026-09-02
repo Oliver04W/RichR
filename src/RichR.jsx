@@ -1362,7 +1362,11 @@ function StatCard({ label, value, tone = "text-slate-700" }) {
 /* Cash-flow-adjusted period return: what your money did, ignoring what you
    put in or took out during the window.  r = (Δvalue − Δcost) / value₀  */
 const periodReturn = (series, fromIdx) => {
-  if (!series || fromIdx < 0 || fromIdx >= series.length - 1) return null;
+  if (!series || fromIdx < 0) return null;
+  // the history is zero before the first purchase — start measuring from
+  // the first day the portfolio actually existed
+  while (fromIdx < series.length && !(series[fromIdx].value > 0)) fromIdx++;
+  if (fromIdx >= series.length - 1) return null;
   const a = series[fromIdx], b = series[series.length - 1];
   if (!a || !b || !(a.value > 0)) return null;
   return (((b.value - a.value) - ((b.cost || 0) - (a.cost || 0))) / a.value) * 100;
@@ -3842,10 +3846,11 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
      the benchmark's value at each portfolio timestamp is the last close
      on/before it. */
   let cmp = null, benchPct = null;
-  if (compare && chart.length > 1) {
-    const c0 = chart[0];
+  const live0 = chart.findIndex((p) => p.value > 0); // skip the pre-purchase zeros
+  if (compare && live0 >= 0 && chart.length - live0 > 1) {
+    const c0 = chart[live0];
     const b0 = bench && bench.length ? (bench[idxOnOrBefore(bench, new Date(c0.t).getTime())] || bench[0]) : null;
-    cmp = chart.map((p) => {
+    cmp = chart.slice(live0).map((p) => {
       const mine = c0.value > 0 ? (((p.value - c0.value) - ((p.cost || 0) - (c0.cost || 0))) / c0.value) * 100 : 0;
       let spx = null;
       if (b0 && b0.c > 0) {
