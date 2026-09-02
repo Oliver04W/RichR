@@ -4079,6 +4079,20 @@ function GroupsTab({ user, active, cur, fx, say, onOpenTicker, username }) {
   const [open, setOpen] = useState(null);       // group object being viewed
   const [creating, setCreating] = useState(false);
   const [mutuals, setMutuals] = useState(null);
+  const [menuFor, setMenuFor] = useState(null);     // group id with the ⋯ menu open
+  const [confirmFor, setConfirmFor] = useState(null);
+
+  /* Leave (member) or delete (creator) straight from the list. */
+  const quickAction = async (g) => {
+    const owner = g.created_by === user.id;
+    const { error } = owner
+      ? await supabase.from("groups").delete().eq("id", g.id)
+      : await supabase.from("group_members").delete().match({ group_id: g.id, user_id: user.id });
+    setMenuFor(null); setConfirmFor(null);
+    if (error) { say(owner ? "Couldn't delete the group." : "Couldn't leave — try again."); return; }
+    say(owner ? `Deleted “${g.name}”.` : `You left “${g.name}”.`);
+    await loadGroups();
+  };
 
   const loadGroups = async () => {
     try {
@@ -4162,8 +4176,10 @@ function GroupsTab({ user, active, cur, fx, say, onOpenTicker, username }) {
       ) : (
         <div className="space-y-2">
           {groups.map((g) => (
-            <button key={g.id} onClick={() => setOpen(g)}
-              className="w-full text-left bg-white rounded-2xl p-4 flex items-center gap-3 shadow-sm border border-slate-100 active:bg-slate-50">
+            <div key={g.id} className="bg-white rounded-2xl shadow-sm border border-slate-100">
+            <div className="flex items-center">
+            <button onClick={() => setOpen(g)}
+              className="flex-1 min-w-0 text-left p-4 flex items-center gap-3 active:bg-slate-50 rounded-l-2xl">
               <div className="w-11 h-11 rounded-2xl bg-indigo-50 text-indigo-500 flex items-center justify-center font-bold text-lg shrink-0">
                 {g.name.trim().slice(0, 1).toUpperCase()}
               </div>
@@ -4178,13 +4194,41 @@ function GroupsTab({ user, active, cur, fx, say, onOpenTicker, username }) {
                     : `${g.members.length} member${g.members.length === 1 ? "" : "s"} · no messages yet`}
                 </div>
               </div>
-              <ChevronRight size={16} className="text-slate-300 shrink-0" />
             </button>
+            <button onClick={() => setMenuFor(menuFor === g.id ? null : g.id)} aria-label="Group options"
+              className="shrink-0 w-10 h-10 mr-2 rounded-full text-slate-400 flex items-center justify-center text-lg font-bold active:bg-slate-100">⋯</button>
+            </div>
+            {menuFor === g.id && (
+              <div className="border-t border-slate-100 px-4 py-3 flex items-center gap-2 flex-wrap">
+                {confirmFor === g.id ? (
+                  <>
+                    <span className="text-sm text-rose-600 font-semibold flex-1 min-w-0">
+                      {g.created_by === user.id ? "Delete for everyone? Messages are gone for good." : "Leave this group?"}
+                    </span>
+                    <button onClick={() => quickAction(g)} className="bg-rose-500 text-white text-xs font-semibold px-3 py-1.5 rounded-full">
+                      Yes, {g.created_by === user.id ? "delete" : "leave"}
+                    </button>
+                    <button onClick={() => setConfirmFor(null)} className="bg-slate-100 text-slate-600 text-xs font-semibold px-3 py-1.5 rounded-full">Cancel</button>
+                  </>
+                ) : (
+                  <>
+                    <button onClick={() => setOpen(g)} className="text-xs font-semibold text-slate-600 bg-slate-100 px-3 py-1.5 rounded-full">Open</button>
+                    {g.created_by === user.id ? (
+                      <button onClick={() => setConfirmFor(g.id)} className="text-xs font-semibold text-rose-600 bg-rose-50 px-3 py-1.5 rounded-full flex items-center gap-1"><Trash2 size={12} /> Delete group</button>
+                    ) : (
+                      <button onClick={() => setConfirmFor(g.id)} className="text-xs font-semibold text-rose-600 bg-rose-50 px-3 py-1.5 rounded-full flex items-center gap-1"><LogOut size={12} /> Leave group</button>
+                    )}
+                    <span className="text-[11px] text-slate-400 ml-auto">{g.created_by === user.id ? "You created this group" : `${g.members.length} members`}</span>
+                  </>
+                )}
+              </div>
+            )}
+            </div>
           ))}
         </div>
       )}
       <p className="text-[11px] text-slate-400 leading-relaxed">
-        Messages are visible to group members only. Sharing a position posts the ticker, your buy date, return % and thesis — never amounts.
+        Messages are visible to group members only. Tap ⋯ on a group to leave it (or delete it, if you created it). Sharing a position posts the ticker, your buy date, return % and thesis — never amounts.
         Nothing here is investment advice; it's friends talking.
       </p>
 
@@ -4411,9 +4455,12 @@ function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpe
         <button onClick={onBack} className="flex items-center gap-0.5 text-sm font-semibold text-indigo-600 -ml-1 shrink-0"><ChevronLeft size={20} /> Groups</button>
         <button onClick={() => setShowMembers(true)} className="flex-1 min-w-0 text-center">
           <div className="font-bold text-slate-700 text-sm truncate">{group.name}</div>
-          <div className="text-[11px] text-slate-400">{members.length} member{members.length === 1 ? "" : "s"} · tap for details</div>
+          <div className="text-[11px] text-slate-400">{members.length} member{members.length === 1 ? "" : "s"}</div>
         </button>
-        <div className="w-14 shrink-0" />
+        <button onClick={() => setShowMembers(true)} title={isOwner ? "Members, leave or delete" : "Members or leave"}
+          className="shrink-0 flex items-center gap-1 text-[11px] font-semibold text-slate-600 bg-white border border-slate-200 rounded-full px-2.5 py-1.5">
+          <Users size={13} /> {isOwner ? "Manage" : "Leave…"}
+        </button>
       </div>
 
       {/* messages */}
