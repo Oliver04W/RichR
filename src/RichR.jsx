@@ -3039,102 +3039,100 @@ function PositionModal({ holding, cur, fx = null, holdings = [], onClose, onSave
 
         {/* ---------- STEP 2: shares & price ---------- */}
         {step === "fields" && (
-          <div className="p-5 space-y-4" style={{ animation: "richr-in .2s ease-out both" }}>
-            {/* picked stock */}
-            <div className="flex items-center gap-3">
-              <Logo h={f} size={44} rounded="rounded-xl" />
-              <div className="flex-1 min-w-0">
-                <div className="font-bold text-slate-900 text-[15px] leading-tight truncate">{f.name || f.ticker}</div>
-                <div className="text-xs text-slate-500 mt-0.5 truncate">
-                  <span className="font-semibold text-slate-700">{f.ticker}</span>
-                  {exchangeOf(f.ticker, ccy) && <> · {exchangeOf(f.ticker, ccy)}</>} · {ccy}
+          <div className="p-5 pt-4 space-y-3.5" style={{ animation: "richr-in .2s ease-out both" }}>
+            {/* picked stock — one compact row */}
+            <div className="flex items-center gap-2.5">
+              <Logo h={f} size={36} rounded="rounded-lg" />
+              <div className="flex-1 min-w-0 leading-tight">
+                <div className="font-bold text-slate-900 text-[15px] truncate">{f.ticker} <span className="font-medium text-slate-500 text-[13px]">{f.name && f.name !== f.ticker ? f.name : ""}</span></div>
+                <div className="text-[11px] text-slate-500 truncate">
+                  {exchangeOf(f.ticker, ccy) ? `${exchangeOf(f.ticker, ccy)} · ` : ""}{ccy}
                   {quoteState === "loading" && <span className="text-slate-400"> · price…</span>}
-                  {quoteState === "ok" && quote && <span className="text-slate-600"> · now <span className="font-semibold tabular-nums">{money(quote.price, quote.currency || ccy)}</span></span>}
+                  {quoteState === "ok" && quote && <> · now <span className="font-semibold text-slate-700 tabular-nums">{money(quote.price, quote.currency || ccy)}</span></>}
                 </div>
               </div>
               {!editing && <button onClick={() => { setStep("search"); setTimeout(() => searchRef.current && searchRef.current.focus(), 50); }} className="text-xs font-semibold text-emerald-700 shrink-0">Change</button>}
             </div>
 
-            {/* duplicate: add to existing or separate lot */}
+            {/* already own it: one line + two small controls */}
             {dup && (
-              <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-[13px] text-slate-700">
-                You already hold <b>{dup.shares} {dup.ticker}</b> at {money(dup.buyPrice, dup.currency || cur)} avg.
-                <div className="flex gap-2 mt-2">
-                  {[["merge", "Add to that position"], ["separate", "Keep as separate lot"]].map(([id, l]) => (
+              <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 text-[12px] text-slate-700 tabular-nums">
+                <span className="flex-1 min-w-0 truncate">You already own <b>{dup.shares} {dup.ticker}</b> · avg. {money(dup.buyPrice, dup.currency || cur)}</span>
+                <div className="flex bg-white border border-amber-200 rounded-md p-0.5 shrink-0">
+                  {[["merge", "Add to position"], ["separate", "Separate lot"]].map(([id, l]) => (
                     <button key={id} onClick={() => setDupChoice(id)}
-                      className={`flex-1 text-xs font-bold h-9 rounded-lg border transition ${dupChoice === id ? "bg-slate-900 text-white border-slate-900" : "bg-white border-slate-200 text-slate-600"}`}>{l}</button>
+                      className={`text-[11px] font-bold px-2 h-6 rounded transition ${dupChoice === id ? "bg-slate-900 text-white" : "text-slate-600"}`}>{l}</button>
                   ))}
                 </div>
-                {dupChoice === "merge" && shares > 0 && price > 0 && (
-                  <p className="text-[11px] text-slate-500 mt-2 tabular-nums">→ {Number(dup.shares) + shares} shares at {money(((Number(dup.shares) * Number(dup.buyPrice)) + shares * price) / (Number(dup.shares) + shares), ccy)} avg</p>
-                )}
               </div>
             )}
 
+            {/* the two inputs that matter */}
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className={label} htmlFor="pm-shares">Shares</label>
                 <input id="pm-shares" ref={sharesRef} type="text" inputMode="decimal" value={f.shares} autoFocus={!editing}
                   onChange={(e) => set("shares", e.target.value.replace(",", "."))} onBlur={() => setTouched((t) => ({ ...t, shares: true }))}
                   onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); priceRef.current && priceRef.current.focus(); } }}
-                  placeholder="0" enterKeyHint="next" className={input + (err("shares") ? " border-rose-300" : "")} />
+                  placeholder="0" enterKeyHint="next" className={input + " h-14 text-[22px] font-bold" + (err("shares") ? " border-rose-300" : "")} />
                 {err("shares") && <p className="text-[11px] text-rose-500 mt-1">{errs.shares}</p>}
               </div>
               <div>
-                <label className={label} htmlFor="pm-price">Avg. price paid ({sym(ccy)})</label>
+                <label className={label} htmlFor="pm-price">Price paid per share ({sym(ccy)})</label>
                 <input id="pm-price" ref={priceRef} type="text" inputMode="decimal" value={f.buyPrice}
                   onChange={(e) => set("buyPrice", e.target.value.replace(",", "."))} onBlur={() => setTouched((t) => ({ ...t, buyPrice: true }))}
+                  onFocus={(e) => e.target.select()}
                   onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); save(); } }}
-                  placeholder={quote ? String(quote.price) : "0.00"} enterKeyHint="done" className={input + (err("buyPrice") ? " border-rose-300" : "")} />
+                  placeholder={quote ? String(quote.price) : "0.00"} enterKeyHint="done" className={input + " h-14 text-[22px] font-bold" + (err("buyPrice") ? " border-rose-300" : "")} />
                 {err("buyPrice") ? <p className="text-[11px] text-rose-500 mt-1">{errs.buyPrice}</p>
-                  : quote && Number(f.buyPrice) === Number(quote.price) ? <p className="text-[11px] text-slate-400 mt-1">Today's price — change it to what you actually paid.</p>
+                  : quote && Number(f.buyPrice) === Number(quote.price) ? <p className="text-[11px] text-slate-400 mt-1">Today's price · edit if you paid differently</p>
                   : quote ? <button onClick={() => set("buyPrice", Number(quote.price))} className="text-[11px] text-emerald-700 font-semibold mt-1">Use today's {money(quote.price, ccy)}</button> : null}
               </div>
             </div>
 
-            {/* live preview */}
-            <div className="bg-slate-50 rounded-xl px-4 py-3 tabular-nums">
-              <div className="flex items-baseline justify-between gap-3">
-                <div className="text-xs text-slate-500 truncate">{f.ticker}{f.name && f.name !== f.ticker ? ` · ${f.name}` : ""}</div>
-                <div className="text-xs text-slate-500 shrink-0">{shares > 0 ? shares : "—"} × {price > 0 ? money(price, ccy) : "—"}</div>
-              </div>
-              <div className="flex items-baseline justify-between gap-3 mt-1">
-                <div className="text-sm font-semibold text-slate-700">Position value</div>
-                <div className="text-right">
-                  <div className="text-lg font-bold text-slate-900">{value > 0 ? money(value, ccy) : "—"}</div>
-                  {valueHome != null && value > 0 && <div className="text-[11px] text-slate-400">≈ {money(valueHome, cur)}</div>}
+            {/* live calculation, one line */}
+            <div className="text-[13px] text-slate-600 tabular-nums leading-snug">
+              {shares > 0 && price > 0 ? (
+                <>
+                  <span className="font-semibold text-slate-800">{shares} share{shares === 1 ? "" : "s"} × {money(price, ccy)} = {money(value, ccy)}</span>
+                  {valueHome != null && <span className="text-slate-400"> · ≈ {money(valueHome, cur)}</span>}
+                  {liveVal != null && Math.abs(liveVal - value) > 0.005 && <span className="text-slate-400"> · worth {money(liveVal, ccy)} today (<Ret v={((liveVal - value) / value) * 100} />)</span>}
+                  {dup && dupChoice === "merge" && <span className="text-slate-400"> · you'd own {Number(dup.shares) + shares} at {money(((Number(dup.shares) * Number(dup.buyPrice)) + shares * price) / (Number(dup.shares) + shares), ccy)} avg</span>}
+                </>
+              ) : <span className="text-slate-400">Enter shares to see the position value.</span>}
+            </div>
+
+            {/* optional details, collapsed */}
+            <div className="border-t border-slate-100 pt-3">
+              <button onClick={() => setMore((v) => !v)} className="flex items-center gap-1 text-xs font-semibold text-slate-500">
+                <ChevronDown size={14} className={`transition ${more ? "rotate-180" : ""}`} /> Optional details
+                {!more && <span className="font-normal text-slate-400"> · {fmtDate(f.buyDate)} · {f.type} · {ccy}</span>}
+              </button>
+              {more && (
+                <div className="space-y-3 mt-3" style={{ animation: "richr-in .2s ease-out both" }}>
+                  <div className="grid grid-cols-3 gap-3">
+                    <div><label className={label}>Bought on</label>
+                      <input type="date" value={f.buyDate} max={new Date().toISOString().slice(0, 10)} onChange={(e) => set("buyDate", e.target.value)} className={input + " h-11 px-2 text-sm"} /></div>
+                    <div><label className={label}>Type</label>
+                      <select value={f.type} onChange={(e) => set("type", e.target.value)} className={input + " h-11 px-2 text-sm"}>{TYPES.map((t) => <option key={t}>{t}</option>)}</select></div>
+                    <div><label className={label}>Currency</label>
+                      <select value={ccy} onChange={(e) => set("currency", e.target.value)} className={input + " h-11 px-2 text-sm"}>{CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code}</option>)}</select></div>
+                  </div>
+                  <div><label className={label}>Name</label>
+                    <input value={f.name} onChange={(e) => set("name", e.target.value)} className={input + " h-11 text-sm"} /></div>
+                  <div><label className={label}>Why did you buy it? <span className="font-normal text-slate-400">(you can write it later)</span></label>
+                    <textarea value={f.thesis} onChange={(e) => set("thesis", e.target.value)} rows={3} placeholder="What has to be true for this to work?"
+                      className="w-full border border-slate-200 rounded-xl px-3.5 py-2.5 text-sm bg-white outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 resize-y leading-relaxed" /></div>
                 </div>
-              </div>
-              {liveVal != null && value > 0 && Math.abs(liveVal - value) > 0.005 && (
-                <div className="text-[11px] mt-1 text-right">worth <span className="font-semibold text-slate-600">{money(liveVal, ccy)}</span> today (<Ret v={((liveVal - value) / value) * 100} />)</div>
               )}
             </div>
 
-            {/* more details, folded away */}
-            <button onClick={() => setMore((v) => !v)} className="flex items-center gap-1 text-xs font-semibold text-slate-500">
-              <ChevronDown size={14} className={`transition ${more ? "rotate-180" : ""}`} /> {more ? "Fewer details" : "More details — date, type, currency, thesis"}
-            </button>
-            {more && (
-              <div className="space-y-3" style={{ animation: "richr-in .2s ease-out both" }}>
-                <div className="grid grid-cols-3 gap-3">
-                  <div><label className={label}>Bought on</label>
-                    <input type="date" value={f.buyDate} max={new Date().toISOString().slice(0, 10)} onChange={(e) => set("buyDate", e.target.value)} className={input + " px-2 text-sm"} /></div>
-                  <div><label className={label}>Type</label>
-                    <select value={f.type} onChange={(e) => set("type", e.target.value)} className={input + " px-2 text-sm"}>{TYPES.map((t) => <option key={t}>{t}</option>)}</select></div>
-                  <div><label className={label}>Currency</label>
-                    <select value={ccy} onChange={(e) => set("currency", e.target.value)} className={input + " px-2 text-sm"}>{CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code}</option>)}</select></div>
-                </div>
-                <div><label className={label}>Name</label>
-                  <input value={f.name} onChange={(e) => set("name", e.target.value)} className={input + " text-sm"} /></div>
-                <div><label className={label}>Why did you buy it? <span className="font-normal text-slate-400">(optional — you can write it later)</span></label>
-                  <textarea value={f.thesis} onChange={(e) => set("thesis", e.target.value)} rows={3} placeholder="What has to be true for this to work?"
-                    className="w-full border border-slate-200 rounded-xl px-3.5 py-2.5 text-sm bg-white outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 resize-y leading-relaxed" /></div>
-              </div>
-            )}
-
             <button onClick={save} disabled={!valid && Object.keys(touched).length > 0}
-              className="btn-primary w-full h-12 text-[15px] disabled:opacity-50">
-              {editing ? "Save changes" : dup && dupChoice === "merge" ? `Add to ${f.ticker}` : "Add position"}
+              className="btn-primary w-full h-12 text-[15px] tabular-nums disabled:opacity-50">
+              {editing ? "Save changes"
+                : shares > 0 && price > 0
+                  ? `${dup && dupChoice === "merge" ? "Add" : "Add"} ${shares} ${f.ticker} · ${moneyShort(value, ccy)}`
+                  : dup && dupChoice === "merge" ? `Add to ${f.ticker}` : "Add position"}
             </button>
             {added.length > 0 && <p className="text-[11px] text-slate-400 text-center -mt-1">Added this time: {added.map((a) => a.ticker).join(", ")}</p>}
           </div>
