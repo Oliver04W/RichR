@@ -289,6 +289,8 @@ const SHARE_ITEMS = [
   { id: "badge",         label: "Investor badge",        hint: "Your investor-type mascot and label" },
   { id: "portfolioName", label: "Portfolio name",        hint: "The name of the portfolio you share" },
   { id: "philosophy",    label: "Investing philosophy",  hint: "The text on your profile" },
+  { id: "score",         label: "RichR Score",           hint: "Your 0–100 score and its four parts" },
+  { id: "activity",      label: "Activity feed",         hint: "“Increased TSM 12% → 18%” updates in friends' feeds (percentages only)" },
 ];
 const shareOf = (data) => {
   const s = (data && data.share) || {};
@@ -296,6 +298,99 @@ const shareOf = (data) => {
   SHARE_ITEMS.forEach((it) => { out[it.id] = s[it.id] !== false; });
   return out;
 };
+
+/* ---------- RichR Score ----------
+   One number (0–100) built from four parts, each 0–100, so people have
+   something to improve and compare. All inputs are things the app already
+   knows; nothing leaves the device unless the "RichR Score" switch is on.
+     performance     — cash-flow-adjusted return vs the S&P 500 over the
+                       last year (or since the portfolio began)
+     riskAdjusted    — Sharpe-style: annualised return ÷ annualised
+                       volatility of daily returns
+     diversification — effective number of positions (1 / Σw²)
+     concentration   — how much the single biggest position dominates
+   Missing parts (young portfolio) are left out and the rest re-weighted. */
+const clamp01 = (x) => Math.max(0, Math.min(100, Math.round(x)));
+const SCORE_WEIGHTS = { performance: 0.35, riskAdjusted: 0.25, diversification: 0.2, concentration: 0.2 };
+
+function computeScore({ holdings, cur, fx, series, bench }) {
+  const parts = {}, notes = {};
+  // --- weights
+  const total = (holdings || []).reduce((s, h) => s + holdingValue(h, cur, fx), 0);
+  const ws = total > 0 ? (holdings || []).map((h) => holdingValue(h, cur, fx) / total).filter((w) => w > 0) : [];
+  if (ws.length) {
+    const hhi = ws.reduce((a, w) => a + w * w, 0);
+    const effN = 1 / hhi;
+    const top1 = Math.max(...ws) * 100;
+    parts.diversification = clamp01(100 * (1 - Math.exp(-(effN - 1) / 6)));
+    notes.diversification = `≈ ${effN.toFixed(1)} equally-weighted positions across ${ws.length}. More, and more evenly sized, positions score higher (10+ effective ≈ 80).`;
+    parts.concentration = clamp01(100 - Math.max(0, top1 - 8) * 1.4);
+    notes.concentration = `Your biggest position is ${top1.toFixed(0)}% of the portfolio. Under ~15% scores near 90; over 40% drags the score hard.`;
+  }
+  // --- performance & risk from the daily series (value/cost, cash-flow adjusted)
+  const live = (series || []).filter((p) => p.value > 0);
+  if (live.length >= 2) {
+    const a = live[0], b = live[live.length - 1];
+    const mine = (((b.value - a.value) - ((b.cost || 0) - (a.cost || 0))) / a.value) * 100;
+    let bret = null;
+    if (bench && bench.length) {
+      const i0 = idxOnOrBefore(bench, new Date(a.t).getTime());
+      const b0 = i0 >= 0 ? bench[i0] : bench[0];
+      const b1 = bench[bench.length - 1];
+      if (b0 && b1 && b0.c > 0) bret = ((b1.c - b0.c) / b0.c) * 100;
+    }
+    const days = Math.max(1, (new Date(b.t) - new Date(a.t)) / 86400000);
+    const edge = bret != null ? mine - bret : mine;
+    // annualise the edge so a 2-month-old portfolio isn't judged on 2 months
+    const edgeAnn = edge * Math.min(1, 365 / days) ;
+    parts.performance = clamp01(50 + edgeAnn * 2.5);
+    notes.performance = bret != null
+      ? `${mine >= 0 ? "+" : ""}${mine.toFixed(1)}% vs S&P 500 ${bret >= 0 ? "+" : ""}${bret.toFixed(1)}% over ${days >= 300 ? "the past year" : `${Math.round(days)} days`} (money you added doesn't count). Matching the index = 50; each point ahead ≈ +2.5.`
+      : `${mine >= 0 ? "+" : ""}${mine.toFixed(1)}% over ${Math.round(days)} days.`;
+    // daily returns for volatility
+    if (live.length >= 20) {
+      const rets = [];
+      for (let k = 1; k < live.length; k++) {
+        const p0 = live[k - 1], p1 = live[k];
+        if (p0.value > 0) rets.push(((p1.value - p0.value) - ((p1.cost || 0) - (p0.cost || 0))) / p0.value);
+      }
+      const mean = rets.reduce((a, r) => a + r, 0) / rets.length;
+      const varc = rets.reduce((a, r) => a + (r - mean) * (r - mean), 0) / Math.max(1, rets.length - 1);
+      const volAnn = Math.sqrt(varc) * Math.sqrt(252) * 100;
+      const retAnn = mean * 252 * 100;
+      const sharpe = volAnn > 0 ? (retAnn - 2) / volAnn : 0; // 2% risk-free
+      parts.riskAdjusted = clamp01(50 + sharpe * 20);
+      notes.riskAdjusted = `Annualised ${retAnn >= 0 ? "+" : ""}${retAnn.toFixed(0)}% at ${volAnn.toFixed(0)}% volatility → Sharpe ≈ ${sharpe.toFixed(2)}. Steadier gains score higher; 1.0 ≈ 70, 2.5 ≈ 100.`;
+    } else {
+      notes.riskAdjusted = "Needs about a month of daily history.";
+    }
+  } else {
+    notes.performance = "Needs a few days of price history.";
+    notes.riskAdjusted = "Needs about a month of daily history.";
+  }
+  const keys = Object.keys(parts);
+  if (!keys.length) return { score: null, parts, notes };
+  const wsum = keys.reduce((a, k) => a + SCORE_WEIGHTS[k], 0);
+  const score = clamp01(keys.reduce((a, k) => a + parts[k] * SCORE_WEIGHTS[k], 0) / wsum);
+  return { score, parts, notes };
+}
+const SCORE_LABEL = { performance: "Performance", riskAdjusted: "Risk-adjusted return", diversification: "Diversification", concentration: "Concentration" };
+const scoreTone = (n) => n == null ? "text-slate-300" : n >= 75 ? "text-emerald-600" : n >= 50 ? "text-amber-500" : "text-rose-500";
+
+/* Turn two top-holdings lists (ticker + weight %) into feed events.
+   Threshold 3 points so daily price drift doesn't spam the feed. */
+function diffHoldingsEvents(prev, next) {
+  const P = {}; (prev || []).forEach((h) => { P[h.ticker] = Number(h.pct) || 0; });
+  const N = {}; (next || []).forEach((h) => { N[h.ticker] = Number(h.pct) || 0; });
+  const ev = [];
+  Object.keys(N).forEach((t) => {
+    if (!(t in P)) ev.push({ kind: "added", ticker: t, from_pct: null, to_pct: N[t] });
+    else if (N[t] - P[t] >= 3) ev.push({ kind: "increased", ticker: t, from_pct: P[t], to_pct: N[t] });
+    else if (P[t] - N[t] >= 3) ev.push({ kind: "decreased", ticker: t, from_pct: P[t], to_pct: N[t] });
+  });
+  Object.keys(P).forEach((t) => { if (!(t in N)) ev.push({ kind: "removed", ticker: t, from_pct: P[t], to_pct: null }); });
+  return ev;
+}
 
 /* Build + upsert my leaderboard row, honouring the sharing switches.
    Used by the Friends tab (Share / Update share) and by the Profile tab
@@ -342,9 +437,33 @@ async function publishBoard({ data, active, totals, cur, user }) {
     } catch (_) { /* fall back to simple return */ }
   }
   const stats = socialStats(active, cur, fx);
+  // score (needs the daily series; skipped if the switch is off)
+  let scoreRes = null;
+  if (share.score) {
+    try {
+      const { portfolio, bench } = await loadDailySeries(active.holdings, cur, DEFAULT_BENCH.symbol);
+      const series = portfolio ? [...portfolio, { t: new Date().toISOString(), value: totals.value, cost: totals.cost }] : null;
+      scoreRes = computeScore({ holdings: active.holdings, cur, fx, series, bench });
+    } catch (_) { scoreRes = null; }
+  }
+  // previous row → feed events (only when the activity switch is on)
+  let events = [];
+  let prevRow = null;
+  try {
+    const { data: pr } = await supabase.from("leaderboard").select("top_holdings, score").eq("user_id", user.id).maybeSingle();
+    prevRow = pr || null;
+  } catch (_) {}
+  if (share.activity) {
+    if (!prevRow) events.push({ kind: "shared", ticker: null, from_pct: null, to_pct: null });
+    else if (share.topHoldings && Array.isArray(prevRow.top_holdings)) events = diffHoldingsEvents(prevRow.top_holdings, topHoldings);
+    if (scoreRes && scoreRes.score != null && prevRow && prevRow.score != null && Math.abs(scoreRes.score - prevRow.score) >= 3)
+      events.push({ kind: "score", ticker: null, from_pct: prevRow.score, to_pct: scoreRes.score });
+  }
   const row = {
     user_id: user.id,
     name: data.userName.trim(),
+    score: scoreRes && scoreRes.score != null ? scoreRes.score : null,
+    score_parts: scoreRes && scoreRes.score != null ? scoreRes.parts : null,
     profile: share.badge ? (data.profile || "") : "",
     portfolio: share.portfolioName ? active.name : "",
     return_pct: share.returnPct ? returnPct : null,
@@ -358,7 +477,12 @@ async function publishBoard({ data, active, totals, cur, user }) {
   };
   const { error } = await supabase.from("leaderboard").upsert(row);
   if (error) throw error;
-  return { twrUsed };
+  if (events.length) {
+    try {
+      await supabase.from("portfolio_events").insert(events.slice(0, 12).map((e) => ({ ...e, user_id: user.id })));
+    } catch (_) { /* the feed is best-effort */ }
+  }
+  return { twrUsed, events: events.length };
 }
 
 const fxConvert = (amount, from, to, fx) => {
@@ -471,6 +595,41 @@ export default function RichR({ user, onSignOut }) {
     setNudge(null);
     try { await supabase.from("nudges").delete().eq("to_id", user.id); } catch (_) {}
   };
+
+  /* ---- keep my leaderboard row (and the activity feed) current ----
+     If I've shared my portfolio, a change to holdings re-publishes the row
+     ~6s later so friends see the update — and the feed gets its
+     "increased X 12% → 18%" events — without tapping "Update share". */
+  const lastPubKey = useRef(null);
+  const pubTimer = useRef(null);
+  useEffect(() => {
+    if (!data) return;
+    const act = data.portfolios.find((p) => p.id === data.activeId) || data.portfolios[0];
+    if (!act) return;
+    const k = holdingsKey(act.holdings, data.currency || "USD");
+    if (lastPubKey.current === null) { lastPubKey.current = k; return; } // initial load
+    if (lastPubKey.current === k) return;
+    lastPubKey.current = k;
+    if (pubTimer.current) clearTimeout(pubTimer.current);
+    pubTimer.current = setTimeout(async () => {
+      try {
+        const { data: row } = await supabase.from("leaderboard").select("user_id").eq("user_id", user.id).maybeSingle();
+        if (!row) return;
+        if (!act.holdings.length || act.holdings.some((h) => h.sample)) return;
+        const fx = data.fx || DEFAULT_FX;
+        const cur = data.currency || "USD";
+        let value = 0, cost = 0;
+        act.holdings.forEach((h) => {
+          const cp = h.currentPrice > 0 ? h.currentPrice : h.buyPrice;
+          value += fxConvert(h.shares * cp, h.currency || cur, cur, fx);
+          cost += fxConvert(h.shares * h.buyPrice, h.currency || cur, cur, fx);
+        });
+        const plPct = cost > 0 ? ((value - cost) / cost) * 100 : 0;
+        await publishBoard({ data, active: act, totals: { value, cost, pl: value - cost, plPct }, cur, user });
+      } catch (_) { /* silent — the manual button still works */ }
+    }, 6000);
+    return () => { if (pubTimer.current) clearTimeout(pubTimer.current); };
+  }, [data && data.portfolios, data && data.activeId]);
 
   const storageKey = dataKey(user.id);
   const cloudOk = useRef(false);
@@ -939,6 +1098,7 @@ export default function RichR({ user, onSignOut }) {
             pricesAt={data.pricesAt || 0} priceDataAt={data.priceDataAt || 0}
             onAddGoal={addGoal} onUpdateGoal={updateGoal} onRemoveGoal={removeGoal}
             onBenchmark={(benchmark) => patch(() => ({ benchmark }))}
+            onScoreLog={(scoreLog) => patch(() => ({ scoreLog }))}
           />
         )}
         {tab === "portfolio" && sub === "holdings" && (
@@ -1172,7 +1332,7 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
 }
 
 /* ================= HOME ================= */
-function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, goImport, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, priceDataAt, onAddGoal, onUpdateGoal, onRemoveGoal, onBenchmark }) {
+function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, goImport, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, priceDataAt, onAddGoal, onUpdateGoal, onRemoveGoal, onBenchmark, onScoreLog }) {
   const [renaming, setRenaming] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const up = totals.pl >= 0;
@@ -1307,6 +1467,10 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
         <StatCard label="Invested" value={moneyShort(totals.cost, cur)} />
         <StatCard label="Return" value={pct(totals.plPct)} tone={th.stat} />
       </div>
+
+      {/* RichR Score */}
+      <ScoreCard active={active} cur={cur} fx={fx} liveValue={totals.value} liveCost={totals.cost}
+        log={data.scoreLog || []} onLog={onScoreLog} />
 
       {/* period returns vs S&P 500 */}
       <PeriodReturns active={active} cur={cur} liveValue={totals.value} liveCost={totals.cost} bench={benchOf(data)} onBench={onBenchmark} />
@@ -1571,6 +1735,107 @@ function PeriodReturns({ active, cur, liveValue, liveCost, bench: BENCH, onBench
         </div>
       )}
       <p className="text-[10px] text-slate-300 mt-2">Returns exclude money you added or withdrew during the period. {BENCH.label} via {BENCH.symbol} in its own currency; “no data” means the price source doesn't know that ticker.</p>
+    </div>
+  );
+}
+
+function ScoreCard({ active, cur, fx, liveValue, liveCost, log, onLog }) {
+  const [res, setRes] = useState(null);
+  const [open, setOpen] = useState(false);
+  const key = holdingsKey(active.holdings, cur);
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      try {
+        const { portfolio, bench } = await loadDailySeries(active.holdings, cur, DEFAULT_BENCH.symbol);
+        if (dead) return;
+        const series = portfolio ? [...portfolio, { t: new Date().toISOString(), value: liveValue, cost: liveCost }] : null;
+        const r = computeScore({ holdings: active.holdings, cur, fx, series, bench });
+        setRes(r);
+        // keep one entry per day so "why it changed" has something to compare with
+        if (r.score != null) {
+          const today = new Date().toISOString().slice(0, 10);
+          const last = log[log.length - 1];
+          if (!last || last.d !== today) onLog([...log, { d: today, score: r.score, parts: r.parts }].slice(-60));
+          else if (last.score !== r.score) onLog([...log.slice(0, -1), { d: today, score: r.score, parts: r.parts }]);
+        }
+      } catch (e) { if (!dead) setRes({ score: null, parts: {}, notes: {} }); }
+    })();
+    return () => { dead = true; };
+  }, [key, Math.round(liveValue)]);
+
+  // compare with the most recent entry from a previous day
+  const today = new Date().toISOString().slice(0, 10);
+  const prev = [...log].reverse().find((e) => e.d !== today) || null;
+  const delta = res && res.score != null && prev ? res.score - prev.score : null;
+  const ring = res && res.score != null ? res.score : 0;
+  const tone = scoreTone(res && res.score);
+  const hex = ring >= 75 ? "#10b981" : ring >= 50 ? "#f59e0b" : "#f43f5e";
+
+  return (
+    <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+      <button onClick={() => setOpen((v) => !v)} className="w-full flex items-center gap-4 text-left">
+        <div className="relative w-20 h-20 shrink-0">
+          <svg viewBox="0 0 36 36" className="w-20 h-20 -rotate-90">
+            <circle cx="18" cy="18" r="15.5" fill="none" stroke="#f1f5f9" strokeWidth="3.5" />
+            <circle cx="18" cy="18" r="15.5" fill="none" stroke={hex} strokeWidth="3.5" strokeLinecap="round"
+              strokeDasharray={`${(ring / 100) * 97.4} 97.4`} />
+          </svg>
+          <div className="absolute inset-0 flex flex-col items-center justify-center">
+            <div className={`text-2xl font-extrabold leading-none ${tone}`}>{res && res.score != null ? res.score : "—"}</div>
+            <div className="text-[9px] font-semibold text-slate-400 mt-0.5">/ 100</div>
+          </div>
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <h3 className="font-bold text-slate-700">RichR Score</h3>
+            {delta != null && delta !== 0 && (
+              <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded-full ${delta > 0 ? "bg-emerald-50 text-emerald-600" : "bg-rose-50 text-rose-500"}`}>
+                {delta > 0 ? "▲" : "▼"} {Math.abs(delta)} since {fmtDate(prev.d)}
+              </span>
+            )}
+          </div>
+          {res == null ? (
+            <p className="text-xs text-slate-400 mt-1">Calculating…</p>
+          ) : res.score == null ? (
+            <p className="text-xs text-slate-400 mt-1">Add a few positions and give it a day of price history.</p>
+          ) : (
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1 mt-1.5">
+              {Object.keys(SCORE_LABEL).map((k) => (
+                <div key={k} className="flex items-center justify-between text-xs">
+                  <span className="text-slate-500 truncate">{SCORE_LABEL[k]}</span>
+                  <span className={`font-bold ml-2 ${scoreTone(res.parts[k])}`}>{res.parts[k] != null ? res.parts[k] : "—"}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="text-[10px] text-slate-400 mt-1.5">{open ? "Hide details" : "Tap for what each part means and how to improve it"}</div>
+        </div>
+      </button>
+      {open && res && (
+        <div className="mt-4 pt-3 border-t border-slate-100 space-y-3">
+          {Object.keys(SCORE_LABEL).map((k) => {
+            const cur_ = res.parts[k], was = prev && prev.parts ? prev.parts[k] : null;
+            const d = cur_ != null && was != null ? cur_ - was : null;
+            return (
+              <div key={k}>
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold text-slate-700">{SCORE_LABEL[k]} <span className="text-[10px] text-slate-400 font-medium">· {Math.round(SCORE_WEIGHTS[k] * 100)}% of score</span></div>
+                  <div className="flex items-center gap-1.5">
+                    {d != null && d !== 0 && <span className={`text-[10px] font-bold ${d > 0 ? "text-emerald-600" : "text-rose-500"}`}>{d > 0 ? "+" : ""}{d}</span>}
+                    <span className={`font-bold text-sm ${scoreTone(cur_)}`}>{cur_ != null ? cur_ : "—"}</span>
+                  </div>
+                </div>
+                <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden mt-1">
+                  <div className="h-full rounded-full" style={{ width: `${cur_ || 0}%`, background: cur_ >= 75 ? "#10b981" : cur_ >= 50 ? "#f59e0b" : "#f43f5e" }} />
+                </div>
+                <p className="text-[11px] text-slate-400 leading-snug mt-1">{res.notes[k] || ""}</p>
+              </div>
+            );
+          })}
+          <p className="text-[10px] text-slate-300">Score = weighted average of the parts you have data for. Performance is judged against the S&P 500 regardless of your chosen benchmark, so friends' scores are comparable. Shared with friends only if “RichR Score” is on in Profile.</p>
+        </div>
+      )}
     </div>
   );
 }
@@ -2230,7 +2495,7 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing }) {
     try {
       const { data: rows, error: bErr } = await supabase
         .from("leaderboard")
-        .select("user_id, name, profile, portfolio, return_pct, holdings, top_holdings, realized_pct, avg_days, win_rate, philosophy")
+        .select("user_id, name, profile, portfolio, return_pct, holdings, top_holdings, realized_pct, avg_days, win_rate, philosophy, score, score_parts")
         .order("return_pct", { ascending: false, nullsFirst: false })
         .limit(100);
       if (bErr) throw bErr;
@@ -2248,6 +2513,8 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing }) {
         avgDays: r.avg_days != null ? Number(r.avg_days) : null,
         winRate: r.win_rate != null ? Number(r.win_rate) : null,
         philosophy: r.philosophy || "",
+        score: r.score != null ? Number(r.score) : null,
+        scoreParts: r.score_parts || null,
       })));
       setOnBoard((rows || []).some((r) => r.user_id === user.id));
     } catch (e) {
@@ -2392,6 +2659,10 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing }) {
           )}
         </div>
       </div>
+
+      {/* activity feed — what mutual friends changed (percentages only) */}
+      <ActivityFeed user={user} friends={friends} names={(friends || []).reduce((m, f) => { m[f.id] = f.username; return m; }, {})}
+        myName={data.username} onOpenProfile={openFriendProfile} />
 
       {/* friends manager */}
       <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
@@ -2580,6 +2851,9 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing }) {
                     {r.name} {me && <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-full ml-1">YOU</span>}
                   </div>
                   {sub && <div className="text-xs text-slate-400">{sub}</div>}
+                  {r.score != null && (
+                    <div className="text-[10px] font-bold mt-0.5"><span className={scoreTone(r.score)}>RichR Score {r.score}</span></div>
+                  )}
                   {r.topHoldings && r.topHoldings.length > 0 && (
                     <div className="flex flex-wrap gap-1 mt-1.5">
                       {r.topHoldings.map((h) => (
@@ -4389,6 +4663,23 @@ function ProfileSheet({ r, me, onClose }) {
             <Stat label="AVG HOLD" value={r.avgDays != null ? `${r.avgDays}d` : "—"} />
           </div>
 
+          {r.score != null && (
+            <div>
+              <h4 className="text-xs font-semibold text-slate-400 mb-1.5">RICHR SCORE</h4>
+              <div className="flex items-center gap-3">
+                <div className={`text-3xl font-extrabold ${scoreTone(r.score)}`}>{r.score}</div>
+                <div className="flex-1 grid grid-cols-2 gap-x-3 gap-y-0.5">
+                  {Object.keys(SCORE_LABEL).map((k) => (
+                    <div key={k} className="flex items-center justify-between text-[11px]">
+                      <span className="text-slate-400 truncate">{SCORE_LABEL[k]}</span>
+                      <span className={`font-bold ml-2 ${scoreTone(r.scoreParts && r.scoreParts[k])}`}>{r.scoreParts && r.scoreParts[k] != null ? r.scoreParts[k] : "—"}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
           <div>
             <h4 className="text-xs font-semibold text-slate-400 mb-2">TOP HOLDINGS · ALLOCATION{typeof r.holdings === "number" ? ` (${r.holdings} positions)` : ""}</h4>
             {r.topHoldings == null ? (
@@ -4630,6 +4921,69 @@ function GroupsTab({ user, active, cur, fx, say, onOpenTicker, username }) {
 
       {creating && (
         <NewGroupModal mutuals={mutuals || []} onClose={() => setCreating(false)} onCreate={createGroup} />
+      )}
+    </div>
+  );
+}
+
+/* ================= ACTIVITY FEED ================= */
+function ActivityFeed({ user, friends, names, myName, onOpenProfile }) {
+  const [events, setEvents] = useState(null);
+  const [showAll, setShowAll] = useState(false);
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      try {
+        const { data: rows, error } = await supabase
+          .from("portfolio_events").select("id, user_id, kind, ticker, from_pct, to_pct, created_at")
+          .order("created_at", { ascending: false }).limit(60);
+        if (error) throw error;
+        if (!dead) setEvents(rows || []);
+      } catch (e) { if (!dead) setEvents([]); }
+    })();
+    return () => { dead = true; };
+  }, [user.id, (friends || []).length]);
+
+  if (events === null) return null;
+  const text = (e) => {
+    const p = (n) => `${Math.round(Number(n))}%`;
+    switch (e.kind) {
+      case "shared": return "started sharing their portfolio";
+      case "added": return <>added <b>{e.ticker}</b>{e.to_pct != null ? ` (${p(e.to_pct)})` : ""}</>;
+      case "removed": return <>sold out of <b>{e.ticker}</b></>;
+      case "increased": return <>increased <b>{e.ticker}</b> from {p(e.from_pct)} → {p(e.to_pct)}</>;
+      case "decreased": return <>trimmed <b>{e.ticker}</b> from {p(e.from_pct)} → {p(e.to_pct)}</>;
+      case "score": return <>RichR Score {Number(e.to_pct) > Number(e.from_pct) ? "rose" : "fell"} {Math.round(e.from_pct)} → <b>{Math.round(e.to_pct)}</b></>;
+      default: return e.kind;
+    }
+  };
+  const shown = showAll ? events : events.slice(0, 8);
+  return (
+    <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
+      <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-1">
+        <Activity size={16} className="text-emerald-500" /> Activity
+      </h3>
+      {events.length === 0 ? (
+        <p className="text-sm text-slate-400">Nothing yet. When you or a friend changes a shared portfolio, it shows up here — as percentages, never amounts.</p>
+      ) : (
+        <div className="divide-y divide-slate-50">
+          {shown.map((e) => {
+            const me = e.user_id === user.id;
+            const who = me ? "You" : `@${names[e.user_id] || "friend"}`;
+            return (
+              <div key={e.id} className="py-2 flex items-start gap-2">
+                <div className="flex-1 min-w-0 text-sm text-slate-600">
+                  <button onClick={() => !me && onOpenProfile(e.user_id, names[e.user_id])} className={`font-semibold ${me ? "text-slate-700" : "text-emerald-700"}`}>{who}</button>{" "}
+                  {text(e)}
+                </div>
+                <div className="text-[10px] text-slate-400 shrink-0 mt-0.5">{timeAgo(e.created_at)}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {events.length > 8 && (
+        <button onClick={() => setShowAll((v) => !v)} className="text-xs font-semibold text-emerald-600 mt-2">{showAll ? "Show less" : `Show all ${events.length}`}</button>
       )}
     </div>
   );
