@@ -1723,6 +1723,8 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
         <OnboardingCard user={user} active={active} data={data} onImport={goImport} onAddManually={goPositions} goFriends={goFriends} onDismiss={onDismissOnboarding} />
       )}
 
+      <RecheckCalls onOpenTicker={onOpenTicker} />
+
       {/* ===== what friends are doing — activity is the content ===== */}
       <section className="border-t border-slate-100 pt-6">
         <div className="flex items-center justify-between mb-3">
@@ -5769,10 +5771,13 @@ function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo, watchlist, o
       )}
 
       {!sel && (
-        <div className="bg-white rounded-2xl p-8 text-center shadow-sm border border-slate-100">
-          <Search size={24} className="mx-auto text-slate-300 mb-3" />
-          <p className="text-sm text-slate-400">Search any instrument above to see its current price. Nothing is added until you choose to.</p>
-        </div>
+        <>
+          <DiscoverSentiment onOpenTicker={(t) => search(t)} />
+          <div className="bg-white rounded-2xl p-8 text-center shadow-sm border border-slate-100">
+            <Search size={24} className="mx-auto text-slate-300 mb-3" />
+            <p className="text-sm text-slate-400">Search any instrument above to see its price, RichR Sentiment and the discussion. Nothing is added until you choose to.</p>
+          </div>
+        </>
       )}
 
       {adding && (
@@ -6101,7 +6106,7 @@ function CreatePostSheet({ mode, user, cur, fx, holdings, richrData, active, onC
     try {
       if (poll) {
         // your own call is recorded (if you picked one) and the poll card goes to the community
-        if (vote) await supabase.from("stock_calls").insert({ user_id: user.id, ticker, vote, reason: reason.trim().slice(0, 140) || null });
+        if (vote) await castVote(ticker, vote, { reason: reason.trim() || null });
         const card = { kind: "poll", ticker, name: stock.name || "", vote: vote || null, reason: reason.trim() || null };
         const body = text.trim() || `What's your call on $${ticker}?`;
         if (dest.kind === "community") {
@@ -6288,7 +6293,7 @@ function TransactionSheet({ holdings, cur, fx, onClose, onBack, onBuyMore, onSel
 const SOCIAL_ME = { id: null, username: "" };   // set by the main component on every render
 const VOTE_META = {
   buy:  { label: "Buy",  dot: "🟢", text: "text-emerald-700", chip: "bg-emerald-50 border-emerald-200 text-emerald-700", bar: "bg-emerald-500", solid: "bg-emerald-600 text-white" },
-  hold: { label: "Hold", dot: "🟡", text: "text-amber-700",   chip: "bg-amber-50 border-amber-200 text-amber-700",     bar: "bg-amber-400",   solid: "bg-amber-500 text-white" },
+  hold: { label: "Hold", dot: "⚪", text: "text-slate-600",   chip: "bg-slate-50 border-slate-300 text-slate-700",     bar: "bg-slate-400",   solid: "bg-slate-600 text-white" },
   sell: { label: "Sell", dot: "🔴", text: "text-rose-700",    chip: "bg-rose-50 border-rose-200 text-rose-700",        bar: "bg-rose-500",    solid: "bg-rose-600 text-white" },
 };
 const VOTE_ORDER = ["buy", "hold", "sell"];
@@ -6383,59 +6388,391 @@ function SentimentBar({ counts, total, compact = false }) {
   );
 }
 
-/* ---------- Stock page: sentiment voting + discussion ---------- */
+/* ---------- RichR Sentiment: one global pool per asset ---------- */
+/* One vote per user per asset (the newest row in stock_calls); votes older
+   than 30 days drop out of the tally until re-affirmed. Tallies come from
+   the sentiment_for / sentiment_history RPCs so 1,000+ voters cost one call. */
+const MIN_SAMPLE = 5;               // below this, show counts, not percentages
+const STALE_DAYS = 30;
+const SENT_CACHE = new Map();       // `${ticker}|${scope}|${gid}` -> { at, data }
+const sentimentBus = { subs: new Set(), emit(t) { this.subs.forEach((f) => f(t)); } };
+
+async function fetchSentiment(ticker, scope = "everyone", gid = null, force = false) {
+  const key = `${ticker}|${scope}|${gid || ""}`;
+  const hit = SENT_CACHE.get(key);
+  if (!force && hit && Date.now() - hit.at < 30000) return hit.data;
+  const { data, error } = await supabase.rpc("sentiment_for", { t: ticker, scope, gid });
+  if (error) throw error;
+  SENT_CACHE.set(key, { at: Date.now(), data });
+  return data;
+}
+function useSentiment(ticker, scope = "everyone", gid = null) {
+  const [s, setS] = useState(null);
+  const [err, setErr] = useState(false);
+  const load = async (force) => {
+    if (!ticker) return;
+    try { setS(await fetchSentiment(ticker, scope, gid, force)); setErr(false); } catch (e) { setErr(true); }
+  };
+  useEffect(() => { setS(null); load(false); }, [ticker, scope, gid]);
+  useEffect(() => {
+    const f = (t) => { if (t === ticker) load(true); };
+    sentimentBus.subs.add(f); return () => sentimentBus.subs.delete(f);
+  }, [ticker, scope, gid]);
+  return [s, err, () => load(true)];
+}
+/* Cast (or change / re-affirm) your vote. One row per change; newest wins. */
+async function castVote(ticker, vote, { reason = null, price = null, currency = null, reaffirmed = false } = {}) {
+  const row = { user_id: SOCIAL_ME.id, ticker: String(ticker).toUpperCase(), vote, reason: reason ? String(reason).slice(0, 140) : null,
+    price_at: Number(price) > 0 ? Number(price) : null, currency: currency || null, reaffirmed };
+  const { error } = await supabase.from("stock_calls").insert(row);
+  if (!error) { for (const k of [...SENT_CACHE.keys()]) if (k.startsWith(row.ticker + "|")) SENT_CACHE.delete(k); sentimentBus.emit(row.ticker); }
+  return !error;
+}
+const pctOf = (n, total) => (total > 0 ? Math.round((n / total) * 100) : 0);
+const daysOld = (iso) => Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
+
+/* Three rows: 🟢 Buy 58% ▇▇▇  — the canonical RichR Sentiment look. */
+function SentimentRows({ s, compact = false }) {
+  const total = s ? Number(s.total) : 0;
+  const small = total < MIN_SAMPLE;
+  return (
+    <div className={compact ? "space-y-1" : "space-y-1.5"}>
+      {VOTE_ORDER.map((k) => {
+        const n = s ? Number(s[k]) : 0; const p = pctOf(n, total);
+        return (
+          <div key={k} className="flex items-center gap-2 tabular-nums">
+            <span className={`${compact ? "w-16 text-[12px]" : "w-20 text-[13px]"} font-semibold ${VOTE_META[k].text}`}>{VOTE_META[k].dot} {VOTE_META[k].label}</span>
+            <div className={`flex-1 ${compact ? "h-1.5" : "h-2"} bg-slate-100 rounded-full overflow-hidden`}><div className={`${VOTE_META[k].bar} h-full rounded-full transition-all duration-500`} style={{ width: `${small ? 0 : p}%` }} /></div>
+            <span className={`${compact ? "w-9 text-[12px]" : "w-11 text-[13px]"} text-right font-bold text-slate-800`}>{small ? (n || "–") : `${p}%`}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* "63% Buy ↑6% this week" */
+function WeekDelta({ s, className = "" }) {
+  if (!s || Number(s.total) < MIN_SAMPLE || !s.week_ago || Number(s.week_ago.total) < MIN_SAMPLE) return null;
+  const now = pctOf(Number(s.buy), Number(s.total)), then = pctOf(Number(s.week_ago.buy), Number(s.week_ago.total));
+  const d = now - then;
+  if (d === 0) return <span className={`text-slate-400 ${className}`}>unchanged this week</span>;
+  return <span className={`${d > 0 ? "text-emerald-600" : "text-rose-500"} ${className}`}>{d > 0 ? "↑" : "↓"}{Math.abs(d)}% Buy this week</span>;
+}
+
+/* Vote buttons with the optional reason line. */
+function VoteButtons({ ticker, mine, price, currency, size = "md", onVoted }) {
+  const [pending, setPending] = useState(null);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const cur = mine ? mine.vote : null;
+  const go = async (v) => {
+    setBusy(true);
+    const ok = await castVote(ticker, v, { reason: reason.trim() || null, price, currency });
+    setBusy(false); setPending(null); setReason("");
+    if (ok && onVoted) onVoted(v);
+  };
+  const h = size === "sm" ? "h-8 text-[12px]" : "h-10 text-sm";
+  return (
+    <div>
+      <div className="grid grid-cols-3 gap-1.5">
+        {VOTE_ORDER.map((k) => {
+          const active = (pending || cur) === k;
+          return (
+            <button key={k} disabled={busy} onClick={() => { if (size === "sm" && !pending) { go(k); return; } setPending(k); }}
+              className={`${h} rounded-xl font-bold border transition ${active ? VOTE_META[k].solid + " border-transparent" : "bg-white border-slate-200 text-slate-700 hover:border-slate-300"} disabled:opacity-60`}>
+              {VOTE_META[k].dot} {VOTE_META[k].label}
+            </button>
+          );
+        })}
+      </div>
+      {pending && (
+        <div className="mt-2 flex items-center gap-2" style={{ animation: "richr-in .15s ease-out both" }}>
+          <input value={reason} onChange={(e) => setReason(e.target.value.slice(0, 140))} maxLength={140} autoFocus
+            onKeyDown={(e) => { if (e.key === "Enter") go(pending); if (e.key === "Escape") setPending(null); }}
+            placeholder="Why? (optional)" className="flex-1 min-w-0 border border-slate-200 rounded-xl px-3 h-10 text-sm bg-white outline-none focus:border-emerald-400" />
+          <button onClick={() => go(pending)} disabled={busy} className={`h-10 px-4 rounded-xl text-sm font-bold ${VOTE_META[pending].solid}`}>{cur ? "Update" : "Vote"}</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Full card: scope switch, rows, votes, holders, week delta, history. */
+function SentimentCard({ ticker, name, price, currency, communities = null, onOpenTicker, showHistory = true }) {
+  const [scope, setScope] = useState("everyone");
+  const [gid, setGid] = useState(null);
+  const [holdersOnly, setHoldersOnly] = useState(false);
+  const [range, setRange] = useState(null); // null | 24h | 1w | 1m | all
+  const [s, err, reload] = useSentiment(ticker, scope, scope === "community" ? gid : null);
+  const myComms = communities;
+  useEffect(() => { if (scope === "community" && !gid && myComms && myComms.length) setGid(myComms[0].id); }, [scope, myComms]);
+  const names = useNames([...((s && s.reasons) || []).map((r) => r.user_id), ...((s && s.friends_voted) || []).map((f) => f.user_id)]);
+  const view = s && holdersOnly && s.holders ? s.holders : s;
+  const total = view ? Number(view.total) : 0;
+  const mine = s && s.mine;
+  const stale = mine && daysOld(mine.created_at) >= STALE_DAYS;
+  const lead = view && total >= MIN_SAMPLE ? VOTE_ORDER.slice().sort((a, b) => Number(view[b]) - Number(view[a]))[0] : null;
+  return (
+    <div className="bg-slate-50 rounded-2xl p-4">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <div className="text-[10px] font-bold tracking-wide text-slate-400">RICHR SENTIMENT</div>
+          <div className="font-bold text-slate-900 text-[15px] leading-tight mt-0.5">{ticker}{name ? <span className="font-medium text-slate-500 text-[13px]"> · {name}</span> : null}</div>
+        </div>
+        {mine && !stale && <span className="text-[10px] text-slate-400 shrink-0">You: <VoteChip vote={mine.vote} /></span>}
+      </div>
+
+      {/* scope */}
+      <div className="mt-3 bg-white border border-slate-200 rounded-xl p-0.5 flex text-[12px] font-semibold">
+        {[["everyone", "Everyone"], ["friends", "Friends"], ["community", "Communities"]].map(([id, l]) => (
+          <button key={id} onClick={() => setScope(id)} className={`flex-1 h-7 rounded-lg transition ${scope === id ? "bg-slate-900 text-white" : "text-slate-500"}`}>{l}</button>
+        ))}
+      </div>
+      {scope === "community" && (
+        myComms === null ? <div className="skel h-6 w-1/2 mt-2" />
+        : !myComms || !myComms.length ? <p className="text-[11px] text-slate-400 mt-2">You're not in a community yet.</p>
+        : myComms.length > 1 ? (
+          <div className="flex flex-wrap gap-1.5 mt-2">{myComms.map((c) => (
+            <button key={c.id} onClick={() => setGid(c.id)} className={`text-[11px] font-semibold px-2.5 h-7 rounded-full border ${gid === c.id ? "bg-slate-900 text-white border-slate-900" : "bg-white border-slate-200 text-slate-600"}`}>{c.name}</button>
+          ))}</div>
+        ) : <p className="text-[11px] text-slate-500 mt-2">{myComms[0].name}</p>
+      )}
+
+      {/* tally */}
+      <div className="mt-3">
+        {err ? <p className="text-xs text-rose-500">Couldn't load sentiment.</p>
+          : s === null ? <div className="space-y-2"><div className="skel h-2 w-full" /><div className="skel h-2 w-5/6" /><div className="skel h-2 w-4/6" /></div>
+          : <SentimentRows s={view} />}
+        <div className="flex items-center justify-between mt-2 text-[11px] tabular-nums">
+          <span className="text-slate-500">
+            {s === null ? "" : total === 0 ? (scope === "everyone" ? "No votes yet — be the first." : scope === "friends" ? "None of your friends have voted yet." : "No votes in this community yet.")
+              : total < MIN_SAMPLE ? `${total} vote${total === 1 ? "" : "s"} so far — percentages show from ${MIN_SAMPLE}.`
+              : <>{total.toLocaleString()} vote{total === 1 ? "" : "s"}{lead ? <> · leaning <b className={VOTE_META[lead].text}>{VOTE_META[lead].label}</b></> : null}</>}
+          </span>
+          {!holdersOnly && <WeekDelta s={s} className="font-semibold" />}
+        </div>
+        {s && s.holders && Number(s.holders.total) >= 3 && (
+          <button onClick={() => setHoldersOnly((v) => !v)}
+            className={`mt-2 text-[11px] font-semibold px-2.5 h-7 rounded-full border transition ${holdersOnly ? "bg-slate-900 text-white border-slate-900" : "bg-white border-slate-200 text-slate-600"}`}>
+            {holdersOnly ? "Showing holders only" : `Holders only · ${Number(s.holders.total)}`}
+          </button>
+        )}
+        {scope === "everyone" && s && Array.isArray(s.friends_voted) && s.friends_voted.length > 0 && (
+          <div className="mt-2.5 flex items-center gap-1.5 flex-wrap text-[11px] text-slate-600">
+            <span className="font-semibold text-slate-500">Friends:</span>
+            {s.friends_voted.slice(0, 6).map((f) => (
+              <span key={f.user_id} className="inline-flex items-center gap-1 bg-white border border-slate-200 rounded-full pl-0.5 pr-2 py-0.5"><Avatar name={names[f.user_id] || "?"} size={16} /> @{names[f.user_id] || "…"} {VOTE_META[f.vote].dot}</span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* stale nudge */}
+      {stale && (
+        <div className="mt-3 bg-white border border-amber-200 rounded-xl px-3 py-2 text-[12px] text-slate-700 flex items-center gap-2 flex-wrap">
+          <span className="flex-1 min-w-[10rem]">Your <b>{VOTE_META[mine.vote].label}</b> is {daysOld(mine.created_at)} days old and no longer counted. Still agree?</span>
+          <button onClick={() => castVote(ticker, mine.vote, { reason: mine.reason, price, currency, reaffirmed: true })} className={`text-[11px] font-bold px-2.5 h-7 rounded-lg ${VOTE_META[mine.vote].solid}`}>Still {VOTE_META[mine.vote].label}</button>
+        </div>
+      )}
+
+      {/* vote */}
+      <div className="mt-3"><VoteButtons ticker={ticker} mine={mine && !stale ? mine : null} price={price} currency={currency} /></div>
+      {mine && mine.reason && !stale && <p className="text-[11px] text-slate-500 mt-2 italic">Your reason: “{mine.reason}”</p>}
+
+      {/* reasons */}
+      {s && Array.isArray(s.reasons) && s.reasons.length > 0 && (
+        <div className="mt-3 space-y-1.5">
+          {s.reasons.slice(0, 4).map((r, i) => (
+            <div key={i} className="flex items-start gap-2 text-[12px] text-slate-600">
+              <VoteChip vote={r.vote} className="shrink-0 mt-0.5" />
+              <span className="leading-snug">“{r.reason}” <span className="text-slate-400 text-[11px]">— @{names[r.user_id] || "…"} · {timeAgo(r.created_at)}</span></span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* history */}
+      {showHistory && s && Number(s.total) >= MIN_SAMPLE && (
+        <div className="mt-3">
+          <div className="flex items-center gap-1">
+            {[["24h", "24H"], ["1w", "1W"], ["1m", "1M"], ["all", "ALL"]].map(([id, l]) => (
+              <button key={id} onClick={() => setRange(range === id ? null : id)} className={`text-[11px] font-bold px-2 h-7 rounded-lg ${range === id ? "bg-white text-slate-900 shadow-sm" : "text-slate-400"}`}>{l}</button>
+            ))}
+            {!range && <span className="text-[10px] text-slate-400 ml-1">Sentiment over time</span>}
+          </div>
+          {range && <SentimentHistory ticker={ticker} range={range} />}
+        </div>
+      )}
+      <p className="text-[10px] text-slate-400 mt-3">One person, one vote — portfolio size doesn't count. Opinions of RichR users, not advice. Votes expire after {STALE_DAYS} days unless re-affirmed.</p>
+    </div>
+  );
+}
+
+const HIST_RANGES = { "24h": { step: "1 hour", points: 24 }, "1w": { step: "1 day", points: 7 }, "1m": { step: "1 day", points: 30 }, all: { step: "7 days", points: 26 } };
+function SentimentHistory({ ticker, range }) {
+  const [pts, setPts] = useState(null);
+  useEffect(() => {
+    let dead = false; setPts(null);
+    const r = HIST_RANGES[range] || HIST_RANGES["1m"];
+    supabase.rpc("sentiment_history", { t: ticker, step: r.step, points: r.points }).then(({ data, error }) => { if (!dead) setPts(error ? [] : (data || [])); });
+    return () => { dead = true; };
+  }, [ticker, range]);
+  if (pts === null) return <div className="skel h-16 w-full mt-2" />;
+  const rows = pts.map((p) => ({ t: p.t, buy: Number(p.total) ? (Number(p.buy) / Number(p.total)) * 100 : null, hold: Number(p.total) ? (Number(p.hold) / Number(p.total)) * 100 : null, sell: Number(p.total) ? (Number(p.sell) / Number(p.total)) * 100 : null, n: Number(p.total) }));
+  if (!rows.some((r) => r.n > 0)) return <p className="text-[11px] text-slate-400 mt-2">No history for this range yet.</p>;
+  const first = rows.find((r) => r.buy != null), last = [...rows].reverse().find((r) => r.buy != null);
+  const fmtT = (t) => (range === "24h" ? fmtTime(new Date(t)) : fmtDate(t));
+  return (
+    <div className="mt-2 bg-white rounded-xl p-2 border border-slate-100">
+      <div style={{ height: 96 }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={rows} margin={{ top: 6, right: 6, left: 0, bottom: 0 }}>
+            <XAxis dataKey="t" tickFormatter={fmtT} minTickGap={36} tick={{ fill: "#94a3b8", fontSize: 9 }} axisLine={false} tickLine={false} />
+            <YAxis domain={[0, 100]} hide />
+            <Tooltip content={({ active, payload, label }) => active && payload && payload.length ? (
+              <div className="bg-slate-900 text-white rounded-lg px-2.5 py-1.5 text-[11px] tabular-nums">
+                <div className="text-slate-400">{fmtT(label)} · {payload[0].payload.n} votes</div>
+                <div>🟢 {Math.round(payload[0].payload.buy || 0)}% · ⚪ {Math.round(payload[0].payload.hold || 0)}% · 🔴 {Math.round(payload[0].payload.sell || 0)}%</div>
+              </div>) : null} />
+            <Line type="monotone" dataKey="buy" stroke="#10b981" strokeWidth={2} dot={false} isAnimationActive={false} connectNulls />
+            <Line type="monotone" dataKey="hold" stroke="#94a3b8" strokeWidth={1.5} dot={false} isAnimationActive={false} connectNulls />
+            <Line type="monotone" dataKey="sell" stroke="#f43f5e" strokeWidth={1.5} dot={false} isAnimationActive={false} connectNulls />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+      {first && last && (
+        <div className="text-[11px] text-slate-500 tabular-nums mt-1">Buy {Math.round(first.buy)}% → <b className="text-slate-800">{Math.round(last.buy)}%</b> over this range</div>
+      )}
+    </div>
+  );
+}
+
+/* Compact: for poll cards in feeds/chats, Discover lists, community sections. */
+function SentimentMini({ ticker, name, onOpenTicker, vote = true, headline = true }) {
+  const [s, err] = useSentiment(ticker, "everyone", null);
+  const total = s ? Number(s.total) : 0;
+  const mine = s && s.mine && daysOld(s.mine.created_at) < STALE_DAYS ? s.mine : null;
+  const lead = s && total >= MIN_SAMPLE ? VOTE_ORDER.slice().sort((a, b) => Number(s[b]) - Number(s[a]))[0] : null;
+  return (
+    <div className="tabular-nums">
+      {headline && (
+        <div className="flex items-center justify-between gap-2 mb-1.5">
+          <button onClick={() => onOpenTicker && onOpenTicker(ticker)} className="text-left min-w-0">
+            <span className="text-[10px] font-bold tracking-wide text-slate-400">RICHR SENTIMENT</span>
+            <div className="font-bold text-slate-900 text-[14px] leading-tight truncate">{ticker}{name ? <span className="font-medium text-slate-500 text-[12px]"> · {name}</span> : null}</div>
+          </button>
+          {lead && <span className={`text-[11px] font-bold shrink-0 ${VOTE_META[lead].text}`}>{pctOf(Number(s[lead]), total)}% {VOTE_META[lead].label}</span>}
+        </div>
+      )}
+      {s === null && !err ? <div className="space-y-1.5"><div className="skel h-1.5 w-full" /><div className="skel h-1.5 w-4/5" /><div className="skel h-1.5 w-3/5" /></div> : <SentimentRows s={s} compact />}
+      <div className="flex items-center justify-between mt-1.5 text-[10px] text-slate-500">
+        <span>{total === 0 ? "No votes yet" : total < MIN_SAMPLE ? `${total} vote${total === 1 ? "" : "s"} so far` : `${total.toLocaleString()} votes`}{mine ? <> · you: {VOTE_META[mine.vote].dot}</> : null}</span>
+        <WeekDelta s={s} className="font-semibold" />
+      </div>
+      {vote && <div className="mt-2"><VoteButtons ticker={ticker} mine={mine} size="sm" /></div>}
+    </div>
+  );
+}
+
+/* Discover: the most-voted assets right now. */
+function DiscoverSentiment({ onOpenTicker }) {
+  const [rows, setRows] = useState(null);
+  useEffect(() => { let dead = false; supabase.rpc("top_sentiment", { lim: 8 }).then(({ data, error }) => { if (!dead) setRows(error ? [] : (data || [])); }); return () => { dead = true; }; }, []);
+  if (rows === null) return <Skeleton lines={4} />;
+  if (!rows.length) return null;
+  return (
+    <div className="card">
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="section-title">RichR Sentiment</h3>
+        <span className="text-[10px] font-semibold text-slate-400">MOST VOTED · 30 DAYS</span>
+      </div>
+      <div className="divide-y divide-slate-100">
+        {rows.map((r) => {
+          const total = Number(r.total); const small = total < MIN_SAMPLE;
+          const lead = VOTE_ORDER.slice().sort((a, b) => Number(r[b]) - Number(r[a]))[0];
+          return (
+            <button key={r.ticker} onClick={() => onOpenTicker(r.ticker)} className="w-full flex items-center gap-3 py-2.5 text-left">
+              <Logo h={{ ticker: r.ticker }} size={34} rounded="rounded-lg" />
+              <div className="flex-1 min-w-0">
+                <div className="font-bold text-slate-900 text-sm">{r.ticker}</div>
+                <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden flex mt-1">
+                  {!small && VOTE_ORDER.map((k) => Number(r[k]) > 0 && <div key={k} className={`${VOTE_META[k].bar} h-full`} style={{ width: `${(Number(r[k]) / total) * 100}%` }} />)}
+                </div>
+              </div>
+              <div className="text-right shrink-0 tabular-nums">
+                {small ? <div className="text-[12px] font-semibold text-slate-500">{total} vote{total === 1 ? "" : "s"}</div>
+                  : <div className={`text-sm font-bold ${VOTE_META[lead].text}`}>{VOTE_META[lead].dot} {pctOf(Number(r[lead]), total)}% {VOTE_META[lead].label}</div>}
+                <div className="text-[10px] text-slate-400">{Number(r.recent)} this week · {total} total</div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+      <p className="text-[10px] text-slate-400 mt-2">Buy / Hold / Sell opinions of RichR users — one person, one vote. Not advice.</p>
+    </div>
+  );
+}
+
+/* Home nudge: votes older than 30 days — still agree? */
+function RecheckCalls({ onOpenTicker }) {
+  const [rows, setRows] = useState(null);
+  const load = () => supabase.rpc("my_stale_calls", { days: STALE_DAYS }).then(({ data, error }) => setRows(error ? [] : (data || [])));
+  useEffect(() => { load(); }, []);
+  if (!rows || !rows.length) return null;
+  const c = rows[0];
+  return (
+    <div className="card flex items-center gap-3 flex-wrap">
+      <div className="flex-1 min-w-[12rem]">
+        <div className="text-[10px] font-bold tracking-wide text-slate-400">STILL AGREE?</div>
+        <div className="text-sm text-slate-800 mt-0.5">Your <b className={VOTE_META[c.vote].text}>{VOTE_META[c.vote].dot} {VOTE_META[c.vote].label}</b> on <b>{c.ticker}</b> is {daysOld(c.created_at)} days old{rows.length > 1 ? ` (+${rows.length - 1} more)` : ""}.</div>
+      </div>
+      <div className="flex gap-1.5">
+        <button onClick={async () => { await castVote(c.ticker, c.vote, { reason: c.reason, reaffirmed: true }); load(); }} className={`text-xs font-bold px-3 h-9 rounded-xl ${VOTE_META[c.vote].solid}`}>Still {VOTE_META[c.vote].label}</button>
+        <button onClick={() => onOpenTicker(c.ticker)} className="btn-secondary h-9 text-xs">Change</button>
+      </div>
+    </div>
+  );
+}
+
+/* Stock page: RichR Sentiment + the discussion underneath. */
 function StockSocial({ ticker: rawTicker, name, price, currency, onOpenTicker }) {
   const ticker = String(rawTicker || "").toUpperCase();
   const me = SOCIAL_ME.id;
-  const [calls, setCalls] = useState(null);      // latest per user
-  const [friendIds, setFriendIds] = useState([]);
   const [posts, setPosts] = useState(null);
   const [reactions, setReactions] = useState([]);
-  const [reason, setReason] = useState("");
-  const [pendingVote, setPendingVote] = useState(null); // vote chosen, reason being typed
+  const [posterVotes, setPosterVotes] = useState({});
+  const [friendIds, setFriendIds] = useState([]);
   const [text, setText] = useState("");
   const [replyTo, setReplyTo] = useState(null);
   const [sending, setSending] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  const communities = useMyCommunities(me);
 
   const load = async () => {
     if (!ticker) return;
-    const [{ data: cs }, { data: ps }, ids] = await Promise.all([
-      supabase.from("stock_calls").select("id, user_id, vote, reason, price_at, currency, created_at").eq("ticker", ticker).order("created_at", { ascending: false }).limit(500),
+    const [{ data: ps }, ids] = await Promise.all([
       supabase.from("stock_posts").select("id, user_id, parent_id, body, created_at").eq("ticker", ticker).order("created_at", { ascending: true }).limit(200),
       mutualIdsCached(me),
     ]);
-    setCalls(latestCalls(cs || [], (r) => r.user_id));
     setFriendIds(ids);
-    const postIds = (ps || []).map((p) => p.id);
-    if (postIds.length) {
-      const { data: rs } = await supabase.from("stock_post_reactions").select("post_id, user_id, emoji").in("post_id", postIds);
-      setReactions(rs || []);
-    } else setReactions([]);
-    setPosts(ps || []);
+    const list = ps || [];
+    const postIds = list.map((p) => p.id);
+    const posters = [...new Set(list.map((p) => p.user_id))];
+    const [{ data: rs }, { data: cs }] = await Promise.all([
+      postIds.length ? supabase.from("stock_post_reactions").select("post_id, user_id, emoji").in("post_id", postIds) : Promise.resolve({ data: [] }),
+      posters.length ? supabase.from("stock_calls").select("user_id, vote, created_at").eq("ticker", ticker).in("user_id", posters).order("created_at", { ascending: false }).limit(400) : Promise.resolve({ data: [] }),
+    ]);
+    setReactions(rs || []);
+    const pv = {}; latestCalls(cs || [], (r) => r.user_id).forEach((c) => { if (daysOld(c.created_at) < STALE_DAYS) pv[c.user_id] = c.vote; });
+    setPosterVotes(pv);
+    setPosts(list);
   };
-  useEffect(() => { setCalls(null); setPosts(null); setPendingVote(null); setReason(""); load(); }, [ticker]);
+  useEffect(() => { setPosts(null); load(); }, [ticker]);
+  useEffect(() => { const f = (t) => { if (t === ticker) load(); }; sentimentBus.subs.add(f); return () => sentimentBus.subs.delete(f); }, [ticker]);
 
-  const names = useNames([...(calls || []).map((c) => c.user_id), ...(posts || []).map((p) => p.user_id)]);
+  const names = useNames((posts || []).map((p) => p.user_id));
   const uname = (id) => (id === me ? (SOCIAL_ME.username || names[id] || "you") : (names[id] || "…"));
-
-  const myCall = (calls || []).find((c) => c.user_id === me) || null;
-  const counts = { buy: 0, hold: 0, sell: 0 };
-  (calls || []).forEach((c) => { counts[c.vote] = (counts[c.vote] || 0) + 1; });
-  const total = (calls || []).length;
-  const friendCalls = (calls || []).filter((c) => friendIds.includes(c.user_id));
-  const voteOf = (id) => ((calls || []).find((c) => c.user_id === id) || {}).vote;
-
-  const castVote = async (vote) => {
-    if (!me) return;
-    const row = { user_id: me, ticker, vote, reason: reason.trim().slice(0, 140) || null, price_at: Number(price) > 0 ? Number(price) : null, currency: currency || null };
-    const optimistic = { ...row, id: "tmp", created_at: new Date().toISOString() };
-    setCalls((cs) => [optimistic, ...(cs || []).filter((c) => c.user_id !== me)]);
-    setPendingVote(null); setReason("");
-    const { error } = await supabase.from("stock_calls").insert(row);
-    if (error) { await load(); return; }
-    await load();
-  };
 
   const send = async () => {
     const body = text.trim().slice(0, 1000);
@@ -6453,10 +6790,7 @@ function StockSocial({ ticker: rawTicker, name, price, currency, onOpenTicker })
     if (mine) await supabase.from("stock_post_reactions").delete().match({ post_id: post.id, user_id: me, emoji });
     else await supabase.from("stock_post_reactions").insert({ post_id: post.id, user_id: me, emoji });
   };
-  const removePost = async (post) => {
-    await supabase.from("stock_posts").delete().eq("id", post.id);
-    await load();
-  };
+  const removePost = async (post) => { await supabase.from("stock_posts").delete().eq("id", post.id); await load(); };
 
   const tops = (posts || []).filter((p) => !p.parent_id);
   const shownTops = showAll ? tops : tops.slice(-6);
@@ -6465,7 +6799,7 @@ function StockSocial({ ticker: rawTicker, name, price, currency, onOpenTicker })
   const renderPost = (p, isReply) => {
     const mine = p.user_id === me;
     const rs = reactions.filter((r) => r.post_id === p.id);
-    const v = voteOf(p.user_id);
+    const v = posterVotes[p.user_id];
     return (
       <div key={p.id} className={isReply ? "ml-7 mt-2" : "pt-3 first:pt-0"}>
         <div className="flex items-center gap-2 mb-1">
@@ -6499,67 +6833,8 @@ function StockSocial({ ticker: rawTicker, name, price, currency, onOpenTicker })
   if (!ticker) return null;
   return (
     <div className="mt-4 space-y-4">
-      {/* ---- sentiment ---- */}
-      <div className="bg-slate-50 rounded-2xl p-4">
-        <div className="flex items-center justify-between mb-2.5">
-          <h4 className="text-xs font-semibold text-slate-400">COMMUNITY SENTIMENT · {ticker}</h4>
-          {myCall && <span className="text-[10px] text-slate-400">You: <VoteChip vote={myCall.vote} /></span>}
-        </div>
-        {calls === null ? <div className="skel h-2.5 w-full" /> : <SentimentBar counts={counts} total={total} />}
+      <SentimentCard ticker={ticker} name={name} price={price} currency={currency} communities={communities} onOpenTicker={onOpenTicker} />
 
-        {friendCalls.length > 0 && (
-          <div className="mt-3 flex items-center gap-1.5 flex-wrap text-[11px] text-slate-600">
-            <span className="font-semibold text-slate-500">Friends:</span>
-            {friendCalls.slice(0, 6).map((c) => (
-              <span key={c.user_id} className="inline-flex items-center gap-1 bg-white border border-slate-200 rounded-full pl-0.5 pr-2 py-0.5">
-                <Avatar name={uname(c.user_id)} size={16} /> @{uname(c.user_id)} {VOTE_META[c.vote].dot}
-              </span>
-            ))}
-            {friendCalls.length > 6 && <span className="text-slate-400">+{friendCalls.length - 6}</span>}
-          </div>
-        )}
-
-        <div className="mt-3 grid grid-cols-3 gap-2">
-          {VOTE_ORDER.map((k) => {
-            const active = (pendingVote || (myCall && myCall.vote)) === k;
-            return (
-              <button key={k} onClick={() => setPendingVote(k)}
-                className={`h-10 rounded-xl text-sm font-bold border transition ${active ? VOTE_META[k].solid + " border-transparent" : "bg-white border-slate-200 text-slate-700 hover:border-slate-300"}`}>
-                {VOTE_META[k].dot} {VOTE_META[k].label}
-              </button>
-            );
-          })}
-        </div>
-        {pendingVote && (
-          <div className="mt-2 flex items-center gap-2">
-            <input value={reason} onChange={(e) => setReason(e.target.value.slice(0, 140))} maxLength={140}
-              onKeyDown={(e) => { if (e.key === "Enter") castVote(pendingVote); }}
-              placeholder="Why? (optional, 140 chars)" className="flex-1 min-w-0 border border-slate-200 rounded-xl px-3 h-10 text-sm bg-white" autoFocus />
-            <button onClick={() => castVote(pendingVote)} className={`h-10 px-4 rounded-xl text-sm font-bold ${VOTE_META[pendingVote].solid}`}>
-              {myCall ? "Update" : "Vote"}
-            </button>
-          </div>
-        )}
-        {myCall && myCall.reason && !pendingVote && <p className="text-[11px] text-slate-500 mt-2 italic">Your reason: “{myCall.reason}”</p>}
-        <p className="text-[10px] text-slate-400 mt-2">Opinions of RichR users, not financial advice. Your vote is public to other members; historical calls show on your profile.</p>
-      </div>
-
-      {/* ---- recent reasons ---- */}
-      {(calls || []).some((c) => c.reason) && (
-        <div>
-          <h4 className="text-xs font-semibold text-slate-400 mb-1.5">WHY PEOPLE VOTED</h4>
-          <div className="space-y-1.5">
-            {(calls || []).filter((c) => c.reason).slice(0, 4).map((c) => (
-              <div key={c.id} className="flex items-start gap-2 text-[13px] text-slate-600">
-                <VoteChip vote={c.vote} className="shrink-0 mt-0.5" />
-                <span className="leading-snug">“{c.reason}” <span className="text-slate-400 text-[11px]">— @{uname(c.user_id)} · {timeAgo(c.created_at)}</span></span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ---- discussion ---- */}
       <div>
         <div className="flex items-center justify-between mb-2">
           <h4 className="text-xs font-semibold text-slate-400">DISCUSSION{tops.length ? ` · ${tops.length}` : ""}</h4>
@@ -6568,7 +6843,7 @@ function StockSocial({ ticker: rawTicker, name, price, currency, onOpenTicker })
         {posts === null ? (
           <div className="space-y-2"><div className="skel h-4 w-2/3" /><div className="skel h-4 w-1/2" /></div>
         ) : tops.length === 0 ? (
-          <p className="text-sm text-slate-400">No one has posted about {ticker} yet. What's your take?</p>
+          <p className="text-sm text-slate-400">No one has posted about {ticker} yet. Why did you vote the way you did?</p>
         ) : (
           <div className="divide-y divide-slate-100">{shownTops.map((p) => renderPost(p, false))}</div>
         )}
@@ -6581,7 +6856,7 @@ function StockSocial({ ticker: rawTicker, name, price, currency, onOpenTicker })
         <div className="flex items-end gap-2 mt-3">
           <textarea value={text} onChange={(e) => setText(e.target.value.slice(0, 1000))} rows={1}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }}
-            placeholder={replyTo ? "Write a reply…" : `Your opinion on ${ticker}… use $TICKER to tag others`}
+            placeholder={replyTo ? "Write a reply…" : `Your take on ${ticker}… use $TICKER to tag others`}
             className="flex-1 border border-slate-200 rounded-2xl px-3.5 py-2.5 text-[14px] resize-none max-h-32" />
           <button onClick={send} disabled={sending || !text.trim()}
             className="w-10 h-10 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white flex items-center justify-center shrink-0 disabled:opacity-40">
@@ -6657,13 +6932,13 @@ function HomeFeed({ user, onOpenTicker, goFriends }) {
       };
       const [{ data: ev }, { data: cs }, { data: ps }] = await Promise.all([
         who ? q("portfolio_events", "id, user_id, kind, ticker, from_pct, to_pct, created_at") : Promise.resolve({ data: [] }),
-        q("stock_calls", "id, user_id, ticker, vote, reason, created_at"),
+        q("stock_calls", "id, user_id, ticker, vote, reason, created_at, reaffirmed"),
         q("stock_posts", "id, user_id, ticker, body, parent_id, created_at"),
       ]);
       if (dead) return;
       const all = [
         ...(ev || []).map((e) => ({ t: "event", id: "e" + e.id, user_id: e.user_id, ticker: e.ticker, created_at: e.created_at, e })),
-        ...latestCalls(cs || []).map((c) => ({ t: "call", id: "c" + c.id, user_id: c.user_id, ticker: c.ticker, created_at: c.created_at, c })),
+        ...latestCalls((cs || []).filter((c) => !c.reaffirmed)).map((c) => ({ t: "call", id: "c" + c.id, user_id: c.user_id, ticker: c.ticker, created_at: c.created_at, c })),
         ...(ps || []).filter((p) => !p.parent_id).map((p) => ({ t: "post", id: "p" + p.id, user_id: p.user_id, ticker: p.ticker, created_at: p.created_at, p })),
       ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
       setItems(all.slice(0, 25));
@@ -6739,16 +7014,12 @@ function ChatCard({ card, onTicker }) {
   if (card.kind === "poll") {
     const m = card.vote ? VOTE_META[card.vote] : null;
     return (
-      <button onClick={() => onTicker(card.ticker)} className="w-full text-left bg-white border border-slate-200 rounded-xl p-3 mb-2 active:bg-slate-50">
-        <div className="text-[10px] font-bold text-slate-400 tracking-wide flex items-center gap-1"><Vote size={11} /> POLL</div>
-        <div className="font-bold text-slate-900 text-[15px]">What's your call on {card.ticker}?</div>
-        {card.name && <div className="text-[11px] text-slate-500">{card.name}</div>}
-        {m && <div className="text-[12px] text-slate-600 mt-1">Their call: <b className={m.text}>{m.dot} {m.label}</b>{card.reason ? <span className="italic"> — “{card.reason}”</span> : ""}</div>}
-        <div className="mt-2 grid grid-cols-3 gap-1.5">
-          {VOTE_ORDER.map((k) => <span key={k} className={`h-8 rounded-lg border text-xs font-bold flex items-center justify-center ${VOTE_META[k].chip}`}>{VOTE_META[k].dot} {VOTE_META[k].label}</span>)}
-        </div>
-        <div className="text-[11px] text-emerald-700 font-semibold mt-1.5">Tap to vote on the stock page → results in Sentiment</div>
-      </button>
+      <div className="bg-white border border-slate-200 rounded-xl p-3 mb-2">
+        <div className="text-[10px] font-bold text-slate-400 tracking-wide flex items-center gap-1 mb-1"><Vote size={11} /> POLL · What's your call on {card.ticker}?</div>
+        <SentimentMini ticker={card.ticker} name={card.name} onOpenTicker={onTicker} />
+        {m && <div className="text-[11px] text-slate-500 mt-2">Poster's call: <b className={m.text}>{m.dot} {m.label}</b>{card.reason ? <span className="italic"> — “{card.reason}”</span> : ""}</div>}
+        <button onClick={() => onTicker(card.ticker)} className="text-[11px] text-emerald-700 font-semibold mt-1.5">Open {card.ticker} → full sentiment & discussion</button>
+      </div>
     );
   }
   if (card.kind === "vote") {
@@ -7373,9 +7644,7 @@ function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpe
       ...(card ? { card } : {}),
     };
     // A shared call is also a real vote on the stock page.
-    if (card && card.kind === "vote" && card.ticker) {
-      await supabase.from("stock_calls").insert({ user_id: user.id, ticker: card.ticker, vote: card.vote, reason: card.reason || null });
-    }
+    if (card && card.kind === "vote" && card.ticker) await castVote(card.ticker, card.vote, { reason: card.reason || null });
     const { error } = await supabase.from("group_posts").insert(row);
     setSending(false);
     if (error) { say("Couldn't send — try again."); return; }
@@ -7629,7 +7898,7 @@ function CommunitySentiment({ members, names, user, onOpenTicker }) {
     if (!members.length) { setCalls([]); return; }
     supabase.from("stock_calls").select("id, user_id, ticker, vote, reason, created_at").in("user_id", members)
       .order("created_at", { ascending: false }).limit(600)
-      .then(({ data }) => { if (!dead) setCalls(latestCalls(data || [])); });
+      .then(({ data }) => { if (!dead) setCalls(latestCalls(data || []).filter((c) => daysOld(c.created_at) < STALE_DAYS)); });
     return () => { dead = true; };
   }, [members.join(",")]);
   if (calls === null) return <div className="px-4 py-6"><Skeleton lines={4} /></div>;
