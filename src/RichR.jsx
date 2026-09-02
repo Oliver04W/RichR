@@ -592,7 +592,7 @@ export default function RichR({ user, onSignOut }) {
   const [importOnce, setImportOnce] = useState(false);    // open the import modal on arrival in Holdings
   const openTicker = (t) => { setResearchQuery(String(t || "").toUpperCase()); setTab("research"); };
   // Social components (votes, discussions, feed) read the signed-in user from here.
-  SOCIAL_ME.id = user.id; SOCIAL_ME.username = data.username || "";
+  SOCIAL_ME.id = user.id; SOCIAL_ME.username = (data && data.username) || "";
   const openProfile = () => { if (tab !== "profile") prevTabRef.current = tab; setTab("profile"); };
   const closeProfile = () => setTab(prevTabRef.current === "profile" ? "portfolio" : prevTabRef.current);
   const [sub, setSub] = useState("overview"); // Portfolio tab sections: overview | holdings | analysis
