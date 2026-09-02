@@ -1917,9 +1917,9 @@ function HoldingsPreview({ active, cur, fx, onOpen, limit = 5 }) {
               <div className="text-xs text-slate-400 truncate mt-0.5">{h.name}</div>
               <div className="mt-1.5 h-1 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-slate-800 rounded-full" style={{ width: `${Math.min(100, w)}%` }} /></div>
             </div>
-            <div className="text-right shrink-0 w-20">
+            <div className="text-right shrink-0">
               <Ret v={r} className="text-[15px] font-bold block leading-tight" />
-              <div className="text-[11px] font-semibold text-slate-400 tabular-nums mt-0.5">{w.toFixed(1)}% of portfolio</div>
+              <div className="text-[11px] font-semibold text-slate-400 tabular-nums mt-0.5 whitespace-nowrap">{w.toFixed(1)}% of portfolio</div>
             </div>
           </button>
         );
