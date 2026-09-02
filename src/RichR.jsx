@@ -938,6 +938,7 @@ export default function RichR({ user, onSignOut }) {
             autoRefresh={!!data.autoRefresh} onToggleAuto={() => patch((d) => ({ autoRefresh: !d.autoRefresh }))}
             pricesAt={data.pricesAt || 0} priceDataAt={data.priceDataAt || 0}
             onAddGoal={addGoal} onUpdateGoal={updateGoal} onRemoveGoal={removeGoal}
+            onBenchmark={(benchmark) => patch(() => ({ benchmark }))}
           />
         )}
         {tab === "portfolio" && sub === "holdings" && (
@@ -1171,7 +1172,7 @@ function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrency, onPr
 }
 
 /* ================= HOME ================= */
-function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, goImport, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, priceDataAt, onAddGoal, onUpdateGoal, onRemoveGoal }) {
+function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, goImport, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, priceDataAt, onAddGoal, onUpdateGoal, onRemoveGoal, onBenchmark }) {
   const [renaming, setRenaming] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const up = totals.pl >= 0;
@@ -1308,7 +1309,7 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
       </div>
 
       {/* period returns vs S&P 500 */}
-      <PeriodReturns active={active} cur={cur} liveValue={totals.value} liveCost={totals.cost} />
+      <PeriodReturns active={active} cur={cur} liveValue={totals.value} liveCost={totals.cost} bench={benchOf(data)} onBench={onBenchmark} />
 
       {/* best / worst + concentration */}
       <MoversCard active={active} cur={cur} fx={fx} />
@@ -1369,7 +1370,8 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
 
       <PortfolioHistorySheet open={showHistory} onClose={() => setShowHistory(false)}
         holdings={active.holdings} cur={cur}
-        liveValue={totals.value} liveCost={totals.cost} hex={th.hex} />
+        liveValue={totals.value} liveCost={totals.cost} hex={th.hex}
+        bench={benchOf(data)} onBench={onBenchmark} />
 
       {/* allocation donut */}
       <AllocationCard active={active} cur={cur} fx={fx} />
@@ -1411,16 +1413,69 @@ const idxOnOrBefore = (series, t) => {
   for (let k = 0; k < series.length; k++) { if (new Date(series[k].t).getTime() <= t) i = k; else break; }
   return i;
 };
-const BENCH = { symbol: "SPY", label: "S&P 500" };
+/* Benchmarks the user can compare against. Symbols are what the
+   get-history function (Yahoo) understands; all verified to return data. */
+const BENCHMARKS = [
+  { symbol: "SPY",     label: "S&P 500",         short: "S&P" },
+  { symbol: "QQQ",     label: "Nasdaq-100",      short: "NDX" },
+  { symbol: "URTH",    label: "MSCI World",      short: "World" },
+  { symbol: "^OMXH25", label: "OMX Helsinki 25", short: "OMXH" },
+  { symbol: "FEZ",     label: "Euro Stoxx 50",   short: "STOXX" },
+  { symbol: "^GDAXI",  label: "DAX",             short: "DAX" },
+  { symbol: "BTC-USD", label: "Bitcoin",         short: "BTC" },
+];
+const DEFAULT_BENCH = BENCHMARKS[0];
+/* data.benchmark may be a preset symbol or a custom {symbol,label}. */
+const benchOf = (data) => {
+  const b = data && data.benchmark;
+  if (!b) return DEFAULT_BENCH;
+  if (typeof b === "string") return BENCHMARKS.find((x) => x.symbol === b) || { symbol: b, label: b, short: b.replace(/^\^/, "").slice(0, 6) };
+  if (b.symbol) return BENCHMARKS.find((x) => x.symbol === b.symbol) || { symbol: b.symbol, label: b.label || b.symbol, short: (b.short || b.symbol).replace(/^\^/, "").slice(0, 6) };
+  return DEFAULT_BENCH;
+};
+
+/* Small select for choosing the benchmark; "Custom…" lets you type any
+   ticker the price source knows (e.g. VT, EUNL.DE, ^OMXS30). */
+function BenchPicker({ value, onChange, dark }) {
+  const [custom, setCustom] = useState(false);
+  const [txt, setTxt] = useState("");
+  const isPreset = BENCHMARKS.some((b) => b.symbol === value.symbol);
+  if (custom) {
+    return (
+      <form onSubmit={(e) => { e.preventDefault(); const t = txt.trim().toUpperCase(); if (t) onChange({ symbol: t, label: t, short: t.replace(/^\^/, "").slice(0, 6) }); setCustom(false); setTxt(""); }}
+        className="flex items-center gap-1">
+        <input autoFocus value={txt} onChange={(e) => setTxt(e.target.value)} placeholder="ticker, e.g. VT"
+          className="w-28 border border-slate-200 rounded-lg px-2 py-1 text-xs uppercase" />
+        <button type="submit" className="text-xs font-semibold text-emerald-600">OK</button>
+        <button type="button" onClick={() => setCustom(false)} className="text-xs text-slate-400">✕</button>
+      </form>
+    );
+  }
+  return (
+    <select value={isPreset ? value.symbol : "__custom_current"}
+      onChange={(e) => {
+        const v = e.target.value;
+        if (v === "__custom") { setCustom(true); return; }
+        if (v === "__custom_current") return;
+        onChange(BENCHMARKS.find((b) => b.symbol === v));
+      }}
+      className={`text-xs font-semibold rounded-lg px-2 py-1 border ${dark ? "bg-slate-800 text-white border-slate-700" : "bg-white text-slate-600 border-slate-200"}`}>
+      {BENCHMARKS.map((b) => <option key={b.symbol} value={b.symbol}>vs {b.label}</option>)}
+      {!isPreset && <option value="__custom_current">vs {value.label}</option>}
+      <option value="__custom">Custom ticker…</option>
+    </select>
+  );
+}
 
 /* Cache the daily series per holdings signature so switching tabs doesn't
-   refetch; both the tiles and the history sheet read from it. */
-const histCache = { key: "", portfolio: null, bench: null, at: 0 };
+   refetch; benchmark closes are cached per symbol. */
+const histCache = { key: "", portfolio: null, at: 0, bench: {} };
 const holdingsKey = (holdings, cur) => cur + "|" + (holdings || []).map((h) => `${h.ticker}:${h.shares}:${h.buyPrice}:${h.buyDate || ""}`).join(",");
 
-async function loadDailySeries(holdings, cur) {
+async function loadDailySeries(holdings, cur, benchSymbol) {
   const key = holdingsKey(holdings, cur);
-  if (histCache.key === key && Date.now() - histCache.at < 10 * 60000 && histCache.portfolio) return histCache;
+  const fresh = histCache.key === key && Date.now() - histCache.at < 10 * 60000 && histCache.portfolio;
+  const needBench = !(histCache.bench[benchSymbol] && Date.now() - histCache.bench[benchSymbol].at < 10 * 60000);
   const body = {
     display: cur, range: "1y",
     holdings: (holdings || []).map((h) => ({
@@ -1429,16 +1484,21 @@ async function loadDailySeries(holdings, cur) {
     })),
   };
   const [pf, bm] = await Promise.all([
-    supabase.functions.invoke("portfolio-history", { body }),
-    supabase.functions.invoke("get-history", { body: { symbol: BENCH.symbol, currency: "USD", range: "1y" } }),
+    fresh ? Promise.resolve(null) : supabase.functions.invoke("portfolio-history", { body }),
+    needBench ? supabase.functions.invoke("get-history", { body: { symbol: benchSymbol, currency: "USD", range: "1y" } }) : Promise.resolve(null),
   ]);
-  const portfolio = (!pf.error && pf.data && pf.data.ok && Array.isArray(pf.data.points)) ? pf.data.points : null;
-  const bench = (!bm.error && bm.data && bm.data.ok && Array.isArray(bm.data.points)) ? bm.data.points : null;
-  Object.assign(histCache, { key, portfolio, bench, at: Date.now() });
-  return histCache;
+  if (pf) {
+    const portfolio = (!pf.error && pf.data && pf.data.ok && Array.isArray(pf.data.points)) ? pf.data.points : null;
+    Object.assign(histCache, { key, portfolio, at: Date.now() });
+  }
+  if (bm) {
+    const pts = (!bm.error && bm.data && bm.data.ok && Array.isArray(bm.data.points)) ? bm.data.points : null;
+    histCache.bench[benchSymbol] = { pts, at: Date.now() };
+  }
+  return { portfolio: histCache.portfolio, bench: (histCache.bench[benchSymbol] || {}).pts || null };
 }
 
-function PeriodReturns({ active, cur, liveValue, liveCost }) {
+function PeriodReturns({ active, cur, liveValue, liveCost, bench: BENCH, onBench }) {
   const [rows, setRows] = useState(null); // [{label, mine, bench}]
   const [state, setState] = useState("loading");
   const key = holdingsKey(active.holdings, cur);
@@ -1447,7 +1507,7 @@ function PeriodReturns({ active, cur, liveValue, liveCost }) {
     (async () => {
       setState("loading");
       try {
-        const { portfolio, bench } = await loadDailySeries(active.holdings, cur);
+        const { portfolio, bench } = await loadDailySeries(active.holdings, cur, BENCH.symbol);
         if (dead) return;
         if (!portfolio || !portfolio.length) { setState("none"); return; }
         const series = [...portfolio, { t: new Date().toISOString(), value: liveValue, cost: liveCost }];
@@ -1479,13 +1539,13 @@ function PeriodReturns({ active, cur, liveValue, liveCost }) {
       } catch (e) { if (!dead) setState("none"); }
     })();
     return () => { dead = true; };
-  }, [key, Math.round(liveValue)]);
+  }, [key, Math.round(liveValue), BENCH.symbol]);
 
   return (
     <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-100">
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-3 gap-2">
         <h3 className="font-bold text-slate-700">Performance</h3>
-        <span className="text-[11px] text-slate-400">vs {BENCH.label}</span>
+        <BenchPicker value={BENCH} onChange={onBench} />
       </div>
       {state === "loading" ? (
         <p className="text-sm text-slate-400 flex items-center gap-2"><RefreshCw size={13} className="animate-spin" /> Working out your returns…</p>
@@ -1502,15 +1562,15 @@ function PeriodReturns({ active, cur, liveValue, liveCost }) {
                 <div className="text-[10px] font-semibold text-slate-400">{r.label}</div>
                 <div className={`font-bold text-sm mt-0.5 ${!has ? "text-slate-300" : up ? "text-emerald-600" : "text-rose-500"}`}>{has ? pct(r.mine) : "—"}</div>
                 <div className={`text-[10px] font-semibold mt-0.5 ${beat == null ? "text-slate-300" : beat >= 0 ? "text-emerald-500" : "text-slate-400"}`}
-                  title={r.bench != null ? `${BENCH.label}: ${pct(r.bench)}` : ""}>
-                  {beat == null ? "" : `${beat >= 0 ? "+" : "−"}${Math.abs(beat).toFixed(1)} vs S&P`}
+                  title={r.bench != null ? `${BENCH.label}: ${pct(r.bench)}` : `No data for ${BENCH.symbol}`}>
+                  {beat == null ? "" : `${beat >= 0 ? "+" : "−"}${Math.abs(beat).toFixed(1)} vs ${BENCH.short}`}
                 </div>
               </div>
             );
           })}
         </div>
       )}
-      <p className="text-[10px] text-slate-300 mt-2">Returns exclude money you added or withdrew during the period. S&P 500 via SPY in USD.</p>
+      <p className="text-[10px] text-slate-300 mt-2">Returns exclude money you added or withdrew during the period. {BENCH.label} via {BENCH.symbol} in its own currency; “no data” means the price source doesn't know that ticker.</p>
     </div>
   );
 }
@@ -3800,7 +3860,7 @@ const PH_RANGES = [
   { id: "1y",  label: "1Y",  sub: "Past year" },
 ];
 
-function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCost, hex }) {
+function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCost, hex, bench: BENCH = DEFAULT_BENCH, onBench }) {
   const [range, setRange] = useState("1d");
   const [pts, setPts] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -3823,7 +3883,7 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
       } catch (e) { if (!dead) setBench(null); }
     })();
     return () => { dead = true; };
-  }, [open, compare, range]);
+  }, [open, compare, range, BENCH.symbol]);
 
   useEffect(() => {
     if (!open) return;
@@ -3970,16 +4030,21 @@ function PortfolioHistorySheet({ open, onClose, holdings, cur, liveValue, liveCo
               </button>
             ))}
           </div>
-          <button onClick={() => setCompare((v) => !v)}
-            className={`mt-2 w-full flex items-center justify-between text-xs font-semibold px-3 py-2 rounded-xl border transition ${
+          <div className={`mt-2 w-full flex items-center justify-between gap-2 text-xs font-semibold px-3 py-2 rounded-xl border transition ${
               compare ? "bg-slate-800 text-white border-slate-800" : "bg-white text-slate-600 border-slate-200"}`}>
-            <span>Compare with {BENCH.label}</span>
-            <span className={compare ? "text-slate-300" : "text-slate-400"}>
+            <button onClick={() => setCompare((v) => !v)} className="flex items-center gap-2">
+              <span className={`w-9 h-5 rounded-full p-0.5 ${compare ? "bg-emerald-500" : "bg-slate-200"}`}>
+                <span className={`block w-4 h-4 bg-white rounded-full shadow transform transition ${compare ? "translate-x-4" : ""}`} />
+              </span>
+              Compare
+            </button>
+            {onBench && <BenchPicker value={BENCH} onChange={onBench} dark={compare} />}
+            <span className={`ml-auto ${compare ? "text-slate-300" : "text-slate-400"}`}>
               {compare
-                ? (benchPct == null ? (bench === null ? "loading…" : "no data") : `S&P ${benchPct > 0 ? "+" : ""}${benchPct}% · you ${diffPct > 0 ? "+" : ""}${diffPct.toFixed(2)}%`)
-                : "off"}
+                ? (benchPct == null ? (bench === null ? "loading…" : "no data") : `${BENCH.short} ${benchPct > 0 ? "+" : ""}${benchPct}% · you ${diffPct > 0 ? "+" : ""}${diffPct.toFixed(2)}%`)
+                : ""}
             </span>
-          </button>
+          </div>
 
           <p className="text-[10px] text-slate-300 mt-3">
             Reconstructed from official daily closes and intraday bars, converted at historical FX.
