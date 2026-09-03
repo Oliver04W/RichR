@@ -15,9 +15,9 @@ import { ResearchTab } from "./features/research.jsx";
 import { SENT_CACHE, ScopeSummary, activeCalls, castVote, fetchSentiment, latestCalls, removeVote, sentimentBus, tallyAfterVote } from "./features/sentiment.jsx";
 import { SOCIAL_ME } from "./features/social.jsx";
 import { DEFAULT_FX, daysOld, fmtDate, fxConvert, money, moneyShort, pct, pctOf, round6, uid, withTimeout } from "./lib/format.js";
-import { SAMPLE, addHoldingShares, computeScore, cutSeries, editHolding, exchangeOf, holdingValue, holdingsKey, idxOnOrBefore, isFund, periodReturn, portfolioTotals, publishBoard, removeHoldings, seed, setHoldingShares } from "./lib/portfolio.js";
-import { dataKey, loadCloud, loadLocal, saveCloud, saveLocal, watchTicker } from "./lib/storage.js";
-import { ConfirmDialog, Stepper } from "./ui/primitives.jsx";
+import { SAMPLE, addHoldingShares, applyPriceRow, removePortfolio, computeScore, cutSeries, editHolding, exchangeOf, holdingValue, holdingsKey, idxOnOrBefore, isFund, periodReturn, portfolioTotals, publishBoard, removeHoldings, seed, setHoldingShares } from "./lib/portfolio.js";
+import { commitDoc, dataKey, loadCloud, loadLocal, queueCloudSave, saveCloud, saveCloudDoc, saveLocal, watchTicker } from "./lib/storage.js";
+import { AsyncConfirm, ConfirmDialog, Stepper } from "./ui/primitives.jsx";
 
 export { PublicProfile } from "./features/profile.jsx";
 
@@ -153,6 +153,9 @@ export default function RichR({ user, onSignOut }) {
 
   const storageKey = dataKey(user.id);
   const cloudOk = useRef(false);
+  const offlineSeed = useRef(false);   // started from an empty seed because the cloud was unreachable
+  const dataRef = useRef(null);        // latest doc, for code that must not use a stale closure
+  dataRef.current = data;
 
   /* ---- initial load: newest of cloud vs. local cache wins ---- */
   useEffect(() => {
@@ -162,8 +165,11 @@ export default function RichR({ user, onSignOut }) {
       const cloud = await loadCloud(user.id);
       let d;
       if (cloud === undefined) {
-        // offline / cloud unreachable — run on the local cache for now
+        // offline / cloud unreachable — run on the local cache for now.
+        // With no local copy either we start from a seed, but that seed must
+        // never be written over a cloud document we simply couldn't reach.
         d = local || seed();
+        offlineSeed.current = !local;
         cloudOk.current = false;
       } else if (cloud === null) {
         // first cloud-era login on this account: migrate whatever this
@@ -197,13 +203,33 @@ export default function RichR({ user, onSignOut }) {
     saveLocal(storageKey, stamped);
     pendingRef.current = stamped;
     if (cloudTimer.current) clearTimeout(cloudTimer.current);
-    cloudTimer.current = setTimeout(async () => {
+    cloudTimer.current = setTimeout(() => {
+      if (offlineSeed.current) return;                     // see initial load
       pendingRef.current = null;
-      const ok = await saveCloud(user.id, stamped);
-      if (ok) cloudOk.current = true;
+      queueCloudSave(user.id, stamped, (r) => {
+        if (r.ok) cloudOk.current = true;
+        if (r.ok && r.stale) {
+          // Another device/tab saved a newer document: adopt it rather than fight it.
+          loadCloud(user.id).then((cloud) => { if (cloud && typeof cloud === "object") { loaded.current = false; setData(cloud); saveLocal(storageKey, cloud); setTimeout(() => { loaded.current = true; }, 0); } });
+        }
+      });
     }, 1200);
     return () => { if (cloudTimer.current) clearTimeout(cloudTimer.current); };
   }, [data, storageKey]);
+  /* Reconnect: while we run on an offline seed, keep trying to reach the cloud.
+     If a document exists there, it wins over the seed (unless edits were made). */
+  useEffect(() => {
+    if (!data || !offlineSeed.current) return;
+    const id = setInterval(async () => {
+      const cloud = await loadCloud(user.id);
+      if (cloud === undefined) return;
+      offlineSeed.current = false; cloudOk.current = true;
+      const edited = (dataRef.current && dataRef.current.portfolios || []).some((p) => (p.holdings || []).length || (p.closed || []).length);
+      if (cloud && !edited) { loaded.current = false; setData(cloud); saveLocal(storageKey, cloud); setTimeout(() => { loaded.current = true; }, 0); }
+      clearInterval(id);
+    }, 10000);
+    return () => clearInterval(id);
+  }, [!!data]);
 
   /* If the tab is hidden or closed while a save is still pending, flush it
      right away (keepalive so the request survives navigation). Otherwise a
@@ -233,7 +259,7 @@ export default function RichR({ user, onSignOut }) {
     const onVis = () => { if (document.visibilityState === "hidden") flush(); };
     document.addEventListener("visibilitychange", onVis);
     window.addEventListener("pagehide", flush);
-    return () => { document.removeEventListener("visibilitychange", onVis); window.removeEventListener("pagehide", flush); };
+    return () => { document.removeEventListener("visibilitychange", onVis); window.removeEventListener("pagehide", flush); flush(); /* sign-out / unmount */ };
   }, [user.id]);
 
   // pull my claimed username from Supabase so it survives devices
@@ -345,18 +371,16 @@ export default function RichR({ user, onSignOut }) {
       let hit = 0;
       // newest server-side update among the rows we actually use
       let priceDataAt = 0;
-      const updated = active.holdings.map((h) => {
-        const row = priceMap[h.ticker.toUpperCase()];
-        if (row && Number(row.price) > 0) {
-          hit++;
-          const at = row.updated_at ? new Date(row.updated_at).getTime() : 0;
-          if (at > priceDataAt) priceDataAt = at;
-          const pCur = row.currency && newFx.rates[String(row.currency).toUpperCase()]
-            ? String(row.currency).toUpperCase() : h.currency;
-          return { ...h, currentPrice: Number(row.price), currency: pCur || h.currency || cur };
-        }
-        return h;
+      /* Apply a price row to one holding. Used inside setData on whatever the
+         holdings are NOW — the list captured when this refresh started may be
+         seconds old, and replacing it wholesale used to resurrect holdings
+         deleted (or undo edits made) while the request was in flight. */
+      const applyPrice = (h) => applyPriceRow(h, priceMap, newFx.rates, cur);
+      active.holdings.forEach((h) => {
+        const row = priceMap[String(h.ticker || "").toUpperCase()];
+        if (row && Number(row.price) > 0) { hit++; const at = row.updated_at ? new Date(row.updated_at).getTime() : 0; if (at > priceDataAt) priceDataAt = at; }
       });
+      const updated = active.holdings.map(applyPrice);   // for the snapshot below only
 
       // snapshot in display currency using the fresh rates
       let value = 0, cost = 0;
@@ -380,7 +404,7 @@ export default function RichR({ user, onSignOut }) {
         snaps[active.id] = arr.slice(-40);
         return {
           ...d, snapshots: snaps, fx: newFx, pricesAt: Date.now(), priceDataAt: priceDataAt || d.priceDataAt || 0,
-          portfolios: d.portfolios.map((p) => (p.id === active.id ? { ...p, holdings: updated } : p)),
+          portfolios: d.portfolios.map((p) => (p.id === active.id ? { ...p, holdings: (p.holdings || []).map(applyPrice) } : p)),
           watchlist: (d.watchlist || []).map((w) => {
             const row = priceMap[String(w.ticker || "").toUpperCase()];
             if (row && Number(row.price) > 0) {
@@ -441,13 +465,24 @@ export default function RichR({ user, onSignOut }) {
       activeId: id,
     }));
   };
-  const deletePortfolio = () => {
-    if (data.portfolios.length <= 1) return;
-    setData((d) => {
-      const rest = d.portfolios.filter((p) => p.id !== d.activeId);
-      return { ...d, portfolios: rest, activeId: rest[0].id };
-    });
+  /* Deletions are committed to the cloud document FIRST and only applied to
+     the UI once the server has confirmed the write — so "deleted" is never a
+     lie, and a refresh / another device can't bring the item back. `reduce`
+     must be idempotent: it runs on the doc we send and again on live state. */
+  const commit = async (reduce) => {
+    let next;
+    try { ({ next } = await commitDoc({ userId: user.id, base: dataRef.current, reduce })); }
+    catch (e) { if (e && e.cloud) { setData(e.cloud); saveLocal(storageKey, e.cloud); } throw e; }
+    cloudOk.current = true; offlineSeed.current = false;
+    setData((d) => ({ ...reduce(d), _ts: next._ts }));
+    saveLocal(storageKey, next);
+    return true;
   };
+  const removeHoldingNow = (id) => commit((d) => ({ ...d, portfolios: d.portfolios.map((p) => (p.id === d.activeId ? { ...p, holdings: removeHoldings(p.holdings, id) } : p)) }));
+  const removeManyNow = (ids) => commit((d) => ({ ...d, portfolios: d.portfolios.map((p) => (p.id === d.activeId ? { ...p, holdings: removeHoldings(p.holdings, ids) } : p)) }));
+  /* Delete the active portfolio and everything in it. Deleting the last one
+     leaves a fresh, empty portfolio so the app always has somewhere to land. */
+  const deletePortfolio = () => { const freshId = uid(); return commit((d) => removePortfolio(d, d.activeId, () => freshId)); };
   const upsertHolding = (h) => {
     watchTicker(h.ticker);
     patchActive((p) => ({
@@ -456,8 +491,6 @@ export default function RichR({ user, onSignOut }) {
         : [...p.holdings, h],
     }));
   };
-  const removeHolding = (id) => patchActive((p) => ({ holdings: removeHoldings(p.holdings, id) }));
-  const removeMany = (ids) => patchActive((p) => ({ holdings: removeHoldings(p.holdings, ids) }));
   const editFields = (id, fields) => patchActive((p) => ({ holdings: editHolding(p.holdings, id, fields) }));
   const setShares = (id, n) => patchActive((p) => ({ holdings: setHoldingShares(p.holdings, id, n) }));
   const addShares = (id, n, price) => patchActive((p) => ({ holdings: addHoldingShares(p.holdings, id, n, price) }));
@@ -640,8 +673,8 @@ export default function RichR({ user, onSignOut }) {
         {tab === "portfolio" && sub === "holdings" && (
           <PositionsTab active={active} cur={cur} fx={data.fx || DEFAULT_FX}
             companyInfo={data.companyInfo || {}} onSaveInfo={saveCompanyInfo}
-            onUpsert={upsertHolding} onRemove={removeHolding} onSetPrice={setPrice} onLoadSample={loadSample} onClosePosition={closePosition}
-            onEditFields={editFields} onSetShares={setShares} onAddShares={addShares} onRemoveMany={removeMany} onSell={sellShares} say={say}
+            onUpsert={upsertHolding} onRemove={removeHoldingNow} onSetPrice={setPrice} onLoadSample={loadSample} onClosePosition={closePosition}
+            onEditFields={editFields} onSetShares={setShares} onAddShares={addShares} onRemoveMany={removeManyNow} onSell={sellShares} say={say}
             watchlist={data.watchlist || []} onRemoveWatch={removeWatch} onSetWatchPrice={setWatchPrice}
             goResearch={() => setTab("research")}
             openImport={importOnce} onImportOpened={() => setImportOnce(false)} />
@@ -736,6 +769,6 @@ export default function RichR({ user, onSignOut }) {
 
 /* Pure helpers exposed for unit tests only (see src/*.test.js). */
 export const __helpers = { pct, money, moneyShort, fxConvert, parseHoldingsCsv, latestCalls, activeCalls, tallyAfterVote, castVote, removeVote, fetchSentiment, SENT_CACHE, sentimentBus, SOCIAL_ME,
-  editHolding, removeHoldings, setHoldingShares, addHoldingShares, portfolioTotals, holdingValue, round6,
+  editHolding, removeHoldings, setHoldingShares, addHoldingShares, portfolioTotals, holdingValue, round6, removePortfolio, applyPriceRow, commitDoc, saveCloudDoc, queueCloudSave, AsyncConfirm, PositionsTab,
   QuickEditSheet, SharesSheet, ConfirmDialog, EditPortfolio, Stepper,
   VIS_META, visOf, isDiscoverable, canSelfJoin, parseTopics, communityMatches, inviteUrl, CommunityCard, NewGroupModal, TopicInput, InviteSheet, ScopeSummary, cutSeries, exchangeOf, isFund, pctOf, daysOld, withTimeout, periodReturn, idxOnOrBefore, computeScore };
