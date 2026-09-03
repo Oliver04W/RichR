@@ -37,14 +37,69 @@ export async function loadCloud(userId) {
   } catch (e) { return undefined; }
 }
 
-export async function saveCloud(userId, d) {
+/* Save the document. Goes through save_user_data (stale-write guard: the
+   server refuses a doc older than the one it holds) and falls back to a plain
+   upsert on databases without the RPC. Resolves to
+     { ok: true }                       saved
+     { ok: true, stale: true, ts }      the server already had a NEWER doc — reload it
+     { ok: false }                      network / auth failure (nothing changed) */
+export async function saveCloudDoc(userId, d) {
   try {
-    const { error } = await supabase.from("user_data").upsert(
+    const { data, error } = await supabase.rpc("save_user_data", { doc: d });
+    if (!error && data && typeof data === "object") {
+      return data.applied ? { ok: true } : { ok: true, stale: true, ts: Number(data.stored_ts) || 0 };
+    }
+    if (error && !/save_user_data|function|404/i.test(String(error.message || error.code || ""))) return { ok: false };
+    const up = await supabase.from("user_data").upsert(
       { user_id: userId, data: d, updated_at: new Date().toISOString() },
       { onConflict: "user_id" },
     );
-    return !error;
-  } catch (e) { return false; }
+    return { ok: !up.error };
+  } catch (e) { return { ok: false }; }
+}
+export async function saveCloud(userId, d) { const r = await saveCloudDoc(userId, d); return r.ok && !r.stale; }
+
+/* One save in flight at a time, always sending the NEWEST document: two
+   overlapping requests can otherwise complete out of order. */
+const SAVE_Q = new Map(); // userId -> { running: Promise|null, next: doc|null }
+export function queueCloudSave(userId, d, onResult) {
+  const q = SAVE_Q.get(userId) || { running: null, next: null };
+  SAVE_Q.set(userId, q);
+  q.next = d;
+  if (q.running) return q.running;
+  const run = async () => {
+    let last = { ok: false };
+    while (q.next) {
+      const doc = q.next; q.next = null;
+      last = await saveCloudDoc(userId, doc);
+      if (onResult) onResult(last, doc);
+    }
+    q.running = null;
+    return last;
+  };
+  q.running = run();
+  return q.running;
+}
+
+/* Commit a change that must not be lost (deletions): write the reduced
+   document to the cloud FIRST; the caller applies `reduce` to live state only
+   after the server said yes. Throws a user-readable Error otherwise.
+     resolves { next }                         saved; apply reduce() to state
+     throws   Error("Couldn't reach …")        network/auth failure, nothing changed
+     throws   Error("…another device…") + .cloud   server had a newer doc: reload it, retry */
+export async function commitDoc({ userId, base, reduce, timeoutMs = 12000 }) {
+  if (!base) throw new Error("Not loaded yet.");
+  const next = { ...reduce(base), _ts: Date.now() };
+  const timeout = new Promise((res) => setTimeout(() => res({ ok: false }), timeoutMs));
+  const r = await Promise.race([saveCloudDoc(userId, next), timeout]);
+  if (!r.ok) throw new Error("Couldn't reach RichR — check your connection and try again.");
+  if (r.stale) {
+    const cloud = await loadCloud(userId);
+    const err = new Error("Your portfolio changed on another device — please try again.");
+    err.cloud = cloud && typeof cloud === "object" ? cloud : null;
+    throw err;
+  }
+  return { next };
 }
 
 /* ---------- price pipeline ---------- */

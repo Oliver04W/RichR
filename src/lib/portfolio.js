@@ -88,6 +88,24 @@ export const addHoldingShares = (holdings, id, delta, price = null) => {
   return editHolding(holdings, id, { shares: total, buyPrice: (s0 * Number(h.buyPrice) + d * Number(price)) / total });
 };
 
+/* Delete a portfolio (and its per-portfolio caches). Deleting the last one
+   leaves a fresh, empty portfolio so the app always has somewhere to land.
+   Other portfolios are never touched. */
+export const removePortfolio = (d, id, freshId = () => Math.random().toString(36).slice(2, 10)) => {
+  const rest = (d.portfolios || []).filter((p) => p.id !== id);
+  const drop = (obj) => { const o = { ...(obj || {}) }; delete o[id]; return o; };
+  const out = { ...d, snapshots: drop(d.snapshots), analysis: drop(d.analysis), news: drop(d.news) };
+  if (rest.length) return { ...out, portfolios: rest, activeId: rest.some((p) => p.id === d.activeId) ? d.activeId : rest[0].id };
+  const fresh = { id: freshId(), name: "My Portfolio", holdings: [], closed: [] };
+  return { ...out, portfolios: [fresh], activeId: fresh.id };
+};
+/* Apply a fetched price row to ONE holding (never rebuilds the list). */
+export const applyPriceRow = (h, priceMap, rates, cur) => {
+  const row = priceMap[String(h.ticker || "").toUpperCase()];
+  if (!row || !(Number(row.price) > 0)) return h;
+  const pCur = row.currency && rates[String(row.currency).toUpperCase()] ? String(row.currency).toUpperCase() : h.currency;
+  return { ...h, currentPrice: Number(row.price), currency: pCur || h.currency || cur };
+};
 /* Value, cost and return of a holdings array in the display currency. */
 export const portfolioTotals = (holdings, cur, fx) => {
   let value = 0, cost = 0;
