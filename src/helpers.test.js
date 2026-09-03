@@ -116,3 +116,61 @@ describe("withTimeout", () => {
     expect(await h.withTimeout(Promise.resolve(7), 50, 0)).toBe(7);
   });
 });
+
+describe("unvote — removing / changing a Buy · Hold · Sell vote", () => {
+  const me = "me";
+  const base = () => ({ buy: 6, hold: 3, sell: 1, total: 10, mine: { vote: "buy", reason: "AI demand", created_at: new Date().toISOString() },
+    reasons: [{ user_id: me, vote: "buy", reason: "AI demand" }, { user_id: "x", vote: "sell", reason: "pricey" }] });
+  const pcts = (s) => [h.pctOf(s.buy, s.total), h.pctOf(s.hold, s.total), h.pctOf(s.sell, s.total)];
+
+  it("vote → unvote removes only my vote and recalculates total and percentages", () => {
+    const s = h.tallyAfterVote(base(), "buy", null, { userId: me });
+    expect([s.buy, s.hold, s.sell, s.total]).toEqual([5, 3, 1, 9]);
+    expect(s.mine).toBeNull();
+    expect(pcts(s)).toEqual([56, 33, 11]);
+    expect(s.reasons.map((r) => r.user_id)).toEqual(["x"]);   // my reason no longer shown
+  });
+  it("vote → change vote moves one vote between buckets, total unchanged", () => {
+    const s = h.tallyAfterVote(base(), "buy", "sell", { userId: me, reason: "too hot" });
+    expect([s.buy, s.hold, s.sell, s.total]).toEqual([5, 3, 2, 10]);
+    expect(s.mine.vote).toBe("sell");
+    expect(s.reasons[0]).toMatchObject({ user_id: me, vote: "sell", reason: "too hot" });
+    expect(pcts(s)).toEqual([50, 30, 20]);
+  });
+  it("unvote → vote again restores the original tally", () => {
+    const gone = h.tallyAfterVote(base(), "buy", null, { userId: me });
+    const back = h.tallyAfterVote(gone, null, "buy", { userId: me });
+    expect([back.buy, back.hold, back.sell, back.total]).toEqual([6, 3, 1, 10]);
+    expect(back.mine.vote).toBe("buy");
+  });
+  it("repeated rapid taps: the last tap wins and counts never drift or go negative", () => {
+    let s = base(); let prev = "buy";
+    for (const next of ["hold", null, "sell", null, "buy", null, "hold"]) { s = h.tallyAfterVote(s, prev, next, { userId: me }); prev = next; }
+    expect([s.buy, s.hold, s.sell, s.total]).toEqual([5, 4, 1, 10]);
+    expect(s.mine.vote).toBe("hold");
+    let z = { buy: 0, hold: 0, sell: 0, total: 0, mine: null };
+    z = h.tallyAfterVote(z, null, null); z = h.tallyAfterVote(z, "buy", null);   // stale/unknown prev never counted below zero
+    expect([z.buy, z.total]).toEqual([0, 0]);
+  });
+  it("a stale (uncounted) vote being removed leaves the tally untouched", () => {
+    const s = h.tallyAfterVote(base(), null, null, { userId: me });
+    expect([s.buy, s.total, s.mine]).toEqual([6, 10, null]);
+  });
+  it("one user, one vote: a removal row hides the user from every call list", () => {
+    const rows = [
+      { user_id: "a", ticker: "NVDA", vote: "none", created_at: "2026-09-03" },
+      { user_id: "a", ticker: "NVDA", vote: "buy", created_at: "2026-09-01" },
+      { user_id: "b", ticker: "NVDA", vote: "sell", created_at: "2026-09-02" },
+      { user_id: "a", ticker: "AAPL", vote: "hold", created_at: "2026-08-30" },
+    ];
+    expect(h.activeCalls(rows).map((r) => `${r.user_id}:${r.ticker}:${r.vote}`)).toEqual(["b:NVDA:sell", "a:AAPL:hold"]);
+    expect(h.activeCalls(rows, (r) => r.user_id).map((r) => r.user_id)).toEqual(["b"]);
+    const again = [{ user_id: "a", ticker: "NVDA", vote: "hold", created_at: "2026-09-04" }, ...rows];
+    expect(h.activeCalls(again, (r) => r.user_id).map((r) => `${r.user_id}:${r.vote}`)).toEqual(["a:hold", "b:sell"]);
+  });
+  it("percentages stay hidden below the minimum sample after an unvote", () => {
+    const s = h.tallyAfterVote({ buy: 3, hold: 1, sell: 1, total: 5, mine: { vote: "buy", created_at: new Date().toISOString() } }, "buy", null);
+    expect(s.total).toBe(4);
+    expect(h.pctOf(s.buy, s.total)).toBe(50);
+  });
+});

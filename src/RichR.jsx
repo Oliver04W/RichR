@@ -6388,6 +6388,8 @@ const latestCalls = (rows, by = (r) => `${r.user_id}|${r.ticker}`) => {
   for (const r of rows || []) { const k = by(r); if (seen.has(k)) continue; seen.add(k); out.push(r); }
   return out;
 };
+/* Same, minus users whose latest row is a removal (vote = 'none'). */
+const activeCalls = (rows, by) => latestCalls(rows, by).filter((r) => r.vote !== "none");
 
 /* Return of a stock since a call was made, from the shared prices table. */
 function useReturnsSince(calls) {
@@ -6442,7 +6444,9 @@ function SentimentBar({ counts, total, compact = false }) {
 const MIN_SAMPLE = 5;               // below this, show counts, not percentages
 const STALE_DAYS = 30;
 const SENT_CACHE = new Map();       // `${ticker}|${scope}|${gid}` -> { at, data }
-const sentimentBus = { subs: new Set(), emit(t) { this.subs.forEach((f) => f(t)); } };
+/* emit(ticker, "optimistic") → read the (already updated) cache, no network;
+   emit(ticker, "settled")    → the server has the row(s); refetch. */
+const sentimentBus = { subs: new Set(), emit(t, phase = "settled") { this.subs.forEach((f) => f(t, phase)); } };
 
 async function fetchSentiment(ticker, scope = "everyone", gid = null, force = false) {
   const key = `${ticker}|${scope}|${gid || ""}`;
@@ -6462,19 +6466,69 @@ function useSentiment(ticker, scope = "everyone", gid = null) {
   };
   useEffect(() => { setS(null); load(false); }, [ticker, scope, gid]);
   useEffect(() => {
-    const f = (t) => { if (t === ticker) load(true); };
+    const f = (t, phase) => {
+      if (t !== ticker) return;
+      if (phase === "optimistic") { const hit = SENT_CACHE.get(`${ticker}|${scope}|${gid || ""}`); if (hit) setS(hit.data); return; }
+      load(true);
+    };
     sentimentBus.subs.add(f); return () => sentimentBus.subs.delete(f);
   }, [ticker, scope, gid]);
   return [s, err, () => load(true)];
 }
-/* Cast (or change / re-affirm) your vote. One row per change; newest wins. */
+/* Pure: one user's current vote moves prev → next (null = no vote) inside a
+   sentiment_for tally. Only the counted vote is moved (a stale prev is null),
+   so unvote → vote → unvote always lands back where it started. */
+const tallyAfterVote = (s, prev, next, { reason = null, userId = null, now = new Date().toISOString() } = {}) => {
+  if (!s) return s;
+  const out = { ...s };
+  const n = (k) => Number(out[k] || 0);
+  if (prev !== next) {
+    if (prev) out[prev] = Math.max(0, n(prev) - 1);
+    if (next) out[next] = n(next) + 1;
+    out.total = n("buy") + n("hold") + n("sell");
+  }
+  out.mine = next ? { vote: next, reason: reason || null, created_at: now } : null;
+  if (Array.isArray(out.reasons)) {
+    out.reasons = out.reasons.filter((r) => !userId || r.user_id !== userId);
+    if (next && reason && userId) out.reasons = [{ user_id: userId, vote: next, reason, created_at: now }, ...out.reasons];
+  }
+  return out;
+};
+/* Rapid taps on one asset are written in order and the tally is refetched
+   once, after the last one — the final tap always wins. */
+const VOTE_CHAIN = new Map();       // ticker -> { p: Promise, n: pending count }
+/* Cast, change, re-affirm ("buy" | "hold" | "sell") or remove ("none") your
+   vote. Append-only: one row per change, newest wins; 'none' drops you from
+   every tally. The UI updates instantly from the cache, the server confirms. */
 async function castVote(ticker, vote, { reason = null, price = null, currency = null, reaffirmed = false } = {}) {
-  const row = { user_id: SOCIAL_ME.id, ticker: String(ticker).toUpperCase(), vote, reason: reason ? String(reason).slice(0, 140) : null,
-    price_at: Number(price) > 0 ? Number(price) : null, currency: currency || null, reaffirmed };
-  const { error } = await supabase.from("stock_calls").insert(row);
-  if (!error) { for (const k of [...SENT_CACHE.keys()]) if (k.startsWith(row.ticker + "|")) SENT_CACHE.delete(k); FEED_CACHE.at = 0; sentimentBus.emit(row.ticker); }
-  return !error;
+  const tk = String(ticker).toUpperCase();
+  const next = vote === "none" ? null : vote;
+  const row = { user_id: SOCIAL_ME.id, ticker: tk, vote, reason: next && reason ? String(reason).slice(0, 140) : null,
+    price_at: next && Number(price) > 0 ? Number(price) : null, currency: next ? currency || null : null, reaffirmed: !!next && reaffirmed };
+  /* optimistic: every cached scope for this asset */
+  for (const [k, hit] of [...SENT_CACHE.entries()]) {
+    if (!k.startsWith(tk + "|") || !hit.data) continue;
+    const m = hit.data.mine;
+    const prev = m && m.vote !== "none" && daysOld(m.created_at) < STALE_DAYS ? m.vote : null;
+    SENT_CACHE.set(k, { at: Date.now(), data: tallyAfterVote(hit.data, prev, next, { reason: row.reason, userId: SOCIAL_ME.id }) });
+  }
+  sentimentBus.emit(tk, "optimistic");
+  /* serialised write */
+  const chain = VOTE_CHAIN.get(tk) || { p: Promise.resolve(), n: 0 };
+  chain.n += 1;
+  const run = chain.p.then(async () => { const { error } = await supabase.from("stock_calls").insert(row); return !error; });
+  chain.p = run.catch(() => false);
+  VOTE_CHAIN.set(tk, chain);
+  const ok = await run.catch(() => false);
+  chain.n -= 1;
+  if (chain.n === 0) {
+    for (const k of [...SENT_CACHE.keys()]) if (k.startsWith(tk + "|")) SENT_CACHE.delete(k);
+    FEED_CACHE.at = 0;
+    sentimentBus.emit(tk, "settled");
+  }
+  return ok;
 }
+const removeVote = (ticker) => castVote(ticker, "none");
 const pctOf = (n, total) => (total > 0 ? Math.round((n / total) * 100) : 0);
 const daysOld = (iso) => Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
 
@@ -6508,16 +6562,24 @@ function WeekDelta({ s, className = "" }) {
 }
 
 /* Vote buttons with the optional reason line. */
+/* Tap an option to vote, another to change, the selected one again (or
+   "Remove vote") to withdraw. Buttons never lock: the tally updates
+   instantly and taps are written in order. */
 function VoteButtons({ ticker, mine, price, currency, size = "md", onVoted }) {
   const [pending, setPending] = useState(null);
   const [reason, setReason] = useState("");
-  const [busy, setBusy] = useState(false);
-  const cur = mine ? mine.vote : null;
-  const go = async (v) => {
-    setBusy(true);
-    const ok = await castVote(ticker, v, { reason: reason.trim() || null, price, currency });
-    setBusy(false); setPending(null); setReason("");
-    if (ok && onVoted) onVoted(v);
+  const cur = mine && mine.vote !== "none" ? mine.vote : null;
+  const go = (v) => {
+    const r = reason.trim() || null;
+    setPending(null); setReason("");
+    castVote(ticker, v, { reason: r, price, currency }).then((ok) => { if (ok && onVoted) onVoted(v); });
+  };
+  const remove = () => { setPending(null); setReason(""); removeVote(ticker).then((ok) => { if (ok && onVoted) onVoted(null); }); };
+  const tap = (k) => {
+    if (pending === k) { setPending(null); setReason(""); return; }   // deselect the option you were about to confirm
+    if (!pending && cur === k) { remove(); return; }                 // tap your vote again → remove it
+    if (size === "sm") { go(k); return; }                             // compact: change straight away
+    setPending(k);                                                    // full size: ask for an optional reason
   };
   const h = size === "sm" ? "h-8 text-[12px]" : "h-10 text-sm";
   return (
@@ -6526,8 +6588,9 @@ function VoteButtons({ ticker, mine, price, currency, size = "md", onVoted }) {
         {VOTE_ORDER.map((k) => {
           const active = (pending || cur) === k;
           return (
-            <button key={k} disabled={busy} onClick={() => { if (size === "sm" && !pending) { go(k); return; } setPending(k); }}
-              className={`${h} rounded-xl font-bold border transition ${active ? VOTE_META[k].solid + " border-transparent" : "bg-white border-slate-200 text-slate-700 hover:border-slate-300"} disabled:opacity-60`}>
+            <button key={k} onClick={() => tap(k)} aria-pressed={active}
+              title={!pending && cur === k ? "Tap again to remove your vote" : undefined}
+              className={`${h} rounded-xl font-bold border transition ${active ? VOTE_META[k].solid + " border-transparent" : "bg-white border-slate-200 text-slate-700 hover:border-slate-300"}`}>
               {VOTE_META[k].dot} {VOTE_META[k].label}
             </button>
           );
@@ -6538,7 +6601,13 @@ function VoteButtons({ ticker, mine, price, currency, size = "md", onVoted }) {
           <input value={reason} onChange={(e) => setReason(e.target.value.slice(0, 140))} maxLength={140} autoFocus
             onKeyDown={(e) => { if (e.key === "Enter") go(pending); if (e.key === "Escape") setPending(null); }}
             placeholder="Why? (optional)" className="flex-1 min-w-0 border border-slate-200 rounded-xl px-3 h-10 text-sm bg-white outline-none focus:border-emerald-400" />
-          <button onClick={() => go(pending)} disabled={busy} className={`h-10 px-4 rounded-xl text-sm font-bold ${VOTE_META[pending].solid}`}>{cur ? "Update" : "Vote"}</button>
+          <button onClick={() => go(pending)} className={`h-10 px-4 rounded-xl text-sm font-bold ${VOTE_META[pending].solid}`}>{cur ? "Update" : "Vote"}</button>
+        </div>
+      )}
+      {cur && !pending && (
+        <div className={`flex items-center justify-between ${size === "sm" ? "mt-1 text-[10px]" : "mt-1.5 text-[11px]"} text-slate-400`}>
+          <span>Your vote: <b className={VOTE_META[cur].text}>{VOTE_META[cur].label}</b></span>
+          <button onClick={remove} className="font-semibold text-slate-500 hover:text-rose-600">Remove vote</button>
         </div>
       )}
     </div>
@@ -6620,6 +6689,7 @@ function SentimentCard({ ticker, name, price, currency, communities = null, onOp
         <div className="mt-3 bg-white border border-amber-200 rounded-xl px-3 py-2 text-[12px] text-slate-700 flex items-center gap-2 flex-wrap">
           <span className="flex-1 min-w-[10rem]">Your <b>{VOTE_META[mine.vote].label}</b> is {daysOld(mine.created_at)} days old and no longer counted. Still agree?</span>
           <button onClick={() => castVote(ticker, mine.vote, { reason: mine.reason, price, currency, reaffirmed: true })} className={`text-[11px] font-bold px-2.5 h-7 rounded-lg ${VOTE_META[mine.vote].solid}`}>Still {VOTE_META[mine.vote].label}</button>
+          <button onClick={() => removeVote(ticker)} className="text-[11px] font-semibold text-slate-500 px-1.5 h-7">Remove</button>
         </div>
       )}
 
@@ -6811,12 +6881,12 @@ function StockSocial({ ticker: rawTicker, name, price, currency, onOpenTicker })
       posters.length ? supabase.from("stock_calls").select("user_id, vote, created_at").eq("ticker", ticker).in("user_id", posters).order("created_at", { ascending: false }).limit(400) : Promise.resolve({ data: [] }),
     ]);
     setReactions(rs || []);
-    const pv = {}; latestCalls(cs || [], (r) => r.user_id).forEach((c) => { if (daysOld(c.created_at) < STALE_DAYS) pv[c.user_id] = c.vote; });
+    const pv = {}; activeCalls(cs || [], (r) => r.user_id).forEach((c) => { if (daysOld(c.created_at) < STALE_DAYS) pv[c.user_id] = c.vote; });
     setPosterVotes(pv);
     setPosts(list);
   };
   useEffect(() => { setPosts(null); load(); }, [ticker]);
-  useEffect(() => { const f = (t) => { if (t === ticker) load(); }; sentimentBus.subs.add(f); return () => sentimentBus.subs.delete(f); }, [ticker]);
+  useEffect(() => { const f = (t, phase) => { if (t === ticker && phase !== "optimistic") load(); }; sentimentBus.subs.add(f); return () => sentimentBus.subs.delete(f); }, [ticker]);
 
   const names = useNames((posts || []).map((p) => p.user_id));
   const uname = (id) => (id === me ? (SOCIAL_ME.username || names[id] || "you") : (names[id] || "…"));
@@ -6924,7 +6994,7 @@ function CallsList({ userId, calls: given = null, limit = 8, title = "CALLS", on
     let dead = false;
     withTimeout(supabase.from("stock_calls").select("id, ticker, vote, reason, price_at, currency, created_at").eq("user_id", userId)
       .order("created_at", { ascending: false }).limit(200))
-      .then(({ data }) => { if (!dead) setRows(latestCalls(data || [], (r) => r.ticker)); });
+      .then(({ data }) => { if (!dead) setRows(activeCalls(data || [], (r) => r.ticker)); });
     return () => { dead = true; };
   }, [userId, given]);
   const since = useReturnsSince(rows || []);
@@ -7015,7 +7085,7 @@ function HomeFeed({ user, onOpenTicker, goFriends, goCommunities, rankMove = nul
         if (dead) return;
         const notFriend = (x) => !who.includes(x.user_id);
         extra = [
-          ...latestCalls((gcs || []).filter((c) => !c.reaffirmed && notFriend(c))).map((c) => ({ t: "call", id: "gc" + c.id, user_id: c.user_id, ticker: c.ticker, created_at: c.created_at, c, global: true })),
+          ...activeCalls((gcs || []).filter((c) => !c.reaffirmed && notFriend(c))).map((c) => ({ t: "call", id: "gc" + c.id, user_id: c.user_id, ticker: c.ticker, created_at: c.created_at, c, global: true })),
           ...(gps || []).filter((p) => !p.parent_id && notFriend(p)).map((p) => ({ t: "post", id: "gp" + p.id, user_id: p.user_id, ticker: p.ticker, created_at: p.created_at, p, global: true })),
         ];
       }
@@ -7023,7 +7093,7 @@ function HomeFeed({ user, onOpenTicker, goFriends, goCommunities, rankMove = nul
         ...rankItems,
         ...extra,
         ...(ev || []).map((e) => ({ t: "event", id: "e" + e.id, user_id: e.user_id, ticker: e.ticker, created_at: e.created_at, e })),
-        ...latestCalls((cs || []).filter((c) => !c.reaffirmed)).map((c) => ({ t: "call", id: "c" + c.id, user_id: c.user_id, ticker: c.ticker, created_at: c.created_at, c })),
+        ...activeCalls((cs || []).filter((c) => !c.reaffirmed)).map((c) => ({ t: "call", id: "c" + c.id, user_id: c.user_id, ticker: c.ticker, created_at: c.created_at, c })),
         ...(ps || []).filter((p) => !p.parent_id).map((p) => ({ t: "post", id: "p" + p.id, user_id: p.user_id, ticker: p.ticker, created_at: p.created_at, p })),
         ...(gp || []).map((g) => ({ t: "group", id: "g" + g.id, user_id: g.user_id, ticker: (g.card && g.card.ticker) || (g.position && g.position.ticker) || (g.tickers && g.tickers[0]) || null, created_at: g.created_at, g })),
       ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
@@ -8057,7 +8127,7 @@ function CommunitySentiment({ members, names, user, onOpenTicker }) {
     if (!members.length) { setCalls([]); return; }
     supabase.from("stock_calls").select("id, user_id, ticker, vote, reason, created_at").in("user_id", members)
       .order("created_at", { ascending: false }).limit(600)
-      .then(({ data }) => { if (!dead) setCalls(latestCalls(data || []).filter((c) => daysOld(c.created_at) < STALE_DAYS)); });
+      .then(({ data }) => { if (!dead) setCalls(activeCalls(data || []).filter((c) => daysOld(c.created_at) < STALE_DAYS)); });
     return () => { dead = true; };
   }, [members.join(",")]);
   if (calls === null) return <div className="px-4 py-6"><Skeleton lines={4} /></div>;
@@ -8500,4 +8570,4 @@ export function PublicProfile({ username }) {
 }
 
 /* Pure helpers exposed for unit tests only (see src/*.test.js). */
-export const __helpers = { pct, money, moneyShort, fxConvert, parseHoldingsCsv, latestCalls, cutSeries, exchangeOf, isFund, pctOf, daysOld, withTimeout, periodReturn, idxOnOrBefore, computeScore };
+export const __helpers = { pct, money, moneyShort, fxConvert, parseHoldingsCsv, latestCalls, activeCalls, tallyAfterVote, castVote, removeVote, SENT_CACHE, sentimentBus, SOCIAL_ME, cutSeries, exchangeOf, isFund, pctOf, daysOld, withTimeout, periodReturn, idxOnOrBefore, computeScore };
