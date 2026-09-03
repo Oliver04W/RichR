@@ -12,8 +12,8 @@ import { parseHoldingsCsv } from "./features/import.jsx";
 import { InsightsTab } from "./features/insights.jsx";
 import { ProfileTab, TAB_LABEL } from "./features/profile.jsx";
 import { ResearchTab } from "./features/research.jsx";
-import { SENT_CACHE, ScopeSummary, activeCalls, castVote, fetchSentiment, latestCalls, removeVote, sentimentBus, tallyAfterVote } from "./features/sentiment.jsx";
-import { SOCIAL_ME } from "./features/social.jsx";
+import { DiscoverSentiment, OwnerBadge, QuickVote, QuickVoteRow, SENT_CACHE, ScopeSummary, activeCalls, castVote, fetchSentiment, latestCalls, removeVote, sentimentBus, tallyAfterVote } from "./features/sentiment.jsx";
+import { SOCIAL_ME, ownsTicker } from "./features/social.jsx";
 import { DEFAULT_FX, daysOld, fmtDate, fxConvert, money, moneyShort, pct, pctOf, round6, uid, withTimeout } from "./lib/format.js";
 import { SAMPLE, addHoldingShares, applyPriceRow, removePortfolio, computeScore, cutSeries, editHolding, exchangeOf, holdingValue, holdingsKey, idxOnOrBefore, isFund, periodReturn, portfolioTotals, publishBoard, removeHoldings, seed, setHoldingShares } from "./lib/portfolio.js";
 import { commitDoc, dataKey, loadCloud, loadLocal, queueCloudSave, saveCloud, saveCloudDoc, saveLocal, watchTicker } from "./lib/storage.js";
@@ -33,6 +33,7 @@ export default function RichR({ user, onSignOut }) {
   const openTicker = (t) => { setResearchQuery(String(t || "").toUpperCase()); setTab("research"); };
   // Social components (votes, discussions, feed) read the signed-in user from here.
   SOCIAL_ME.id = user.id; SOCIAL_ME.username = (data && data.username) || "";
+  SOCIAL_ME.holdings = new Set(((data && data.portfolios) || []).flatMap((p) => (p.holdings || []).filter((h) => !h.sample).map((h) => String(h.ticker || "").toUpperCase())));
   const openProfile = () => { if (tab !== "profile") prevTabRef.current = tab; setTab("profile"); };
   const closeProfile = () => setTab(prevTabRef.current === "profile" ? "portfolio" : prevTabRef.current);
   const [sub, setSub] = useState("overview"); // Portfolio tab sections: overview | holdings | analysis
@@ -768,7 +769,7 @@ export default function RichR({ user, onSignOut }) {
 }
 
 /* Pure helpers exposed for unit tests only (see src/*.test.js). */
-export const __helpers = { pct, money, moneyShort, fxConvert, parseHoldingsCsv, latestCalls, activeCalls, tallyAfterVote, castVote, removeVote, fetchSentiment, SENT_CACHE, sentimentBus, SOCIAL_ME,
+export const __helpers = { pct, money, moneyShort, fxConvert, parseHoldingsCsv, latestCalls, activeCalls, tallyAfterVote, castVote, removeVote, fetchSentiment, SENT_CACHE, sentimentBus, SOCIAL_ME, ownsTicker, OwnerBadge, QuickVote, QuickVoteRow, DiscoverSentiment,
   editHolding, removeHoldings, setHoldingShares, addHoldingShares, portfolioTotals, holdingValue, round6, removePortfolio, applyPriceRow, commitDoc, saveCloudDoc, queueCloudSave, AsyncConfirm, PositionsTab,
   QuickEditSheet, SharesSheet, ConfirmDialog, EditPortfolio, Stepper,
   VIS_META, visOf, isDiscoverable, canSelfJoin, parseTopics, communityMatches, inviteUrl, CommunityCard, NewGroupModal, TopicInput, InviteSheet, ScopeSummary, cutSeries, exchangeOf, isFund, pctOf, daysOld, withTimeout, periodReturn, idxOnOrBefore, computeScore };

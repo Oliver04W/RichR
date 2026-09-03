@@ -69,3 +69,7 @@ button, a { transition: background-color .15s ease, color .15s ease, border-colo
 .rounded-xl { border-radius: 12px !important; }
 /* hover for tappable rows on desktop */
 @media (hover: hover) { button.w-full.text-left:hover { background-color: #fafbfc; } }
+
+/* horizontal chip rows: scroll, no scrollbar */
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
