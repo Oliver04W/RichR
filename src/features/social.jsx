@@ -11,7 +11,8 @@ import { TICKER_RE } from "../lib/format.js";
    (tables stock_calls / stock_posts); portfolio numbers stay
    mutual-friends-only exactly as before. */
 
-export const SOCIAL_ME = { id: null, username: "" };
+export const SOCIAL_ME = { id: null, username: "", holdings: new Set() };   // holdings: tickers I hold (any portfolio) — a badge, never a vote weight
+export const ownsTicker = (t) => SOCIAL_ME.holdings.has(String(t || "").toUpperCase());
 
 /* Mutual-friend ids, cached for a minute so every card doesn't re-query. */
 export const _mutual = { at: 0, for: null, ids: [] };

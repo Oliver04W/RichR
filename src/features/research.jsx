@@ -330,7 +330,7 @@ export function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo, watch
         <h2 className="font-bold text-lg text-slate-700 flex items-center gap-2">
           <Search size={18} className="text-emerald-500" /> Research
         </h2>
-        <p className="text-sm text-slate-400 mt-0.5">Look up any stock or ETF and see a live quote — then add it or watch it.</p>
+        <p className="text-sm text-slate-400 mt-0.5">Look up any stock or ETF, see what RichR thinks, and cast your Buy / Hold / Sell vote.</p>
       </div>
 
       {/* search */}
@@ -392,14 +392,15 @@ export function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo, watch
             <PriceChart symbol={sel.symbol} currency={(quote && quote.currency) || sel.currency} />
           </div>
 
+          {/* vote first: search → tap → vote, no scrolling */}
+          <StockSocial key={"soc-" + sel.symbol} ticker={sel.symbol} name={sel.name}
+            price={quote ? quote.price : null} currency={(quote && quote.currency) || sel.currency}
+            onOpenTicker={openExact} />
+
           <CompanyInfoCard key={"info-" + sel.symbol} symbol={sel.symbol} name={sel.name} type={sel.type}
             info={(companyInfo || {})[(sel.symbol || "").toUpperCase()]} onSaveInfo={onSaveInfo} />
 
           <AiThesisCard key={sel.symbol} symbol={sel.symbol} name={sel.name} />
-
-          <StockSocial key={"soc-" + sel.symbol} ticker={sel.symbol} name={sel.name}
-            price={quote ? quote.price : null} currency={(quote && quote.currency) || sel.currency}
-            onOpenTicker={openExact} />
 
           <div className="mt-4 flex items-center gap-2">
             <button onClick={() => startAdd(sel)}
@@ -420,7 +421,7 @@ export function ResearchTab({ cur, say, onUpsert, companyInfo, onSaveInfo, watch
           <DiscoverSentiment onOpenTicker={openExact} />
           <div className="bg-white rounded-2xl p-8 text-center shadow-sm border border-slate-100">
             <Search size={24} className="mx-auto text-slate-300 mb-3" />
-            <p className="text-sm text-slate-400">Search any instrument above to see its price, RichR Sentiment and the discussion. Nothing is added until you choose to.</p>
+            <p className="text-sm text-slate-400">Search any stock or ETF to see its price and vote Buy / Hold / Sell — you don't need to own it. Nothing is added to your portfolio unless you choose to.</p>
           </div>
         </>
       )}

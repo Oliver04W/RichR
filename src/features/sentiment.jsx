@@ -5,7 +5,7 @@ import { ComposedChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from 
 import { CornerDownRight, Send, X } from "lucide-react";
 import { useMyCommunities, visOf } from "./communities.jsx";
 import { FEED_CACHE } from "./feed.jsx";
-import { PostBody, REACTIONS, SOCIAL_ME, mutualIdsCached, useNames } from "./social.jsx";
+import { PostBody, REACTIONS, SOCIAL_ME, mutualIdsCached, ownsTicker, useNames } from "./social.jsx";
 import { daysOld, fmtDate, fmtTime, pctOf, timeAgo, withTimeout } from "../lib/format.js";
 import { dataKey } from "../lib/storage.js";
 import { Avatar, Logo, Ret, Skeleton } from "../ui/primitives.jsx";
@@ -147,7 +147,7 @@ export function useSentiment(ticker, scope = "everyone", gid = null) {
 /* Pure: one user's current vote moves prev → next (null = no vote) inside a
    sentiment_for tally. Only the counted vote is moved (a stale prev is null),
    so unvote → vote → unvote always lands back where it started. */
-export const tallyAfterVote = (s, prev, next, { reason = null, userId = null, now = new Date().toISOString() } = {}) => {
+export const tallyAfterVote = (s, prev, next, { reason = null, userId = null, owner = false, now = new Date().toISOString() } = {}) => {
   if (!s) return s;
   const out = { ...s };
   const n = (k) => Number(out[k] || 0);
@@ -155,14 +155,52 @@ export const tallyAfterVote = (s, prev, next, { reason = null, userId = null, no
     if (prev) out[prev] = Math.max(0, n(prev) - 1);
     if (next) out[next] = n(next) + 1;
     out.total = n("buy") + n("hold") + n("sell");
+    /* owners' tally moves with me only if I'm an owner (the previous vote carried the same flag) */
+    const wasOwner = s.mine && s.mine.owner;
+    if (out.holders && (owner || wasOwner)) {
+      const h = { ...out.holders }; const hn = (k) => Number(h[k] || 0);
+      if (prev && wasOwner) h[prev] = Math.max(0, hn(prev) - 1);
+      if (next && owner) h[next] = hn(next) + 1;
+      h.total = hn("buy") + hn("hold") + hn("sell");
+      out.holders = h;
+    }
   }
-  out.mine = next ? { vote: next, reason: reason || null, created_at: now } : null;
+  out.mine = next ? { vote: next, reason: reason || null, created_at: now, owner: !!owner } : null;
   if (Array.isArray(out.reasons)) {
     out.reasons = out.reasons.filter((r) => !userId || r.user_id !== userId);
-    if (next && reason && userId) out.reasons = [{ user_id: userId, vote: next, reason, created_at: now }, ...out.reasons];
+    if (next && reason && userId) out.reasons = [{ user_id: userId, vote: next, reason, created_at: now, owner: !!owner }, ...out.reasons];
   }
   return out;
 };
+
+/* "✓ Owner" — the voter holds the stock in their RichR portfolio. One account, one vote. */
+export function OwnerBadge({ className = "" }) {
+  return <span className={`inline-flex items-center gap-0.5 text-[9px] font-bold uppercase tracking-wide text-emerald-700 bg-emerald-50 border border-emerald-100 rounded px-1 py-px ${className}`} title="Holds this stock in their RichR portfolio">✓ Owner</span>;
+}
+
+/* Compact 3-button vote for list rows (Discover, search): tap to vote, tap
+   your vote again to remove it. Optimistic; `mine` is the current vote. */
+export function QuickVote({ ticker, mine, onChange }) {
+  const [cur, setCur] = useState(mine || null);
+  useEffect(() => { setCur(mine || null); }, [mine]);
+  const tap = (e, k) => {
+    e.stopPropagation();
+    const next = cur === k ? null : k;
+    setCur(next); if (onChange) onChange(next, cur);
+    if (next) castVote(ticker, next); else removeVote(ticker);
+  };
+  return (
+    <div className="flex items-center gap-1 shrink-0" role="group" aria-label={`Vote on ${ticker}`}>
+      {VOTE_ORDER.map((k) => (
+        <button key={k} type="button" onClick={(e) => tap(e, k)} aria-pressed={cur === k} aria-label={`${VOTE_META[k].label} ${ticker}`}
+          title={cur === k ? "Tap again to remove your vote" : VOTE_META[k].label}
+          className={`h-8 min-w-[2.25rem] px-1.5 rounded-lg text-[12px] font-bold border transition ${cur === k ? VOTE_META[k].solid + " border-transparent" : "bg-white border-slate-200 text-slate-500"}`}>
+          {VOTE_META[k].dot}{cur === k ? <span className="ml-1">{VOTE_META[k].label}</span> : null}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 /* Rapid taps on one asset are written in order and the tally is refetched
    once, after the last one — the final tap always wins. */
@@ -176,13 +214,14 @@ export async function castVote(ticker, vote, { reason = null, price = null, curr
   const tk = String(ticker).toUpperCase();
   const next = vote === "none" ? null : vote;
   const row = { user_id: SOCIAL_ME.id, ticker: tk, vote, reason: next && reason ? String(reason).slice(0, 140) : null,
-    price_at: next && Number(price) > 0 ? Number(price) : null, currency: next ? currency || null : null, reaffirmed: !!next && reaffirmed };
+    price_at: next && Number(price) > 0 ? Number(price) : null, currency: next ? currency || null : null, reaffirmed: !!next && reaffirmed,
+    owner: !!next && ownsTicker(tk) };   // "✓ Owner" badge — a social signal, never extra weight
   /* optimistic: every cached scope for this asset */
   for (const [k, hit] of [...SENT_CACHE.entries()]) {
     if (!k.startsWith(tk + "|") || !hit.data) continue;
     const m = hit.data.mine;
     const prev = m && m.vote !== "none" && daysOld(m.created_at) < STALE_DAYS ? m.vote : null;
-    SENT_CACHE.set(k, { at: Date.now(), data: tallyAfterVote(hit.data, prev, next, { reason: row.reason, userId: SOCIAL_ME.id }) });
+    SENT_CACHE.set(k, { at: Date.now(), data: tallyAfterVote(hit.data, prev, next, { reason: row.reason, userId: SOCIAL_ME.id, owner: row.owner }) });
   }
   sentimentBus.emit(tk, "optimistic");
   /* serialised write */
@@ -277,7 +316,7 @@ export function VoteButtons({ ticker, mine, price, currency, size = "md", onVote
       )}
       {cur && !pending && (
         <div className={`flex items-center justify-between ${size === "sm" ? "mt-1 text-[10px]" : "mt-1.5 text-[11px]"} text-slate-400`}>
-          <span>Your vote: <b className={VOTE_META[cur].text}>{VOTE_META[cur].label}</b></span>
+          <span className="inline-flex items-center gap-1.5">Your vote: <b className={VOTE_META[cur].text}>{VOTE_META[cur].label}</b>{ownsTicker(ticker) && <OwnerBadge />}</span>
           <button onClick={remove} className="font-semibold text-slate-500 hover:text-rose-600">Remove vote</button>
         </div>
       )}
@@ -304,10 +343,10 @@ export function SentimentCard({ ticker, name, price, currency, communities = nul
     <div className="bg-slate-50 rounded-2xl p-4">
       <div className="flex items-start justify-between gap-2">
         <div>
-          <div className="text-[10px] font-bold tracking-wide text-slate-400">RICHR SENTIMENT</div>
-          <div className="font-bold text-slate-900 text-[15px] leading-tight mt-0.5">{ticker}{name ? <span className="font-medium text-slate-500 text-[13px]"> · {name}</span> : null}</div>
+          <div className="text-[10px] font-bold tracking-wide text-slate-400">COMMUNITY SENTIMENT</div>
+          <div className="font-bold text-slate-900 text-[15px] leading-tight mt-0.5">{name || ticker}{name ? <span className="font-medium text-slate-500 text-[13px]"> · {ticker}</span> : null}</div>
         </div>
-        {mine && !stale && <span className="text-[10px] text-slate-400 shrink-0">You: <VoteChip vote={mine.vote} /></span>}
+        {mine && !stale && <span className="text-[10px] text-slate-400 shrink-0 inline-flex items-center gap-1">You: <VoteChip vote={mine.vote} />{mine.owner && <OwnerBadge />}</span>}
       </div>
 
       {/* scope */}
@@ -340,17 +379,23 @@ export function SentimentCard({ ticker, name, price, currency, communities = nul
           </span>
           {!holdersOnly && <WeekDelta s={s} className="font-semibold" />}
         </div>
+        {s && s.holders && Number(s.holders.total) > 0 && Number(s.holders.total) < 3 && (
+          <p className="mt-2 text-[11px] text-slate-500">{Number(s.holders.total)} owner{Number(s.holders.total) === 1 ? "" : "s"} voted <OwnerBadge className="ml-0.5" /></p>
+        )}
+        {s && s.holders && Number(s.holders.total) >= 3 && (() => { const h = s.holders; const ht = Number(h.total); const hl = VOTE_ORDER.slice().sort((a, b) => Number(h[b]) - Number(h[a]))[0]; return (
+          <p className="mt-2 text-[11px] text-slate-600 tabular-nums"><b className={VOTE_META[hl].text}>{pctOf(Number(h[hl]), ht)}% of owners</b> say {VOTE_META[hl].label} · {ht} owner{ht === 1 ? "" : "s"} <OwnerBadge className="ml-0.5" /></p>
+        ); })()}
         {s && s.holders && Number(s.holders.total) >= 3 && (
           <button onClick={() => setHoldersOnly((v) => !v)}
             className={`mt-2 text-[11px] font-semibold px-2.5 h-7 rounded-full border transition ${holdersOnly ? "bg-slate-900 text-white border-slate-900" : "bg-white border-slate-200 text-slate-600"}`}>
-            {holdersOnly ? "Showing holders only" : `Holders only · ${Number(s.holders.total)}`}
+            {holdersOnly ? "Showing owners only" : `Owners only · ${Number(s.holders.total)}`}
           </button>
         )}
         {scope === "everyone" && s && Array.isArray(s.friends_voted) && s.friends_voted.length > 0 && (
           <div className="mt-2.5 flex items-center gap-1.5 flex-wrap text-[11px] text-slate-600">
             <span className="font-semibold text-slate-500">Friends:</span>
             {s.friends_voted.slice(0, 6).map((f) => (
-              <span key={f.user_id} className="inline-flex items-center gap-1 bg-white border border-slate-200 rounded-full pl-0.5 pr-2 py-0.5"><Avatar name={names[f.user_id] || "?"} size={16} /> @{names[f.user_id] || "…"} {VOTE_META[f.vote].dot}</span>
+              <span key={f.user_id} className="inline-flex items-center gap-1 bg-white border border-slate-200 rounded-full pl-0.5 pr-2 py-0.5"><Avatar name={names[f.user_id] || "?"} size={16} /> @{names[f.user_id] || "…"} {VOTE_META[f.vote].dot}{f.owner && <OwnerBadge />}</span>
             ))}
           </div>
         )}
@@ -375,7 +420,7 @@ export function SentimentCard({ ticker, name, price, currency, communities = nul
           {s.reasons.slice(0, 4).map((r, i) => (
             <div key={i} className="flex items-start gap-2 text-[12px] text-slate-600">
               <VoteChip vote={r.vote} className="shrink-0 mt-0.5" />
-              <span className="leading-snug">“{r.reason}” <span className="text-slate-400 text-[11px]">— @{names[r.user_id] || "…"} · {timeAgo(r.created_at)}</span></span>
+              <span className="leading-snug">“{r.reason}” <span className="text-slate-400 text-[11px]">— @{names[r.user_id] || "…"}{r.owner && <OwnerBadge className="ml-1" />} · {timeAgo(r.created_at)}</span></span>
             </div>
           ))}
         </div>
@@ -393,7 +438,7 @@ export function SentimentCard({ ticker, name, price, currency, communities = nul
           {range && <SentimentHistory ticker={ticker} range={range} />}
         </div>
       )}
-      <p className="text-[10px] text-slate-400 mt-3">One person, one vote — portfolio size doesn't count. Opinions of RichR users, not advice. Votes expire after {STALE_DAYS} days unless re-affirmed.</p>
+      <p className="text-[10px] text-slate-400 mt-3">One person, one vote — you don't need to own a stock to vote, and owning it doesn't count extra. Opinions of RichR users, not advice. Votes expire after {STALE_DAYS} days unless re-affirmed.</p>
     </div>
   );
 }
@@ -477,7 +522,7 @@ export function SentimentMini({ ticker, name, onOpenTicker, vote = true, headlin
       {headline && (
         <div className="flex items-center justify-between gap-2 mb-1.5">
           <button onClick={() => onOpenTicker && onOpenTicker(ticker)} className="text-left min-w-0">
-            <span className="text-[10px] font-bold tracking-wide text-slate-400">RICHR SENTIMENT</span>
+            <span className="text-[10px] font-bold tracking-wide text-slate-400">COMMUNITY SENTIMENT</span>
             <div className="font-bold text-slate-900 text-[14px] leading-tight truncate">{ticker}{name ? <span className="font-medium text-slate-500 text-[12px]"> · {name}</span> : null}</div>
           </button>
           {lead && <span className={`text-[11px] font-bold shrink-0 ${VOTE_META[lead].text}`}>{pctOf(Number(s[lead]), total)}% {VOTE_META[lead].label}</span>}
@@ -493,41 +538,92 @@ export function SentimentMini({ ticker, name, onOpenTicker, vote = true, headlin
   );
 }
 
-/* Discover: the most-voted assets right now. */
+/* Discover: the social front door. One RPC, six lenses, vote inline. */
+const DISCOVER_LENSES = [
+  ["most_voted", "Most voted", "Everyone's talking about these"],
+  ["trending", "Trending", "Most votes in the last 7 days"],
+  ["bullish", "Most bullish", "Highest share of 🟢 Buy"],
+  ["bearish", "Most bearish", "Highest share of 🔴 Sell"],
+  ["friends_buying", "Friends buying", "Your mutual friends' 🟢 Buy calls"],
+  ["friends_selling", "Friends selling", "Your mutual friends' 🔴 Sell calls"],
+];
 export function DiscoverSentiment({ onOpenTicker }) {
-  const [rows, setRows] = useState(null);
-  useEffect(() => { let dead = false; supabase.rpc("top_sentiment", { lim: 8 }).then(({ data, error }) => { if (!dead) setRows(error ? [] : (data || [])); }); return () => { dead = true; }; }, []);
-  if (rows === null) return <Skeleton lines={4} />;
-  if (!rows.length) return null;
+  const [d, setD] = useState(null);
+  const [lens, setLens] = useState("most_voted");
+  const load = () => supabase.rpc("discover_sentiment", { lim: 8 }).then(({ data, error }) => setD(error || !data ? {} : data));
+  useEffect(() => { load(); }, []);
+  useEffect(() => { const f = (t, phase) => { if (phase !== "optimistic") load(); }; sentimentBus.subs.add(f); return () => sentimentBus.subs.delete(f); }, []);
+  const friendRows = d && (lens === "friends_buying" || lens === "friends_selling") ? (d[lens] || []) : null;
+  const names = useNames((friendRows || []).flatMap((r) => r.users || []));
+  if (d === null) return <Skeleton lines={4} />;
+  const rows = (d[lens] || []);
+  const meta = DISCOVER_LENSES.find((l) => l[0] === lens);
+  const empty = {
+    most_voted: "No votes yet — search any stock above and be the first.", trending: "Nothing voted on this week yet.",
+    bullish: "Needs a couple of votes per stock first.", bearish: "Needs a couple of votes per stock first.",
+    friends_buying: "None of your mutual friends has a Buy call right now.", friends_selling: "None of your mutual friends has a Sell call right now.",
+  }[lens];
   return (
     <div className="card">
       <div className="flex items-center justify-between mb-2">
-        <h3 className="section-title">RichR Sentiment</h3>
-        <span className="text-[10px] font-semibold text-slate-400">MOST VOTED · 30 DAYS</span>
+        <h3 className="section-title whitespace-nowrap">Community Sentiment</h3>
+        <span className="text-[10px] font-semibold text-slate-400 whitespace-nowrap">ONE VOTE EACH · 30D</span>
       </div>
-      <div className="divide-y divide-slate-100">
-        {rows.map((r) => {
-          const total = Number(r.total); const small = total < MIN_SAMPLE;
-          const lead = VOTE_ORDER.slice().sort((a, b) => Number(r[b]) - Number(r[a]))[0];
-          return (
+      <div className="flex gap-1.5 overflow-x-auto -mx-1 px-1 pb-2 no-scrollbar">
+        {DISCOVER_LENSES.map(([id, label]) => (
+          <button key={id} onClick={() => setLens(id)} className={`shrink-0 h-8 px-3 rounded-full text-[12px] font-semibold border transition ${lens === id ? "bg-slate-900 text-white border-slate-900" : "bg-white border-slate-200 text-slate-600"}`}>{label}</button>
+        ))}
+      </div>
+      <p className="text-[11px] text-slate-400 mb-1">{meta[2]}</p>
+      {rows.length === 0 ? (
+        <p className="text-sm text-slate-500 py-4 text-center">{empty}</p>
+      ) : (
+        <div className="divide-y divide-slate-100">
+          {friendRows ? rows.map((r) => (
             <button key={r.ticker} onClick={() => onOpenTicker(r.ticker)} className="w-full flex items-center gap-3 py-2.5 text-left">
               <Logo h={{ ticker: r.ticker }} size={34} rounded="rounded-lg" />
               <div className="flex-1 min-w-0">
                 <div className="font-bold text-slate-900 text-sm">{r.ticker}</div>
-                <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden flex mt-1">
-                  {!small && VOTE_ORDER.map((k) => Number(r[k]) > 0 && <div key={k} className={`${VOTE_META[k].bar} h-full`} style={{ width: `${(Number(r[k]) / total) * 100}%` }} />)}
-                </div>
+                <div className="text-[11px] text-slate-500 truncate">{(r.users || []).slice(0, 4).map((u) => "@" + (names[u] || "…")).join(", ")}{(r.users || []).length > 4 ? ` +${r.users.length - 4}` : ""}</div>
               </div>
-              <div className="text-right shrink-0 tabular-nums">
-                {small ? <div className="text-[12px] font-semibold text-slate-500">{total} vote{total === 1 ? "" : "s"}</div>
-                  : <div className={`text-sm font-bold ${VOTE_META[lead].text}`}>{VOTE_META[lead].dot} {pctOf(Number(r[lead]), total)}% {VOTE_META[lead].label}</div>}
-                <div className="text-[10px] text-slate-400">{Number(r.recent)} this week · {total} total</div>
-              </div>
+              <span className={`text-[12px] font-bold shrink-0 ${lens === "friends_buying" ? VOTE_META.buy.text : VOTE_META.sell.text}`}>{lens === "friends_buying" ? "🟢" : "🔴"} {Number(r.n)} friend{Number(r.n) === 1 ? "" : "s"}</span>
             </button>
-          );
-        })}
-      </div>
-      <p className="text-[10px] text-slate-400 mt-2">Buy / Hold / Sell opinions of RichR users — one person, one vote. Not advice.</p>
+          )) : rows.map((r) => <QuickVoteRow key={r.ticker} r={r} onOpen={() => onOpenTicker(r.ticker)} />)}
+        </div>
+      )}
+      <p className="text-[10px] text-slate-400 mt-2">Buy / Hold / Sell opinions of RichR users. You don't need to own a stock to vote. Not advice.</p>
+    </div>
+  );
+}
+/* One row: logo · ticker · lead % (or count) · owners · inline vote */
+export function QuickVoteRow({ r, onOpen }) {
+  const [row, setRow] = useState(r);
+  useEffect(() => { setRow(r); }, [r]);
+  const total = Number(row.total); const small = total < MIN_SAMPLE;
+  const lead = total > 0 ? VOTE_ORDER.slice().sort((a, b) => Number(row[b]) - Number(row[a]))[0] : null;
+  const owners = Number(row.owners || 0);
+  const onChange = (next, prev) => setRow((x) => {
+    const y = { ...x }; if (prev) y[prev] = Math.max(0, Number(y[prev]) - 1); if (next) y[next] = Number(y[next] || 0) + 1;
+    y.total = Number(y.buy || 0) + Number(y.hold || 0) + Number(y.sell || 0); y.mine = next; return y;
+  });
+  return (
+    <div className="py-2.5 flex items-center gap-2.5">
+      <button onClick={onOpen} className="flex items-center gap-2.5 min-w-0 flex-1 text-left">
+        <Logo h={{ ticker: row.ticker }} size={34} rounded="rounded-lg" />
+        <div className="min-w-0 flex-1">
+          <div className="font-bold text-slate-900 text-sm leading-tight">{row.ticker}</div>
+          <div className="text-[11px] text-slate-500 truncate tabular-nums">
+            {total === 0 ? "No votes yet" : small ? `${total} vote${total === 1 ? "" : "s"}` : <span className={`font-bold ${VOTE_META[lead].text}`}>{pctOf(Number(row[lead]), total)}% {VOTE_META[lead].label}</span>}
+            {total > 0 && !small ? ` · ${total.toLocaleString()} votes` : ""}{owners > 0 ? ` · ${owners} owner${owners === 1 ? "" : "s"}` : ""}
+          </div>
+          {!small && (
+            <div className="h-1 bg-slate-100 rounded-full overflow-hidden flex mt-1 max-w-[9rem]">
+              {VOTE_ORDER.map((k) => Number(row[k]) > 0 && <div key={k} className={`${VOTE_META[k].bar} h-full`} style={{ width: `${(Number(row[k]) / total) * 100}%` }} />)}
+            </div>
+          )}
+        </div>
+      </button>
+      <QuickVote ticker={row.ticker} mine={row.mine || null} onChange={onChange} />
     </div>
   );
 }
@@ -693,7 +789,7 @@ export function CallsList({ userId, calls: given = null, limit = 8, title = "CAL
     if (given) { setRows(given); return; }
     if (!userId) return;
     let dead = false;
-    withTimeout(supabase.from("stock_calls").select("id, ticker, vote, reason, price_at, currency, created_at").eq("user_id", userId)
+    withTimeout(supabase.from("stock_calls").select("id, ticker, vote, reason, price_at, currency, created_at, owner").eq("user_id", userId)
       .order("created_at", { ascending: false }).limit(200))
       .then(({ data }) => { if (!dead) setRows(activeCalls(data || [], (r) => r.ticker)); });
     return () => { dead = true; };
@@ -715,7 +811,7 @@ export function CallsList({ userId, calls: given = null, limit = 8, title = "CAL
           const r = since(c);
           return (
             <div key={c.id || c.ticker} className="py-2 flex items-center gap-2.5">
-              <VoteChip vote={c.vote} />
+              <VoteChip vote={c.vote} />{c.owner && <OwnerBadge className="ml-1" />}
               <button onClick={() => onOpenTicker && onOpenTicker(c.ticker)} className="font-bold text-slate-800 text-sm">{c.ticker}</button>
               <span className="text-[11px] text-slate-400 truncate flex-1">{c.reason ? `“${c.reason}”` : timeAgo(c.created_at)}</span>
               <div className="text-right shrink-0">

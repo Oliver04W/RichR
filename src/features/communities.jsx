@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { supabase } from "../supabase";
 import { Briefcase, Check, ChevronLeft, ChevronRight, CornerDownRight, Lock, LogOut, MessageCircle, Plus, Search, Send, Share2, Trash2, UserPlus, Users, UsersRound, X } from "lucide-react";
 import { CardPicker, ChatCard } from "./feed.jsx";
-import { STALE_DAYS, SentimentBar, VOTE_META, activeCalls, castVote } from "./sentiment.jsx";
+import { OwnerBadge, STALE_DAYS, SentimentBar, VOTE_META, activeCalls, castVote } from "./sentiment.jsx";
 import { PostBody, REACTIONS, loadMutualFriends } from "./social.jsx";
 import { daysOld, extractTickers, fmtDate, pct, timeAgo, withTimeout } from "../lib/format.js";
 import { byValueDesc } from "../lib/portfolio.js";
@@ -870,7 +870,7 @@ export function CommunitySentiment({ members, names, user, onOpenTicker }) {
   useEffect(() => {
     let dead = false;
     if (!members.length) { setCalls([]); return; }
-    supabase.from("stock_calls").select("id, user_id, ticker, vote, reason, created_at").in("user_id", members)
+    supabase.from("stock_calls").select("id, user_id, ticker, vote, reason, created_at, owner").in("user_id", members)
       .order("created_at", { ascending: false }).limit(600)
       .then(({ data }) => { if (!dead) setCalls(activeCalls(data || []).filter((c) => daysOld(c.created_at) < STALE_DAYS)); });
     return () => { dead = true; };
@@ -903,7 +903,7 @@ export function CommunitySentiment({ members, names, user, onOpenTicker }) {
             <div className="mt-2.5 flex flex-wrap gap-1.5">
               {v.list.slice(0, 8).map((c) => (
                 <span key={c.id} title={c.reason || ""} className={`inline-flex items-center gap-1 text-[11px] font-semibold border rounded-full pl-0.5 pr-2 py-0.5 ${VOTE_META[c.vote].chip}`}>
-                  <Avatar name={names[c.user_id] || "?"} size={16} /> @{c.user_id === user.id ? "you" : (names[c.user_id] || "…")} {VOTE_META[c.vote].dot}
+                  <Avatar name={names[c.user_id] || "?"} size={16} /> @{c.user_id === user.id ? "you" : (names[c.user_id] || "…")} {VOTE_META[c.vote].dot}{c.owner && <OwnerBadge />}
                 </span>
               ))}
             </div>
