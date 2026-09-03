@@ -172,12 +172,22 @@ function loadLocal(key) {
 function saveLocal(key, d) {
   try { localStorage.setItem(key, JSON.stringify(d)); } catch (e) { console.error(e); }
 }
+/* Network calls that hang (captive portals, flaky mobile data) must never
+   leave a screen on a skeleton forever: race them against a timeout. */
+const withTimeout = (promise, ms = 10000, fallback = { data: null, error: new Error("timeout") }) =>
+  Promise.race([promise, new Promise((res) => setTimeout(() => res(fallback), ms))]);
+
 /* returns the document, null (signed in but no cloud row yet),
    or undefined (cloud unreachable — offline mode) */
 async function loadCloud(userId) {
   try {
-    const { data: row, error } = await supabase
-      .from("user_data").select("data").eq("user_id", userId).maybeSingle();
+    // A request that never answers (captive portal, flaky mobile data) must not
+    // leave the app on the splash screen: after 8s we run on the local copy.
+    const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 8000));
+    const { data: row, error } = await Promise.race([
+      supabase.from("user_data").select("data").eq("user_id", userId).maybeSingle(),
+      timeout,
+    ]);
     if (error) throw error;
     return row ? row.data : null;
   } catch (e) { return undefined; }
@@ -203,6 +213,14 @@ const watchTicker = async (t) => {
   try {
     await supabase.from("seed_tickers").upsert({ ticker }, { onConflict: "ticker", ignoreDuplicates: true });
   } catch (e) { /* non-fatal */ }
+};
+
+/* AI proxy calls carry the user's session token — the /api routes refuse
+   anonymous callers so the OpenAI budget can't be spent from outside the app. */
+const aiFetch = async (url, init = {}) => {
+  let token = null;
+  try { const { data } = await supabase.auth.getSession(); token = data && data.session && data.session.access_token; } catch (e) { /* signed-out */ }
+  return fetch(url, { ...init, headers: { ...(init.headers || {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) } });
 };
 
 /* ---------- formatting ---------- */
@@ -409,7 +427,7 @@ function explainScoreChange(prev, cur) {
     out.push(`Risk-adjusted return ${dir("riskAdjusted")}: Sharpe ${ci.sharpe} (was ${pi.sharpe})${pi.vol !== ci.vol ? `, volatility ${ci.vol}% (was ${pi.vol}%)` : ""}.`);
   return out;
 }
-const SCORE_LABEL = { performance: "Performance", riskAdjusted: "Risk-adjusted return", diversification: "Diversification", concentration: "Concentration" };
+const SCORE_LABEL = { performance: "Performance", riskAdjusted: "Risk-adjusted", diversification: "Diversification", concentration: "Concentration" };
 const scoreTone = (n) => n == null ? "text-slate-300" : n >= 75 ? "text-emerald-600" : n >= 50 ? "text-amber-500" : "text-rose-500";
 
 /* Winning streak: consecutive calendar weeks (ending with the current one)
@@ -1249,7 +1267,7 @@ export default function RichR({ user, onSignOut }) {
       {(create === "post" || create === "poll") && (
         <CreatePostSheet mode={create} user={user} cur={cur} fx={data.fx || DEFAULT_FX} holdings={active.holdings} richrData={data} active={active}
           onClose={() => setCreate(null)} onBack={() => setCreate("menu")}
-          onDone={(msg) => { setCreate(null); say(msg); }} onOpenTicker={openTicker} />
+          onDone={(msg) => { FEED_CACHE.at = 0; setCreate(null); say(msg); }} onOpenTicker={openTicker} />
       )}
       {create === "position" && (
         <PositionModal holding={null} cur={cur} fx={data.fx || DEFAULT_FX} holdings={active.holdings}
@@ -1296,12 +1314,12 @@ function OwnPortfolioCard({ user, data, active, cur }) {
   useEffect(() => {
     let dead = false;
     (async () => {
-      const [{ data: me }, { data: out }, { data: inc }, { data: board }] = await Promise.all([
+      const [{ data: me }, { data: out }, { data: inc }, { data: board }] = await withTimeout(Promise.all([
         supabase.from("leaderboard").select("return_pct, top_holdings, score, spark").eq("user_id", user.id).maybeSingle(),
         supabase.from("friends").select("friend_id").eq("user_id", user.id),
         supabase.from("friends").select("user_id").eq("friend_id", user.id),
         supabase.from("leaderboard").select("user_id, return_pct"),
-      ]);
+      ]), 10000, [{ data: null }, { data: [] }, { data: [] }, { data: [] }]);
       if (dead) return;
       setRow(me || {});
       const incSet = new Set((inc || []).map((r) => r.user_id));
@@ -1630,14 +1648,8 @@ function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, 
               className="btn-primary">
               <Camera size={15} /> Import portfolio
             </button>
-            <button onClick={goPositions}
-              className="bg-emerald-700/40 text-white text-sm font-semibold px-5 py-2.5 rounded-full">
-              Add manually
-            </button>
-            <button onClick={onLoadSample}
-              className="bg-emerald-700/40 text-white text-sm font-semibold px-5 py-2.5 rounded-full">
-              Try sample data
-            </button>
+            <button onClick={goPositions} className="btn-secondary">Add manually</button>
+            <button onClick={onLoadSample} className="btn-secondary">Try sample data</button>
           </div>
           <p className="text-[11px] text-slate-400 mt-3">Fastest: a screenshot or CSV export from your broker app (Nordnet, Avanza, Interactive Brokers…) — confirm the holdings and you’re done in about 20 seconds. Sample data is clearly marked and can't be shared.</p>
         </div>
@@ -1820,7 +1832,7 @@ function IdentityStrip({ data, active, cur, fx, social, streak, onProfile }) {
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="font-bold text-slate-900">{data.userName || "Set up profile"}</span>
-          {social && social.rank != null && (
+          {social && social.rank != null && social.shared && (
             <span className={`text-[10px] font-extrabold px-1.5 py-0.5 rounded ${social.rank === 1 ? "bg-amber-100 text-amber-800" : social.rank <= 3 ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>#{social.rank} friends</span>
           )}
           {streak >= 2 && <span className="text-[10px] font-bold text-orange-700 bg-orange-50 px-1.5 py-0.5 rounded">🔥 {streak}-week streak</span>}
@@ -2387,11 +2399,11 @@ function FriendsBenchmark({ user, myYtd, benchYtd, benchLabel, onGoFriends, onSu
     let dead = false;
     (async () => {
       try {
-        const [{ data: out }, { data: inc }, { data: board }] = await Promise.all([
+        const [{ data: out }, { data: inc }, { data: board }] = await withTimeout(Promise.all([
           supabase.from("friends").select("friend_id").eq("user_id", user.id),
           supabase.from("friends").select("user_id").eq("friend_id", user.id),
           supabase.from("leaderboard").select("user_id, name, return_pct, profile"),
-        ]);
+        ]), 10000, [{ data: [] }, { data: [] }, { data: [] }]);
         if (dead) return;
         const incSet = new Set((inc || []).map((r) => r.user_id));
         const mutual = new Set((out || []).map((r) => r.friend_id).filter((id) => incSet.has(id)));
@@ -2835,8 +2847,8 @@ function PositionCard({ h, cur, fx, onOpen, onEdit, onRemove, onSetPrice, weight
           </div>
           <div className="flex items-center gap-1.5">
             <span className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded ${V.chip}`}><V.icon size={10} /> {V.label}</span>
-            <button onClick={(e) => { e.stopPropagation(); onEdit(); }} className="w-7 h-7 rounded-lg bg-slate-100 flex items-center justify-center text-slate-500"><Pencil size={12} /></button>
-            <button onClick={(e) => { e.stopPropagation(); onRemove(); }} className="w-7 h-7 rounded-lg bg-slate-100 flex items-center justify-center text-slate-400 hover:text-rose-500"><Trash2 size={12} /></button>
+            <button onClick={(e) => { e.stopPropagation(); onEdit(); }} aria-label={`Edit ${h.ticker}`} className="w-7 h-7 rounded-lg bg-slate-100 flex items-center justify-center text-slate-500"><Pencil size={12} /></button>
+            <button onClick={(e) => { e.stopPropagation(); onRemove(); }} aria-label={`Remove ${h.ticker}`} className="w-7 h-7 rounded-lg bg-slate-100 flex items-center justify-center text-slate-400 hover:text-rose-500"><Trash2 size={12} /></button>
           </div>
           {editPrice && (
             <div className="w-full" onClick={(e) => e.stopPropagation()}>
@@ -3069,7 +3081,7 @@ function PositionModal({ holding, cur, fx = null, holdings = [], onClose, onSave
               {!searching && results === null && (
                 <div className="text-center py-6 text-xs text-slate-400 leading-relaxed">
                   Stocks, ETFs and funds on US and European exchanges.<br />Pick one and you'll only need shares and price — value, currency and today's price are filled in for you.
-                  {(holdings || []).length > 0 && (
+                  {(holdings || []).some((h) => !h.sample) && (
                     <div className="flex flex-wrap justify-center gap-1.5 mt-4">
                       <span className="w-full text-[10px] font-bold text-slate-400 mb-0.5">ADD TO A POSITION YOU HOLD</span>
                       {byValueDesc(holdings.filter((h) => !h.sample), cur, fx || DEFAULT_FX).slice(0, 6).map((h) => (
@@ -3240,7 +3252,7 @@ function ThesesTab({ active, cur, fx, onVerdict }) {
               </div>
               <div className={`text-sm font-bold shrink-0 ${up ? "text-emerald-600" : "text-rose-500"}`}>{pct(plPct)}</div>
             </div>
-            <div className="text-xs text-slate-400 font-medium mt-0.5">{daysHeld(h.buyDate)} days held</div>
+            <div className="text-xs text-slate-400 font-medium mt-0.5">{daysHeld(h.buyDate)} day{daysHeld(h.buyDate) === 1 ? "" : "s"} held</div>
             {h.thesis ? (
               <p className="text-[15px] text-slate-600 leading-relaxed mt-3 italic">“{h.thesis}”</p>
             ) : (
@@ -3330,8 +3342,8 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpe
        wipe your connections (the old shared catch caused exactly that). */
     try {
       // People I added (explicit filter — don't rely on RLS to scope this).
-      const { data: fr, error: fErr } = await supabase
-        .from("friends").select("friend_id").eq("user_id", user.id);
+      const { data: fr, error: fErr } = await withTimeout(supabase
+        .from("friends").select("friend_id").eq("user_id", user.id));
       if (fErr) throw fErr;
       const ids = (fr || []).map((r) => r.friend_id);
 
@@ -3359,11 +3371,11 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpe
 
     /* Leaderboard — isolated. If this fails, only the board is empty. */
     try {
-      const { data: rows, error: bErr } = await supabase
+      const { data: rows, error: bErr } = await withTimeout(supabase
         .from("leaderboard")
         .select("user_id, name, profile, portfolio, return_pct, holdings, top_holdings, realized_pct, avg_days, win_rate, philosophy, score, score_parts, spark")
         .order("return_pct", { ascending: false, nullsFirst: false })
-        .limit(100);
+        .limit(100));
       if (bErr) throw bErr;
       /* null = that person chose not to share the field. Keep it null
          (not 0 / []) so the UI can say "private" instead of a fake value. */
@@ -3464,7 +3476,7 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpe
   };
 
   const publish = async () => {
-    if (!data.userName.trim()) { say("Set your name (top right) before sharing."); return; }
+    if (!data.userName.trim()) { say("Set your name in Profile before sharing."); return; }
     setBusy(true);
     try {
       const { twrUsed } = await publishBoard({ data, active, totals, cur, user });
@@ -3546,7 +3558,7 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpe
           <p className="mt-3 text-[11px] text-amber-700 bg-amber-50 rounded-xl px-3 py-2">
             {hasSample
               ? "You still have sample positions — clear or replace them in Portfolio › Holdings before sharing."
-              : "Add a position in the Portfolio tab first — there's nothing to share yet."}
+              : "Add a position on Home first — there's nothing to share yet."}
           </p>
         )}
         <div className="mt-3 flex items-center gap-2">
@@ -3570,7 +3582,7 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpe
         </h3>
         {!data.username && (
           <p className="text-xs text-amber-600 font-medium mb-2">
-            Claim your own username first (top-right menu) so friends can add you back.
+            Set your username in Profile first so friends can add you back.
           </p>
         )}
         <div className="flex gap-2 mb-3 mt-2">
@@ -3638,7 +3650,7 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpe
                         <div key={f.id} className="flex items-center justify-between gap-2 py-2.5 border-b border-slate-50 last:border-0">
                           <button onClick={() => openFriendProfile(f.id, f.username)}
                             className="min-w-0 flex-1 text-left active:opacity-70">
-                            <div className="text-sm font-semibold text-slate-700 truncate">@{f.username}</div>
+                            <div className="text-sm font-semibold text-slate-700 truncate">{f.username === "unknown" ? <span className="text-slate-400 font-medium">No username yet</span> : `@${f.username}`}</div>
                             {sharing ? (
                               <div className="text-[11px] font-medium text-emerald-600 flex items-center gap-1">
                                 <Check size={10} /> Sharing · tap to view profile
@@ -3693,7 +3705,7 @@ function FriendsTab({ data, active, totals, cur, say, user, onEditSharing, onOpe
                     {outgoingPending.map((f) => (
                       <div key={f.id} className="flex items-center justify-between gap-2 py-2.5 border-b border-slate-50 last:border-0">
                         <div className="min-w-0">
-                          <div className="text-sm font-semibold text-slate-700 truncate">@{f.username}</div>
+                          <div className="text-sm font-semibold text-slate-700 truncate">{f.username === "unknown" ? <span className="text-slate-400 font-medium">No username yet</span> : `@${f.username}`}</div>
                           <div className="text-[11px] font-medium text-slate-400 flex items-center gap-1">
                             <Clock size={10} /> Hasn't added you back yet
                           </div>
@@ -3971,7 +3983,7 @@ function InsightsTab({ active, totals, cur, fx, say, analysis, onSave, news, onS
         `Also write a 2-3 sentence plain-language note on this portfolio's diversification given these holdings. ` +
         `Respond with ONLY JSON, no other text: ` +
         `{"holdings":[{"ticker":"XXX","beta":1.2,"volatility":28.5}],"note":"..."}`;
-      const res = await fetch("/api/openai", {
+      const res = await aiFetch("/api/openai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -4057,7 +4069,7 @@ function InsightsTab({ active, totals, cur, fx, say, analysis, onSave, news, onS
 
       let picked = null;
       try {
-        const res = await fetch("/api/openai", {
+        const res = await aiFetch("/api/openai", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -4218,7 +4230,9 @@ function NewsView({ news, busy, onFetch }) {
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-sm text-slate-400">
-          {news ? `Scanned ${fmtDateTime(news.at)}` : "News affecting your holdings"}
+          {news ? (
+            <>Scanned {fmtDateTime(news.at)}{Date.now() - new Date(news.at).getTime() > 3 * 86400000 && <span className="text-amber-600 font-semibold"> · out of date</span>}</>
+          ) : "News affecting your holdings"}
         </p>
         <button onClick={onFetch} disabled={busy}
           className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold px-4 py-2 rounded-full shadow disabled:opacity-60">
@@ -4573,7 +4587,7 @@ function ImportModal({ cur, onClose, onImport, initialMode = "shot" }) {
     `{"holdings":[{"ticker":"NVDA","name":"Nvidia","domain":"nvidia.com","type":"Stock","currency":"USD","shares":12.5,"buyPrice":95.2,"currentPrice":128.4,"note":"buy price derived from return %"}]}`;
 
   const callParse = async (content) => {
-    const res = await fetch("/api/openai", {
+    const res = await aiFetch("/api/openai", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -4827,7 +4841,7 @@ function ImportModal({ cur, onClose, onImport, initialMode = "shot" }) {
               <button disabled={testing} onClick={async () => {
                 setTesting(true); setTestResult("Testing connection…");
                 try {
-                  const r = await fetch("/api/openai", {
+                  const r = await aiFetch("/api/openai", {
                     method: "POST", headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1000,
                       messages: [{ role: "user", content: "Reply with exactly: OK" }] }),
@@ -4989,7 +5003,7 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClosePosition, onClose })
           : `is as a ${h.type}: what it tracks or holds and what an investor gets exposure to. `) +
         `Write for someone new to investing. No numbers, no opinions on whether it's a good investment, no advice. ` +
         `Respond with ONLY the description text, nothing else.`;
-      const res = await fetch("/api/openai", {
+      const res = await aiFetch("/api/openai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -5076,7 +5090,7 @@ function DetailSheet({ h, cur, fx, info, onSaveInfo, onClosePosition, onClose })
               <div className={`font-bold text-sm mt-0.5 ${up ? "text-emerald-600" : "text-rose-500"}`}>{pct(plPct)}</div>
             </div>
             <div className="col-span-3 border-t border-slate-200 pt-2.5 flex items-center justify-between">
-              <span className="text-[10px] font-semibold text-slate-400">VALUE ({cur}) · {daysHeld(h.buyDate)} DAYS HELD</span>
+              <span className="text-[10px] font-semibold text-slate-400">VALUE ({cur}) · {daysHeld(h.buyDate)} DAY{daysHeld(h.buyDate) === 1 ? "" : "S"} HELD</span>
               <span className="font-bold text-slate-700">{money(value, cur)}</span>
             </div>
           </div>
@@ -5171,7 +5185,7 @@ function CompanyInfoCard({ symbol, name, type, info, onSaveInfo }) {
           : `is as a ${type}: what it tracks or holds and what an investor gets exposure to. `) +
         `Write for someone new to investing. No numbers, no opinions on whether it's a good investment, no advice. ` +
         `Respond with ONLY the description text, nothing else.`;
-      const res = await fetch("/api/openai", {
+      const res = await aiFetch("/api/openai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -5236,7 +5250,7 @@ function AiThesisCard({ symbol, name }) {
         `"key_risks":["2-4 short bullets: biggest specific risks"],` +
         `"catalysts":["2-4 short bullets: upcoming events/drivers to watch"],` +
         `"verdict":"2-3 sentences. No buy/sell recommendation; describe what kind of investor this fits and what the debate hinges on."}`;
-      const res = await fetch("/api/openai", {
+      const res = await aiFetch("/api/openai", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -5384,6 +5398,7 @@ function PerformanceChart({ holdings, cur, liveValue, liveCost, bench: BENCH = D
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState(null);
   const [compare, setCompare] = useState(false);   // overlay S&P 500
+  const [reloadKey, setReloadKey] = useState(0);   // bumps to refetch after an error
   const [bench, setBench] = useState(null);        // [{t, c}]
 
   /* Benchmark closes for the same range (SPY via get-history). */
@@ -5418,7 +5433,7 @@ function PerformanceChart({ holdings, cur, liveValue, liveCost, bench: BENCH = D
             sellDate: h.sellDate || null, currency: h.currency || cur,
           })),
         };
-        const { data, error } = await supabase.functions.invoke("portfolio-history", { body });
+        const { data, error } = await withTimeout(supabase.functions.invoke("portfolio-history", { body }), 20000, { data: null, error: new Error("timeout") });
         if (dead) return;
         if (error || !data || !data.ok || !Array.isArray(data.points) || !data.points.length) {
           setErr((data && data.error) || "Could not load history."); setPts(null);
@@ -5429,7 +5444,7 @@ function PerformanceChart({ holdings, cur, liveValue, liveCost, bench: BENCH = D
       if (!dead) setLoading(false);
     })();
     return () => { dead = true; };
-  }, [open, range, holdingsKey(holdings, cur)]); // key, not the array: price refreshes must not refetch
+  }, [open, range, holdingsKey(holdings, cur), reloadKey]); // key, not the array: price refreshes must not refetch
 
   const intraday = range === "1d" || range === "1w";
   const fmtTick = (t) => {
@@ -5497,11 +5512,15 @@ function PerformanceChart({ holdings, cur, liveValue, liveCost, bench: BENCH = D
     <div className="flex items-end justify-between gap-2">
       <div>
         {!compact && <div className="text-2xl font-bold text-slate-800 tabular-nums">{money(last, cur)}</div>}
+        {(loading || err || !chart.length) ? (
+          <div className="text-sm text-slate-400 mt-0.5">{loading ? "Loading history…" : err ? "" : sub}</div>
+        ) : (
         <div className={`text-sm font-semibold flex items-center gap-1 mt-0.5 tabular-nums ${up ? "text-emerald-600" : "text-rose-500"}`}>
           {up ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
           {up ? "+" : "−"}{money(Math.abs(diff), cur)} ({pct(diffPct)})
           <span className="text-slate-400 font-normal ml-1">{sub}</span>
         </div>
+        )}
       </div>
       {onExpand && (
         <button onClick={onExpand} className="text-[11px] font-semibold text-slate-400 hover:text-slate-600 shrink-0">Expand ↗</button>
@@ -5514,7 +5533,11 @@ function PerformanceChart({ holdings, cur, liveValue, liveCost, bench: BENCH = D
           <div className="skel h-2 w-full" /><div className="skel h-2 w-11/12" /><div className="skel h-2 w-4/5" />
         </div>
       ) : err ? (
-        <div className="h-full flex items-center justify-center text-sm text-rose-500 text-center px-6">{err}</div>
+        <div className="h-full flex flex-col items-center justify-center text-center px-6">
+          <p className="text-sm font-semibold text-slate-600">History unavailable</p>
+          <p className="text-xs text-slate-400 mt-1">{/unreachable|network|fetch|timeout/i.test(String(err)) ? "Check your connection and try again." : err}</p>
+          <button onClick={() => setReloadKey((k) => k + 1)} className="btn-secondary mt-3 text-xs h-8">Retry</button>
+        </div>
       ) : cmp ? (
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={cmp} margin={{ top: 8, right: 10, left: 10, bottom: 0 }}>
@@ -6187,7 +6210,7 @@ function CreatePostSheet({ mode, user, cur, fx, holdings, richrData, active, onC
               </div>
             ) : (
               <div className="relative">
-                <input value={q} onChange={(e) => search(e.target.value)} placeholder="Company or ticker" className={input + " uppercase"} autoFocus={poll} />
+                <input value={q} onChange={(e) => search(e.target.value)} placeholder="Company or ticker" className={input + " uppercase placeholder:normal-case"} autoFocus={poll} />
                 {holdings.length > 0 && !q && (
                   <div className="flex flex-wrap gap-1.5 mt-2">{byValueDesc(holdings.filter((h) => !h.sample), cur, fx).slice(0, 6).map((h) => (
                     <button key={h.id} onClick={() => setStock({ symbol: h.ticker, name: h.name })} className="text-xs font-semibold text-slate-700 bg-slate-100 px-2.5 py-1 rounded-full">{h.ticker}</button>
@@ -6449,7 +6472,7 @@ async function castVote(ticker, vote, { reason = null, price = null, currency = 
   const row = { user_id: SOCIAL_ME.id, ticker: String(ticker).toUpperCase(), vote, reason: reason ? String(reason).slice(0, 140) : null,
     price_at: Number(price) > 0 ? Number(price) : null, currency: currency || null, reaffirmed };
   const { error } = await supabase.from("stock_calls").insert(row);
-  if (!error) { for (const k of [...SENT_CACHE.keys()]) if (k.startsWith(row.ticker + "|")) SENT_CACHE.delete(k); sentimentBus.emit(row.ticker); }
+  if (!error) { for (const k of [...SENT_CACHE.keys()]) if (k.startsWith(row.ticker + "|")) SENT_CACHE.delete(k); FEED_CACHE.at = 0; sentimentBus.emit(row.ticker); }
   return !error;
 }
 const pctOf = (n, total) => (total > 0 ? Math.round((n / total) * 100) : 0);
@@ -6899,8 +6922,8 @@ function CallsList({ userId, calls: given = null, limit = 8, title = "CALLS", on
     if (given) { setRows(given); return; }
     if (!userId) return;
     let dead = false;
-    supabase.from("stock_calls").select("id, ticker, vote, reason, price_at, currency, created_at").eq("user_id", userId)
-      .order("created_at", { ascending: false }).limit(200)
+    withTimeout(supabase.from("stock_calls").select("id, ticker, vote, reason, price_at, currency, created_at").eq("user_id", userId)
+      .order("created_at", { ascending: false }).limit(200))
       .then(({ data }) => { if (!dead) setRows(latestCalls(data || [], (r) => r.ticker)); });
     return () => { dead = true; };
   }, [userId, given]);
@@ -6937,16 +6960,21 @@ function CallsList({ userId, calls: given = null, limit = 8, title = "CALLS", on
 }
 
 /* ---------- Home feed: friends, communities, sentiment, rankings — one stream ---------- */
+const FEED_CACHE = { at: 0, user: null, items: null, trending: [], top: null, scope: "friends", groupNames: {} };
 function HomeFeed({ user, onOpenTicker, goFriends, goCommunities, rankMove = null, boardRanks = null }) {
-  const [items, setItems] = useState(null);
-  const [trending, setTrending] = useState([]);
-  const [top, setTop] = useState(null);
-  const [scope, setScope] = useState("friends"); // friends | community (when no friends yet)
-  const [groupNames, setGroupNames] = useState({});
+  const fresh = FEED_CACHE.user === user.id && Date.now() - FEED_CACHE.at < 60000;
+  const [items, setItems] = useState(fresh ? FEED_CACHE.items : null);
+  const [trending, setTrending] = useState(fresh ? FEED_CACHE.trending : []);
+  const [top, setTop] = useState(fresh ? FEED_CACHE.top : null);
+  const [scope, setScope] = useState(fresh ? FEED_CACHE.scope : "friends"); // friends | community (when no friends yet)
+  const [groupNames, setGroupNames] = useState(fresh ? FEED_CACHE.groupNames : {});
+  const [loadErr, setLoadErr] = useState(false);
   useEffect(() => {
+    if (fresh) return;
     let dead = false;
-    (async () => {
-      const ids = await mutualIdsCached(user.id);
+    const guard = setTimeout(() => { if (!dead) { setItems((i) => (i === null ? [] : i)); setLoadErr(true); } }, 12000);
+    (async () => { try {
+      const ids = await withTimeout(mutualIdsCached(user.id), 8000, []);
       const sinceIso = new Date(Date.now() - 14 * 86400000).toISOString();
       const who = ids.length ? ids : null;
       if (!who) setScope("community");
@@ -7003,9 +7031,12 @@ function HomeFeed({ user, onOpenTicker, goFriends, goCommunities, rankMove = nul
       const weekAgo = Date.now() - 7 * 86400000;
       const cnt = {};
       all.filter((x) => x.ticker && new Date(x.created_at).getTime() > weekAgo).forEach((x) => { cnt[x.ticker] = (cnt[x.ticker] || 0) + 1; });
-      setTrending(Object.entries(cnt).sort((a, b) => b[1] - a[1]).slice(0, 6));
-    })();
-    return () => { dead = true; };
+      const tr = Object.entries(cnt).sort((a, b) => b[1] - a[1]).slice(0, 6);
+      setTrending(tr);
+      setLoadErr(false);
+      Object.assign(FEED_CACHE, { at: Date.now(), user: user.id, items: all.slice(0, 30), trending: tr, top: Array.isArray(ts) ? ts : [], scope: who ? "friends" : "community", groupNames: gn });
+    } catch (e) { if (!dead) { setItems([]); setLoadErr(true); } } finally { clearTimeout(guard); } })();
+    return () => { dead = true; clearTimeout(guard); };
   }, [user.id]);
   const names = useNames((items || []).map((x) => x.user_id));
   const [showAll, setShowAll] = useState(false);
@@ -7082,7 +7113,9 @@ function HomeFeed({ user, onOpenTicker, goFriends, goCommunities, rankMove = nul
       )}
 
       {/* the stream */}
-      {items.length === 0 ? (
+      {loadErr && items.length === 0 ? (
+        <div className="card text-sm text-slate-500">Couldn't reach RichR right now — check your connection. <button onClick={() => window.location.reload()} className="font-semibold text-emerald-700">Retry</button></div>
+      ) : items.length === 0 ? (
         <div className="card">
           <div className="text-sm font-semibold text-slate-800">Be the first to say something</div>
           <p className="text-sm text-slate-500 mt-1">Vote Buy / Hold / Sell on a stock you own, post a take, or ask your community a question — it'll show up here for everyone who follows you.</p>
@@ -7220,7 +7253,7 @@ function CardPicker({ holdings, cur, fx, data, active, onPick, onClose }) {
       )}
       {(kind === "stock" || kind === "vote") && (
         <div>
-          <input value={q} onChange={(e) => search(e.target.value)} placeholder="Ticker or company…" className="w-full border border-slate-200 rounded-xl px-3 h-9 text-sm bg-white uppercase" autoFocus />
+          <input value={q} onChange={(e) => search(e.target.value)} placeholder="Ticker or company…" className="w-full border border-slate-200 rounded-xl px-3 h-9 text-sm bg-white uppercase placeholder:normal-case" autoFocus />
           {results.length > 0 && (
             <div className="mt-1 bg-white border border-slate-200 rounded-xl overflow-hidden">
               {results.map((r) => (
@@ -7365,6 +7398,7 @@ function GroupsTab({ user, active, cur, fx, say, onOpenTicker, username, richrDa
   };
 
   const loadGroups = async () => {
+    const guard = setTimeout(() => setGroups((g) => (g === null ? [] : g)), 12000);
     try {
       const { data: gs, error } = await supabase.from("groups").select("id, name, created_by, created_at").order("created_at", { ascending: false });
       if (error) throw error;
@@ -7391,7 +7425,7 @@ function GroupsTab({ user, active, cur, fx, say, onOpenTicker, username, richrDa
       setGroups([]);
     }
   };
-  useEffect(() => { loadGroups(); loadMutualFriends(user.id).then(setMutuals); }, []);
+  useEffect(() => { loadGroups(); withTimeout(loadMutualFriends(user.id), 10000, []).then(setMutuals).catch(() => setMutuals([])); }, []);
 
   const createGroup = async (name, memberIds) => {
     const { data: g, error } = await supabase.from("groups").insert({ name, created_by: user.id }).select("id, name, created_by, created_at").single();
@@ -8313,15 +8347,17 @@ function ShareCardPreview({ url, username, onClose }) {
 /* Served without sign-in. All data comes from get_public_profile(), which
    returns null unless the person switched their public link on. */
 export function PublicProfile({ username }) {
-  const [p, setP] = useState(undefined); // undefined loading, null private/missing
+  const [p, setP] = useState(undefined); // undefined loading, null private/missing, false = couldn't load
+  const [tries, setTries] = useState(0);
   useEffect(() => {
     let dead = false;
-    supabase.rpc("get_public_profile", { uname: username }).then(({ data, error }) => {
+    setP(undefined);
+    withTimeout(supabase.rpc("get_public_profile", { uname: username }), 12000).then(({ data, error }) => {
       if (dead) return;
-      setP(error ? null : (data || null));
+      setP(error ? false : (data || null));
     });
     return () => { dead = true; };
-  }, [username]);
+  }, [username, tries]);
 
   const shell = (children) => (
     <div className="min-h-screen bg-slate-50" style={{ fontFamily: "'Inter', system-ui, sans-serif" }}>
@@ -8341,7 +8377,14 @@ export function PublicProfile({ username }) {
     </div>
   );
 
-  if (p === undefined) return shell(<div className="text-center text-sm text-slate-400 py-16">Loading…</div>);
+  if (p === undefined) return shell(<div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100" aria-busy="true"><div className="skel h-5 w-1/2 mb-3" /><div className="skel h-3 w-2/3 mb-2" /><div className="skel h-3 w-1/2" /></div>);
+  if (p === false) return shell(
+    <div className="bg-white rounded-2xl p-8 text-center shadow-sm border border-slate-100">
+      <p className="font-semibold text-slate-600">Couldn't load this profile</p>
+      <p className="text-sm text-slate-400 mt-1">Check your connection and try again.</p>
+      <button onClick={() => setTries((t) => t + 1)} className="btn-secondary mt-4 text-xs">Retry</button>
+    </div>
+  );
   if (p === null) return shell(
     <div className="bg-white rounded-2xl p-8 text-center shadow-sm border border-slate-100">
       <Lock size={24} className="mx-auto text-slate-300 mb-3" />
@@ -8455,3 +8498,6 @@ export function PublicProfile({ username }) {
     </div>
   );
 }
+
+/* Pure helpers exposed for unit tests only (see src/*.test.js). */
+export const __helpers = { pct, money, moneyShort, fxConvert, parseHoldingsCsv, latestCalls, cutSeries, exchangeOf, isFund, pctOf, daysOld, withTimeout, periodReturn, idxOnOrBefore, computeScore };

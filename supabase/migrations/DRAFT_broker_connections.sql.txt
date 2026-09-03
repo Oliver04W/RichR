@@ -1,0 +1,55 @@
+-- DRAFT — NOT APPLIED. Rename to 2026xxxx_broker_connections.sql only when the
+-- broker integration is being built. See BROKER_INTEGRATION.md.
+
+create table if not exists public.broker_connections (
+  id                   uuid primary key default gen_random_uuid(),
+  user_id              uuid not null references auth.users(id) on delete cascade,
+  provider             text not null check (provider in ('snaptrade')),
+  provider_user_id     text not null,
+  provider_user_secret text not null,            -- SERVICE ROLE ONLY (no client policy exists)
+  authorization_id     text,
+  broker_slug          text,
+  broker_name          text,
+  status               text not null default 'active' check (status in ('active','broken','disconnected')),
+  connection_type      text not null default 'read' check (connection_type = 'read'),
+  last_synced_at       timestamptz,
+  last_error           text,
+  created_at           timestamptz not null default now()
+);
+alter table public.broker_connections enable row level security;
+-- deliberately NO policies: only the service role (edge functions) can touch this table.
+
+-- what the client may see
+create or replace view public.broker_connections_public
+  with (security_invoker = true) as
+  select id, user_id, provider, broker_slug, broker_name, status, connection_type, last_synced_at, last_error, created_at
+  from public.broker_connections where user_id = auth.uid();
+
+create table if not exists public.broker_accounts (
+  id                  uuid primary key default gen_random_uuid(),
+  connection_id       uuid not null references public.broker_connections(id) on delete cascade,
+  user_id             uuid not null references auth.users(id) on delete cascade,
+  provider_account_id text not null,
+  name                text,
+  number_masked       text,
+  currency            text,
+  portfolio_id        text,
+  include             boolean not null default true,
+  unique (connection_id, provider_account_id)
+);
+alter table public.broker_accounts enable row level security;
+create policy "own broker accounts" on public.broker_accounts for select to authenticated using (user_id = auth.uid());
+create policy "own broker accounts update" on public.broker_accounts for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+create table if not exists public.broker_snapshots (
+  id          uuid primary key default gen_random_uuid(),
+  account_id  uuid not null references public.broker_accounts(id) on delete cascade,
+  user_id     uuid not null references auth.users(id) on delete cascade,
+  fetched_at  timestamptz not null default now(),
+  positions   jsonb not null default '[]'::jsonb,
+  balances    jsonb not null default '[]'::jsonb,
+  status      text not null default 'pending' check (status in ('pending','applied','dismissed'))
+);
+alter table public.broker_snapshots enable row level security;
+create policy "own snapshots" on public.broker_snapshots for select to authenticated using (user_id = auth.uid());
+create policy "own snapshots update" on public.broker_snapshots for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
