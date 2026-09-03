@@ -659,6 +659,8 @@ export default function RichR({ user, onSignOut }) {
   const [refreshing, setRefreshing] = useState(false);
   const [toast, setToast] = useState("");
   const [create, setCreate] = useState(null); // null | menu | post | poll | position | transaction
+  const [inviteCode, setInviteCode] = useState(() => { try { const c = localStorage.getItem("richr_invite"); if (c) localStorage.removeItem("richr_invite"); return c || null; } catch (e) { return null; } });
+  useEffect(() => { if (inviteCode) setTab("groups"); }, []);
   const loaded = useRef(false);
 
   /* ---- "X has added you!" banner ---- */
@@ -1276,7 +1278,7 @@ export default function RichR({ user, onSignOut }) {
           initialQuery={researchQuery} onConsumeQuery={() => setResearchQuery("")} />}
         {tab === "groups" && (
           <GroupsTab user={user} active={active} cur={cur} fx={data.fx || DEFAULT_FX} say={say} username={data.username} onOpenTicker={openTicker} richrData={data}
-            goFriends={() => setTab("friends")} />
+            goFriends={() => setTab("friends")} inviteCode={inviteCode} onInviteDone={() => setInviteCode(null)} />
         )}
         {tab === "friends" && <FriendsTab data={data} active={active} totals={totals} cur={cur} say={say} user={user}
           onEditSharing={openProfile} onOpenTicker={openTicker}
@@ -6512,7 +6514,7 @@ function useMyCommunities(userId) {
   const [list, setList] = useState(null);
   useEffect(() => {
     let dead = false;
-    supabase.from("groups").select("id, name").order("created_at", { ascending: false }).then(({ data }) => { if (!dead) setList(data || []); });
+    supabase.rpc("my_communities").then(({ data }) => { if (!dead) setList(Array.isArray(data) ? data : []); });
     return () => { dead = true; };
   }, [userId]);
   return list;
@@ -7044,10 +7046,11 @@ function SentimentCard({ ticker, name, price, currency, communities = null, onOp
         : !myComms || !myComms.length ? <p className="text-[11px] text-slate-400 mt-2">You're not in a community yet.</p>
         : myComms.length > 1 ? (
           <div className="flex flex-wrap gap-1.5 mt-2">{myComms.map((c) => (
-            <button key={c.id} onClick={() => setGid(c.id)} className={`text-[11px] font-semibold px-2.5 h-7 rounded-full border ${gid === c.id ? "bg-slate-900 text-white border-slate-900" : "bg-white border-slate-200 text-slate-600"}`}>{c.name}</button>
+            <button key={c.id} onClick={() => setGid(c.id)} className={`text-[11px] font-semibold px-2.5 h-7 rounded-full border ${gid === c.id ? "bg-slate-900 text-white border-slate-900" : "bg-white border-slate-200 text-slate-600"}`}>{visOf(c).icon} {c.name}</button>
           ))}</div>
-        ) : <p className="text-[11px] text-slate-500 mt-2">{myComms[0].name}</p>
+        ) : <p className="text-[11px] text-slate-500 mt-2">{visOf(myComms[0]).icon} {myComms[0].name}</p>
       )}
+      {scope === "everyone" && myComms && myComms.length > 0 && <ScopeSummary ticker={ticker} />}
 
       {/* tally */}
       <div className="mt-3">
@@ -7116,6 +7119,34 @@ function SentimentCard({ ticker, name, price, currency, communities = null, onOp
         </div>
       )}
       <p className="text-[10px] text-slate-400 mt-3">One person, one vote — portfolio size doesn't count. Opinions of RichR users, not advice. Votes expire after {STALE_DAYS} days unless re-affirmed.</p>
+    </div>
+  );
+}
+
+/* NVDA across every circle you belong to — one vote per person, different
+   aggregations: 🌎 Everyone · 👥 Friends · 🌐/🔒 each community. */
+function ScopeSummary({ ticker }) {
+  const [d, setD] = useState(null);
+  const load = () => supabase.rpc("sentiment_scopes", { t: ticker }).then(({ data, error }) => setD(error ? null : data));
+  useEffect(() => { setD(null); load(); }, [ticker]);
+  useEffect(() => { const f = (t, phase) => { if (t === ticker && phase !== "optimistic") load(); }; sentimentBus.subs.add(f); return () => sentimentBus.subs.delete(f); }, [ticker]);
+  if (!d) return null;
+  const rows = [["🌎", "Everyone", d.everyone], ["👥", "Friends", d.friends], ...((d.communities || []).map((c) => [visOf(c).icon, c.name, c.s]))];
+  const line = (s) => {
+    const total = s ? Number(s.total) : 0;
+    if (!total) return <span className="text-slate-400">no votes</span>;
+    if (total < MIN_SAMPLE) return <span className="text-slate-500">{total} vote{total === 1 ? "" : "s"}</span>;
+    const lead = VOTE_ORDER.slice().sort((a, b) => Number(s[b]) - Number(s[a]))[0];
+    return <span className={`font-bold ${VOTE_META[lead].text}`}>{pctOf(Number(s[lead]), total)}% {VOTE_META[lead].label}</span>;
+  };
+  return (
+    <div className="mt-2.5 bg-white rounded-xl border border-slate-100 px-3 py-2 text-[12px] tabular-nums divide-y divide-slate-50">
+      {rows.map(([icon, name, s], i) => (
+        <div key={i} className="flex items-center justify-between py-1">
+          <span className="text-slate-600 truncate min-w-0"><span className="mr-1">{icon}</span>{name}</span>
+          <span className="shrink-0 ml-2">{line(s)}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -7453,11 +7484,12 @@ function HomeFeed({ user, onOpenTicker, goFriends, goCommunities, rankMove = nul
         q("stock_posts", "id, user_id, ticker, body, parent_id, created_at"),
         // my communities' posts (RLS = member only): polls, calls, shares and plain posts
         supabase.from("group_posts").select("id, group_id, user_id, body, card, position, tickers, created_at").is("parent_id", null).gte("created_at", sinceIso).order("created_at", { ascending: false }).limit(40),
-        supabase.from("groups").select("id, name"),
+        supabase.rpc("my_communities"),
         supabase.rpc("top_sentiment", { lim: 5 }),
       ]);
       if (dead) return;
-      const gn = {}; (gs || []).forEach((g) => { gn[g.id] = g.name; }); setGroupNames(gn);
+      const gn = {}; (Array.isArray(gs) ? gs : []).forEach((g) => { gn[g.id] = g.name; }); setGroupNames(gn);
+      const gpMine = (gp || []).filter((p) => gn[p.group_id]);   // public communities I haven't joined stay out of my feed
       setTop(Array.isArray(ts) ? ts : []);
       /* Friends' leaderboard moves (from the last two rankings we saw). */
       const rankItems = [];
@@ -7469,7 +7501,7 @@ function HomeFeed({ user, onOpenTicker, goFriends, goCommunities, rankMove = nul
       }
       /* Never a dead feed: when friends are quiet, blend in what's happening on RichR. */
       let extra = [];
-      const friendCount = (ev || []).length + (cs || []).length + (ps || []).length + (gp || []).length;
+      const friendCount = (ev || []).length + (cs || []).length + (ps || []).length + gpMine.length;
       if (who && friendCount < 6) {
         const g = (t, sel) => supabase.from(t).select(sel).gte("created_at", sinceIso).neq("user_id", user.id).order("created_at", { ascending: false }).limit(30);
         const [{ data: gcs }, { data: gps }] = await Promise.all([
@@ -7489,7 +7521,7 @@ function HomeFeed({ user, onOpenTicker, goFriends, goCommunities, rankMove = nul
         ...(ev || []).map((e) => ({ t: "event", id: "e" + e.id, user_id: e.user_id, ticker: e.ticker, created_at: e.created_at, e })),
         ...activeCalls((cs || []).filter((c) => !c.reaffirmed)).map((c) => ({ t: "call", id: "c" + c.id, user_id: c.user_id, ticker: c.ticker, created_at: c.created_at, c })),
         ...(ps || []).filter((p) => !p.parent_id).map((p) => ({ t: "post", id: "p" + p.id, user_id: p.user_id, ticker: p.ticker, created_at: p.created_at, p })),
-        ...(gp || []).map((g) => ({ t: "group", id: "g" + g.id, user_id: g.user_id, ticker: (g.card && g.card.ticker) || (g.position && g.position.ticker) || (g.tickers && g.tickers[0]) || null, created_at: g.created_at, g })),
+        ...gpMine.map((g) => ({ t: "group", id: "g" + g.id, user_id: g.user_id, ticker: (g.card && g.card.ticker) || (g.position && g.position.ticker) || (g.tickers && g.tickers[0]) || null, created_at: g.created_at, g })),
       ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
       setItems(all.slice(0, 30));
       const weekAgo = Date.now() - 7 * 86400000;
@@ -7841,15 +7873,83 @@ function PostBody({ text, onTicker }) {
   return <span className="whitespace-pre-wrap break-words">{parts}</span>;
 }
 
-function GroupsTab({ user, active, cur, fx, say, onOpenTicker, username, richrData = null, goFriends = null }) {
-  const [groups, setGroups] = useState(null);   // [{id,name,created_by,members,lastPost}]
-  const [open, setOpen] = useState(null);       // group object being viewed
+/* ================= COMMUNITIES: PUBLIC 🌐 / PRIVATE 🔒 ================= */
+/* Public   = discover new investors and discussions (searchable, joinable).
+   Private  = your own group (invisible to non-members; invite links).
+   "request" is reserved for 🛡️ Request to join — treated like public for
+   discovery, but never self-joinable. Privacy is enforced by RLS/RPCs
+   (see 20260903_public_private_communities.sql); the client only decides
+   what to show. */
+const VIS_META = {
+  public:  { icon: "🌐", label: "Public",  blurb: "Anyone can find, view and join this community.", chip: "bg-sky-50 text-sky-700 border-sky-100" },
+  private: { icon: "🔒", label: "Private", blurb: "Only invited members can find and access this community.", chip: "bg-slate-100 text-slate-600 border-slate-200" },
+  request: { icon: "🛡️", label: "Request to join", blurb: "Anyone can find it; an admin approves who joins.", chip: "bg-amber-50 text-amber-700 border-amber-100" },
+};
+const visOf = (g) => VIS_META[(g && g.visibility) || "private"] || VIS_META.private;
+const isDiscoverable = (g) => !!g && g.visibility !== "private";
+const canSelfJoin = (g) => !!g && g.visibility === "public";
+function VisChip({ visibility, size = "xs", className = "" }) {
+  const m = VIS_META[visibility] || VIS_META.private;
+  return <span className={`inline-flex items-center gap-1 border rounded-full font-bold ${size === "xs" ? "text-[10px] px-1.5 py-0.5" : "text-xs px-2 py-0.5"} ${m.chip} ${className}`}>{m.icon} {m.label}</span>;
+}
+/* Comma / space separated "NVDA, tsm ai" → ["NVDA","TSM","AI"] (max 8, ≤16 chars each). */
+const parseTopics = (text) => [...new Set(String(text || "").split(/[,\s]+/).map((t) => t.trim().toUpperCase().replace(/^\$/, "")).filter((t) => t && t.length <= 16))].slice(0, 8);
+/* Client-side filter for lists we already hold (name, description, topics, ticker prefix). */
+const communityMatches = (g, q) => {
+  const s = String(q || "").trim().toLowerCase();
+  if (!s) return true;
+  return String(g.name || "").toLowerCase().includes(s) || String(g.description || "").toLowerCase().includes(s)
+    || (Array.isArray(g.topics) && g.topics.some((t) => String(t).toLowerCase().startsWith(s)));
+};
+const inviteUrl = (code) => `${typeof window !== "undefined" ? window.location.origin : "https://rich-r.vercel.app"}/?invite=${code}`;
+const fmtMembers = (n) => `${Number(n || 0).toLocaleString()} member${Number(n) === 1 ? "" : "s"}`;
+
+/* One community in a list: 🌐 AI & Semiconductors · 2,431 members · NVDA · TSM */
+function CommunityCard({ g, me, onOpen, onJoin, joining = false, trailing = null, subtitle = null }) {
+  const m = visOf(g);
+  const topics = Array.isArray(g.topics) ? g.topics.slice(0, 4) : [];
+  const joined = g.joined || (Array.isArray(g.members) && g.members.includes(me));
+  return (
+    <div className="bg-white rounded-2xl shadow-sm border border-slate-100">
+      <div className="flex items-center">
+        <button onClick={onOpen} className="flex-1 min-w-0 text-left p-4 flex items-center gap-3 active:bg-slate-50 rounded-l-2xl">
+          <div className={`w-11 h-11 rounded-2xl flex items-center justify-center font-bold text-lg shrink-0 ${g.visibility === "public" ? "bg-sky-50 text-sky-700" : "bg-emerald-50 text-emerald-600"}`}>
+            {String(g.name || "?").trim().slice(0, 1).toUpperCase()}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="font-semibold text-slate-800 text-sm truncate">{g.name}</span>
+              <span className="text-[11px] shrink-0" title={m.label}>{m.icon}</span>
+            </div>
+            <div className="text-xs text-slate-500 truncate">{subtitle != null ? subtitle : (g.description || `${m.icon} ${m.label} community`)}</div>
+            <div className="text-[11px] text-slate-400 truncate tabular-nums mt-0.5">
+              {fmtMembers(g.member_count != null ? g.member_count : (g.members || []).length)}{topics.length ? ` · ${topics.join(" · ")}` : ""}
+            </div>
+          </div>
+        </button>
+        {trailing !== null ? trailing : onJoin && !joined && canSelfJoin(g) ? (
+          <button onClick={onJoin} disabled={joining} className="mr-3 shrink-0 h-9 px-4 rounded-full bg-slate-900 text-white text-xs font-bold disabled:opacity-50">{joining ? "…" : "Join"}</button>
+        ) : joined && onJoin ? (
+          <span className="mr-3 shrink-0 text-[11px] font-semibold text-emerald-700">Joined</span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function GroupsTab({ user, active, cur, fx, say, onOpenTicker, username, richrData = null, goFriends = null, inviteCode = null, onInviteDone = null }) {
+  const [groups, setGroups] = useState(null);   // my communities [{id,name,visibility,…,members,lastPost}]
+  const [open, setOpen] = useState(null);       // community being viewed (member or not)
   const [creating, setCreating] = useState(false);
   const [mutuals, setMutuals] = useState(null);
-  const [menuFor, setMenuFor] = useState(null);     // group id with the ⋯ menu open
+  const [menuFor, setMenuFor] = useState(null);
   const [confirmFor, setConfirmFor] = useState(null);
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState(null); // search results (public only — the server never returns private ones)
+  const [trending, setTrending] = useState(null);
+  const [joining, setJoining] = useState(null);
+  const searchTimer = useRef(null);
 
-  /* Leave (member) or delete (creator) straight from the list. */
   const quickAction = async (g) => {
     const owner = g.created_by === user.id;
     const { error } = owner
@@ -7858,15 +7958,16 @@ function GroupsTab({ user, active, cur, fx, say, onOpenTicker, username, richrDa
     setMenuFor(null); setConfirmFor(null);
     if (error) { say(owner ? "Couldn't delete the community." : "Couldn't leave — try again."); return; }
     say(owner ? `Deleted “${g.name}”.` : `You left “${g.name}”.`);
-    await loadGroups();
+    await loadGroups(); loadTrending();
   };
 
   const loadGroups = async () => {
     const guard = setTimeout(() => setGroups((g) => (g === null ? [] : g)), 12000);
     try {
-      const { data: gs, error } = await supabase.from("groups").select("id, name, created_by, created_at").order("created_at", { ascending: false });
+      const { data: mine, error } = await withTimeout(supabase.rpc("my_communities"), 10000, { data: null, error: new Error("timeout") });
       if (error) throw error;
-      const ids = (gs || []).map((g) => g.id);
+      const gs = Array.isArray(mine) ? mine : [];
+      const ids = gs.map((g) => g.id);
       let members = [], last = [];
       if (ids.length) {
         const [{ data: m }, { data: l }] = await Promise.all([
@@ -7875,7 +7976,7 @@ function GroupsTab({ user, active, cur, fx, say, onOpenTicker, username, richrDa
         ]);
         members = m || []; last = l || [];
       }
-      setGroups((gs || []).map((g) => ({
+      setGroups(gs.map((g) => ({
         ...g,
         members: members.filter((m) => m.group_id === g.id).map((m) => m.user_id),
         lastPost: last.find((p) => p.group_id === g.id) || null,
@@ -7885,132 +7986,300 @@ function GroupsTab({ user, active, cur, fx, say, onOpenTicker, username, richrDa
         return tb - ta;
       }));
     } catch (e) {
-      console.error("RichR groups load failed:", e);
+      console.error("RichR communities load failed:", e);
       setGroups([]);
-    }
+    } finally { clearTimeout(guard); }
   };
-  useEffect(() => { loadGroups(); withTimeout(loadMutualFriends(user.id), 10000, []).then(setMutuals).catch(() => setMutuals([])); }, []);
+  const loadTrending = async () => {
+    const { data, error } = await withTimeout(supabase.rpc("search_communities", { q: "", lim: 12 }), 10000, { data: null, error: new Error("timeout") });
+    setTrending(error || !Array.isArray(data) ? [] : data);
+  };
+  useEffect(() => { loadGroups(); loadTrending(); withTimeout(loadMutualFriends(user.id), 10000, []).then(setMutuals).catch(() => setMutuals([])); }, []);
 
-  const createGroup = async (name, memberIds) => {
-    const { data: g, error } = await supabase.from("groups").insert({ name, created_by: user.id }).select("id, name, created_by, created_at").single();
+  /* search: name, description, topics/tickers — server side, discoverable communities only */
+  useEffect(() => {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    const s = q.trim();
+    if (!s) { setResults(null); return; }
+    searchTimer.current = setTimeout(async () => {
+      const { data, error } = await withTimeout(supabase.rpc("search_communities", { q: s, lim: 20 }), 10000, { data: null, error: new Error("timeout") });
+      setResults(error || !Array.isArray(data) ? [] : data);
+    }, 250);
+    return () => clearTimeout(searchTimer.current);
+  }, [q]);
+
+  const createGroup = async ({ name, visibility, description, topics, memberIds }) => {
+    const { data: g, error } = await supabase.from("groups").insert({ name, created_by: user.id, visibility, description, topics })
+      .select("id, name, created_by, created_at, visibility, description, topics").single();
     if (error || !g) { say("Couldn't create the community — try again."); return; }
     const { error: e1 } = await supabase.from("group_members").insert({ group_id: g.id, user_id: user.id, added_by: user.id });
     if (e1) { say("Couldn't join your own community — try again."); return; }
     if (memberIds.length) {
       const { error: e2 } = await supabase.from("group_members").insert(memberIds.map((id) => ({ group_id: g.id, user_id: id, added_by: user.id })));
-      if (e2) say("Community created, but some friends couldn't be added (only mutual friends can join).");
+      if (e2) say("Community created, but some friends couldn't be added (only mutual friends can be added directly).");
     }
     setCreating(false);
-    await loadGroups();
-    setOpen({ ...g, members: [user.id, ...memberIds], lastPost: null });
-    say(`“${name}” is ready — say hi!`);
+    await loadGroups(); loadTrending();
+    setOpen({ ...g, members: [user.id, ...memberIds], member_count: 1 + memberIds.length, lastPost: null });
+    say(visibility === "public" ? `“${name}” is live — anyone on RichR can find it.` : `“${name}” is ready — invite people with a link.`);
+  };
+
+  const join = async (g) => {
+    setJoining(g.id);
+    const { error } = await supabase.from("group_members").insert({ group_id: g.id, user_id: user.id, added_by: user.id });
+    setJoining(null);
+    if (error && error.code !== "23505") { say("Couldn't join — try again."); return false; }
+    say(`You joined “${g.name}”.`);
+    await loadGroups(); loadTrending();
+    if (results) setResults((r) => (r || []).map((x) => (x.id === g.id ? { ...x, joined: true, member_count: Number(x.member_count || 0) + 1 } : x)));
+    return true;
   };
 
   if (open) {
     return (
       <GroupChat group={open} user={user} active={active} cur={cur} fx={fx} say={say} username={username} richrData={richrData}
         mutuals={mutuals || []} onOpenTicker={onOpenTicker}
+        onJoin={async () => { const ok = await join(open); if (ok) setOpen((g) => ({ ...g, members: [...(g.members || []), user.id] })); }}
         onBack={() => { setOpen(null); loadGroups(); }}
-        onGroupChanged={(g) => { if (g) setOpen(g); else { setOpen(null); loadGroups(); } }} />
+        onGroupChanged={(g) => { if (g) setOpen(g); else { setOpen(null); loadGroups(); loadTrending(); } }} />
     );
   }
+
+  const mineIds = new Set((groups || []).map((g) => g.id));
+  const discover = (trending || []).filter((g) => !mineIds.has(g.id) && !g.joined).slice(0, 6);
+  const searching = q.trim().length > 0;
 
   return (
     <div className="space-y-4">
       <div className="flex items-end justify-between gap-3">
         <div>
           <h2 className="text-2xl font-bold tracking-tight text-slate-900">Communities</h2>
-          <p className="text-sm text-slate-500 mt-0.5">Where you and your friends talk stocks.</p>
+          <p className="text-sm text-slate-500 mt-0.5">Public ones to discover investors. Private ones for your own circle.</p>
         </div>
-        <button onClick={() => setCreating(true)} disabled={!mutuals} className="btn-primary shrink-0 disabled:opacity-60">
+        <button onClick={() => setCreating(true)} className="btn-primary shrink-0">
           <Plus size={15} /> New
         </button>
       </div>
-      {groups && groups.length === 0 && (
-        <div className="rounded-2xl bg-gradient-to-br from-slate-800 to-slate-900 text-white p-5">
-          <div className="flex items-center gap-2 font-bold"><UsersRound size={17} /> Your own investing circle</div>
-          <p className="text-sm text-slate-200 mt-1.5 leading-relaxed">
-            A community is a private space for you and your friends: chat, share positions and Buy/Hold/Sell calls, see what everyone holds and what the group thinks of each stock.
-            Only people you've both added can join, and only members can read it.
-          </p>
-        </div>
-      )}
 
-      {groups === null ? (
-        <Skeleton lines={3} />
-      ) : groups.length === 0 ? (
-        <div className="bg-white rounded-2xl p-8 text-center shadow-sm border border-slate-100">
-          <MessageCircle size={24} className="mx-auto text-slate-300 mb-3" />
-          <p className="font-semibold text-slate-600 mb-1">No communities yet</p>
-          <p className="text-sm text-slate-400">
-            {mutuals && mutuals.length === 0
-              ? "Add friends (and get added back) first — communities are for mutual friends."
-              : "Start one with a few friends, or wait to be added to theirs."}
-          </p>
-          {mutuals && mutuals.length === 0 && goFriends && <button onClick={goFriends} className="btn-secondary mt-4 text-xs">Go to Friends →</button>}
-        </div>
-      ) : (
+      {/* search */}
+      <div className="relative">
+        <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search public communities, topics or tickers"
+          aria-label="Search communities"
+          className="w-full h-11 pl-10 pr-9 rounded-2xl border border-slate-200 bg-white text-sm outline-none focus:border-emerald-400" />
+        {q && <button onClick={() => setQ("")} aria-label="Clear search" className="absolute right-2.5 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-slate-100 text-slate-500 flex items-center justify-center"><X size={12} /></button>}
+      </div>
+
+      {searching ? (
         <div className="space-y-2">
-          {groups.map((g) => (
-            <div key={g.id} className="bg-white rounded-2xl shadow-sm border border-slate-100">
-            <div className="flex items-center">
-            <button onClick={() => setOpen(g)}
-              className="flex-1 min-w-0 text-left p-4 flex items-center gap-3 active:bg-slate-50 rounded-l-2xl">
-              <div className="w-11 h-11 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center font-bold text-lg shrink-0">
-                {g.name.trim().slice(0, 1).toUpperCase()}
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-baseline justify-between gap-2">
-                  <div className="font-semibold text-slate-700 text-sm truncate">{g.name}</div>
-                  <div className="text-[11px] text-slate-400 shrink-0">{timeAgo(g.lastPost ? g.lastPost.created_at : g.created_at)}</div>
-                </div>
-                <div className="text-xs text-slate-400 truncate">
-                  {g.lastPost
-                    ? (g.lastPost.card ? `${g.lastPost.card.kind === "performance" ? "📊 shared their performance" : g.lastPost.card.kind === "poll" ? `🗳 poll on ${g.lastPost.card.ticker}` : g.lastPost.card.kind === "vote" ? `${VOTE_META[g.lastPost.card.vote]?.dot || ""} ${VOTE_META[g.lastPost.card.vote]?.label || ""} on ${g.lastPost.card.ticker}` : `📈 shared ${g.lastPost.card.ticker}`}` : g.lastPost.position ? `📈 shared ${g.lastPost.position.ticker}` : g.lastPost.body)
-                    : `${g.members.length} member${g.members.length === 1 ? "" : "s"} · no messages yet`}
-                </div>
-              </div>
-            </button>
-            <button onClick={() => setMenuFor(menuFor === g.id ? null : g.id)} aria-label="Community options"
-              className="shrink-0 w-10 h-10 mr-2 rounded-full text-slate-400 flex items-center justify-center text-lg font-bold active:bg-slate-100">⋯</button>
+          <div className="text-[11px] font-bold text-slate-400 tracking-wide">🌐 PUBLIC COMMUNITIES</div>
+          {results === null ? <Skeleton lines={3} /> : results.length === 0 ? (
+            <div className="card text-sm text-slate-500">
+              No public community matches “{q.trim()}”. <button onClick={() => setCreating(true)} className="font-semibold text-emerald-700">Start one →</button>
+              <p className="text-[11px] text-slate-400 mt-1">Private communities never show up in search — you need an invite link.</p>
             </div>
-            {menuFor === g.id && (
-              <div className="border-t border-slate-100 px-4 py-3 flex items-center gap-2 flex-wrap">
-                {confirmFor === g.id ? (
-                  <>
-                    <span className="text-sm text-rose-600 font-semibold flex-1 min-w-0">
-                      {g.created_by === user.id ? "Delete for everyone? Messages are gone for good." : "Leave this community?"}
-                    </span>
-                    <button onClick={() => quickAction(g)} className="bg-rose-500 text-white text-xs font-semibold px-3 py-1.5 rounded-full">
-                      Yes, {g.created_by === user.id ? "delete" : "leave"}
-                    </button>
-                    <button onClick={() => setConfirmFor(null)} className="bg-slate-100 text-slate-600 text-xs font-semibold px-3 py-1.5 rounded-full">Cancel</button>
-                  </>
-                ) : (
-                  <>
-                    <button onClick={() => setOpen(g)} className="text-xs font-semibold text-slate-600 bg-slate-100 px-3 py-1.5 rounded-full">Open</button>
-                    {g.created_by === user.id ? (
-                      <button onClick={() => setConfirmFor(g.id)} className="text-xs font-semibold text-rose-600 bg-rose-50 px-3 py-1.5 rounded-full flex items-center gap-1"><Trash2 size={12} /> Delete community</button>
-                    ) : (
-                      <button onClick={() => setConfirmFor(g.id)} className="text-xs font-semibold text-rose-600 bg-rose-50 px-3 py-1.5 rounded-full flex items-center gap-1"><LogOut size={12} /> Leave community</button>
-                    )}
-                    <span className="text-[11px] text-slate-400 ml-auto">{g.created_by === user.id ? "You created this community" : `${g.members.length} members`}</span>
-                  </>
-                )}
-              </div>
-            )}
+          ) : results.map((g) => (
+            <CommunityCard key={g.id} g={g} me={user.id} onOpen={() => setOpen({ ...g, members: null })} onJoin={() => join(g)} joining={joining === g.id} />
+          ))}
+        </div>
+      ) : (<>
+        {/* mine */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="text-[11px] font-bold text-slate-400 tracking-wide">YOUR COMMUNITIES{groups && groups.length ? ` · ${groups.length}` : ""}</div>
+          </div>
+          {groups === null ? (
+            <Skeleton lines={3} />
+          ) : groups.length === 0 ? (
+            <div className="bg-white rounded-2xl p-6 text-center shadow-sm border border-slate-100">
+              <UsersRound size={24} className="mx-auto text-slate-300 mb-2" />
+              <p className="font-semibold text-slate-700 mb-1">You're not in a community yet</p>
+              <p className="text-sm text-slate-500 leading-relaxed">Join a public one below to meet other investors, or start a private one for your friends — no friends on RichR needed.</p>
+              <button onClick={() => setCreating(true)} className="btn-secondary mt-3 text-xs">Create a community</button>
+            </div>
+          ) : groups.map((g) => (
+            <div key={g.id}>
+              <CommunityCard g={g} me={user.id} onOpen={() => setOpen(g)}
+                subtitle={g.lastPost
+                  ? (g.lastPost.card ? `${g.lastPost.card.kind === "performance" ? "📊 shared their performance" : g.lastPost.card.kind === "poll" ? `🗳 poll on ${g.lastPost.card.ticker}` : g.lastPost.card.kind === "vote" ? `${VOTE_META[g.lastPost.card.vote]?.dot || ""} ${VOTE_META[g.lastPost.card.vote]?.label || ""} on ${g.lastPost.card.ticker}` : `📈 shared ${g.lastPost.card.ticker}`}` : g.lastPost.position ? `📈 shared ${g.lastPost.position.ticker}` : g.lastPost.body)
+                  : (g.description || "No messages yet — say hi")}
+                trailing={
+                  <button onClick={() => setMenuFor(menuFor === g.id ? null : g.id)} aria-label={`Options for ${g.name}`}
+                    className="shrink-0 w-10 h-10 mr-2 rounded-full text-slate-400 flex items-center justify-center text-lg font-bold active:bg-slate-100">⋯</button>
+                } />
+              {menuFor === g.id && (
+                <div className="bg-white rounded-b-2xl -mt-2 pt-2 border border-t-0 border-slate-100 px-4 py-3 flex items-center gap-2 flex-wrap">
+                  {confirmFor === g.id ? (
+                    <>
+                      <span className="text-sm text-rose-600 font-semibold flex-1 min-w-0">
+                        {g.created_by === user.id ? "Delete for everyone? Messages are gone for good." : "Leave this community?"}
+                      </span>
+                      <button onClick={() => quickAction(g)} className="bg-rose-500 text-white text-xs font-semibold px-3 py-1.5 rounded-full">Yes, {g.created_by === user.id ? "delete" : "leave"}</button>
+                      <button onClick={() => setConfirmFor(null)} className="bg-slate-100 text-slate-600 text-xs font-semibold px-3 py-1.5 rounded-full">Cancel</button>
+                    </>
+                  ) : (
+                    <>
+                      <button onClick={() => setOpen(g)} className="text-xs font-semibold text-slate-600 bg-slate-100 px-3 py-1.5 rounded-full">Open</button>
+                      <VisChip visibility={g.visibility} />
+                      {g.created_by === user.id ? (
+                        <button onClick={() => setConfirmFor(g.id)} className="text-xs font-semibold text-rose-600 bg-rose-50 px-3 py-1.5 rounded-full flex items-center gap-1"><Trash2 size={12} /> Delete</button>
+                      ) : (
+                        <button onClick={() => setConfirmFor(g.id)} className="text-xs font-semibold text-rose-600 bg-rose-50 px-3 py-1.5 rounded-full flex items-center gap-1"><LogOut size={12} /> Leave</button>
+                      )}
+                      <span className="text-[11px] text-slate-400 ml-auto">{g.created_by === user.id ? "You created this" : timeAgo(g.lastPost ? g.lastPost.created_at : g.created_at)}</span>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           ))}
         </div>
-      )}
+
+        {/* discover */}
+        <div className="space-y-2">
+          <div className="text-[11px] font-bold text-slate-400 tracking-wide">🌐 DISCOVER · ACTIVE PUBLIC COMMUNITIES</div>
+          {trending === null ? <Skeleton lines={2} /> : discover.length === 0 ? (
+            <div className="card text-sm text-slate-500">
+              {trending.length === 0 ? "No public communities yet — start the first one and other investors can find it." : "You've joined every active public community. Search for more above."}
+            </div>
+          ) : discover.map((g) => (
+            <CommunityCard key={g.id} g={g} me={user.id} onOpen={() => setOpen({ ...g, members: null })} onJoin={() => join(g)} joining={joining === g.id} />
+          ))}
+        </div>
+      </>)}
+
       <p className="text-[11px] text-slate-400 leading-relaxed">
-        Everything in a community is visible to its members only. Tap ⋯ to leave one (or delete it, if you created it). Sharing a position posts the ticker, your buy date, return % and thesis — never amounts.
-        Nothing here is investment advice; it's friends talking.
+        🌐 Public communities are open to everyone on RichR. 🔒 Private ones are invisible to non-members — name, members and messages included — and people join by invite link only.
+        Sharing a position posts the ticker, your buy date, return % and thesis — never amounts. Nothing here is investment advice.
       </p>
 
-      {creating && (
-        <NewGroupModal mutuals={mutuals || []} onClose={() => setCreating(false)} onCreate={createGroup} />
+      {creating && <NewGroupModal mutuals={mutuals || []} onClose={() => setCreating(false)} onCreate={createGroup} />}
+      {inviteCode && (
+        <InviteSheet code={inviteCode} user={user}
+          onJoined={async (g) => { onInviteDone && onInviteDone(); await loadGroups(); setOpen({ ...g, members: null }); }}
+          onClose={() => onInviteDone && onInviteDone()} />
       )}
+    </div>
+  );
+}
+
+/* /?invite=CODE → preview (name, size, visibility) → Join. Bogus, revoked or
+   expired codes reveal nothing. */
+function InviteSheet({ code, user, onJoined, onClose }) {
+  const [info, setInfo] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    let dead = false;
+    withTimeout(supabase.rpc("preview_group_invite", { code_in: code }), 10000, { data: null, error: new Error("timeout") })
+      .then(({ data, error }) => { if (!dead) setInfo(error || !data ? { valid: false, reason: "error" } : data); });
+    return () => { dead = true; };
+  }, [code]);
+  const accept = async () => {
+    setBusy(true); setErr("");
+    const { data, error } = await supabase.rpc("accept_group_invite", { code_in: code });
+    setBusy(false);
+    if (error || !data || !data.ok) { setErr(REASONS[(data && data.reason) || "error"] || REASONS.error); return; }
+    onJoined({ id: data.group_id, name: data.name, visibility: data.visibility, member_count: Number(info.member_count || 0) + 1 });
+  };
+  const REASONS = { invalid: "This invite link isn't valid.", revoked: "This invite link has been revoked.", expired: "This invite link has expired.", used_up: "This invite link has been used up.", error: "Couldn't check the invite — try again." };
+  return (
+    <BottomSheet title="Community invite" onClose={onClose}>
+      <div className="px-5 pb-5">
+        {info === null ? <Skeleton lines={2} /> : !info.valid ? (
+          <div>
+            <p className="text-sm text-slate-700">{REASONS[info.reason] || REASONS.error}</p>
+            <p className="text-[11px] text-slate-400 mt-1">Ask the person who invited you for a new link.</p>
+            <button onClick={onClose} className="btn-secondary mt-4 w-full">OK</button>
+          </div>
+        ) : (
+          <div>
+            <div className="flex items-center gap-3">
+              <div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-bold text-xl ${info.visibility === "public" ? "bg-sky-50 text-sky-700" : "bg-emerald-50 text-emerald-600"}`}>{String(info.name).slice(0, 1).toUpperCase()}</div>
+              <div className="min-w-0">
+                <div className="font-bold text-slate-900 truncate">{info.name}</div>
+                <div className="text-[12px] text-slate-500"><VisChip visibility={info.visibility} /> · {fmtMembers(info.member_count)}</div>
+              </div>
+            </div>
+            {info.description && <p className="text-sm text-slate-600 mt-3">{info.description}</p>}
+            {err && <p className="text-sm text-rose-600 mt-3">{err}</p>}
+            <button onClick={info.joined ? () => onJoined({ id: info.group_id, name: info.name, visibility: info.visibility, member_count: info.member_count }) : accept} disabled={busy}
+              className="btn-primary w-full mt-4 h-12 disabled:opacity-50">{busy ? "Joining…" : info.joined ? "Open community" : `Join ${info.name}`}</button>
+            <p className="text-[11px] text-slate-400 mt-2 text-center">Members can see your username and what you choose to share.</p>
+          </div>
+        )}
+      </div>
+    </BottomSheet>
+  );
+}
+
+function NewGroupModal({ mutuals, onClose, onCreate }) {
+  const [name, setName] = useState("");
+  const [visibility, setVisibility] = useState(null);   // must be chosen explicitly
+  const [description, setDescription] = useState("");
+  const [topics, setTopics] = useState("");
+  const [picked, setPicked] = useState(new Set());
+  const [busy, setBusy] = useState(false);
+  const toggle = (id) => setPicked((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const valid = name.trim().length > 0 && !!visibility;
+  const field = "w-full border border-slate-200 rounded-xl px-3 py-2 text-sm bg-white outline-none focus:border-emerald-400";
+  return (
+    <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
+      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl max-h-[92vh] overflow-y-auto overscroll-contain p-5" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-bold text-lg text-slate-700">New community</h3>
+          <button onClick={onClose} aria-label="Close" className="w-8 h-8 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center"><X size={14} /></button>
+        </div>
+        <label className="block text-xs font-semibold text-slate-400 mb-1.5">COMMUNITY NAME</label>
+        <input autoFocus value={name} onChange={(e) => setName(e.target.value.slice(0, 60))} placeholder="e.g. AI & Semiconductors" aria-label="Community name" className={`${field} mb-4`} />
+
+        <label className="block text-xs font-semibold text-slate-400 mb-1.5">COMMUNITY VISIBILITY</label>
+        <div role="radiogroup" aria-label="Community visibility" className="space-y-2 mb-4">
+          {["public", "private"].map((v) => {
+            const m = VIS_META[v]; const on = visibility === v;
+            return (
+              <button key={v} role="radio" aria-checked={on} onClick={() => setVisibility(v)}
+                className={`w-full text-left rounded-2xl border-2 p-3.5 flex items-start gap-3 transition ${on ? (v === "public" ? "border-sky-500 bg-sky-50" : "border-slate-800 bg-slate-50") : "border-slate-200 bg-white"}`}>
+                <span className="text-xl leading-none mt-0.5">{m.icon}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="block font-bold text-slate-900 text-sm">{m.label}</span>
+                  <span className="block text-[12px] text-slate-500 leading-snug mt-0.5">{m.blurb}</span>
+                  {v === "private" && <span className="block text-[11px] text-slate-400 mt-1">Not in search or Discover. Name, members and messages stay hidden from everyone else.</span>}
+                  {v === "public" && <span className="block text-[11px] text-slate-400 mt-1">Listed in search and Discover for every RichR user.</span>}
+                </span>
+                <span className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 mt-0.5 ${on ? (v === "public" ? "bg-sky-500 border-sky-500 text-white" : "bg-slate-800 border-slate-800 text-white") : "border-slate-300"}`}>{on && <Check size={12} />}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        <label className="block text-xs font-semibold text-slate-400 mb-1.5">DESCRIPTION <span className="font-normal">(optional{visibility === "public" ? " · shown in search" : ""})</span></label>
+        <textarea value={description} onChange={(e) => setDescription(e.target.value.slice(0, 280))} rows={2} placeholder="What's this community about?" aria-label="Description" className={`${field} mb-3 resize-none`} />
+        <label className="block text-xs font-semibold text-slate-400 mb-1.5">TOPICS & TICKERS <span className="font-normal">(optional{visibility === "public" ? " · searchable" : ""})</span></label>
+        <input value={topics} onChange={(e) => setTopics(e.target.value.slice(0, 120))} placeholder="NVDA, TSM, AI" aria-label="Topics" className={`${field} mb-1`} />
+        {parseTopics(topics).length > 0 && <div className="flex flex-wrap gap-1 mb-3">{parseTopics(topics).map((t) => <span key={t} className="text-[10px] font-bold bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded">{t}</span>)}</div>}
+
+        <label className="block text-xs font-semibold text-slate-400 mb-1.5 mt-3">ADD FRIENDS · {picked.size} picked</label>
+        {mutuals.length === 0 ? (
+          <p className="text-sm text-slate-400 mb-4">No mutual friends yet — that's fine. {visibility === "private" ? "You'll get an invite link right after creating it." : "Anyone on RichR can join a public community."}</p>
+        ) : (
+          <div className="border border-slate-100 rounded-2xl divide-y divide-slate-50 overflow-hidden mb-4">
+            {mutuals.map((f) => {
+              const on = picked.has(f.id);
+              return (
+                <button key={f.id} onClick={() => toggle(f.id)} className="w-full flex items-center justify-between px-3 py-2.5 text-sm bg-white active:bg-slate-50">
+                  <span className="font-semibold text-slate-600">@{f.username}</span>
+                  <span className={`w-5 h-5 rounded-full border flex items-center justify-center ${on ? "bg-emerald-500 border-emerald-500 text-white" : "border-slate-300"}`}>{on && <Check size={12} />}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+        <button onClick={async () => { setBusy(true); await onCreate({ name: name.trim(), visibility, description: description.trim(), topics: parseTopics(topics), memberIds: [...picked] }); setBusy(false); }} disabled={!valid || busy}
+          className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm py-3 rounded-full shadow disabled:opacity-50">
+          {busy ? "Creating…" : !visibility ? "Choose public or private" : `Create ${VIS_META[visibility].icon} ${VIS_META[visibility].label.toLowerCase()} community`}
+        </button>
+      </div>
     </div>
   );
 }
@@ -8152,55 +8421,14 @@ function ActivityFeed({ user, friends, names, myName, onOpenProfile, board, onOp
   );
 }
 
-function NewGroupModal({ mutuals, onClose, onCreate }) {
-  const [name, setName] = useState("");
-  const [picked, setPicked] = useState(new Set());
-  const [busy, setBusy] = useState(false);
-  const toggle = (id) => setPicked((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
-  const valid = name.trim().length > 0;
-  return (
-    <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl max-h-[92vh] overflow-y-auto overscroll-contain p-5" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="font-bold text-lg text-slate-700">New community</h3>
-          <button onClick={onClose} className="w-8 h-8 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center"><X size={14} /></button>
-        </div>
-        <label className="block text-xs font-semibold text-slate-400 mb-1.5">COMMUNITY NAME</label>
-        <input autoFocus value={name} onChange={(e) => setName(e.target.value.slice(0, 60))} placeholder="e.g. Nordic banks club"
-          className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm mb-4" />
-        <label className="block text-xs font-semibold text-slate-400 mb-1.5">ADD FRIENDS · {picked.size} picked</label>
-        {mutuals.length === 0 ? (
-          <p className="text-sm text-slate-400 mb-4">You have no mutual friends yet. You can still create the community and add people later.</p>
-        ) : (
-          <div className="border border-slate-100 rounded-2xl divide-y divide-slate-50 overflow-hidden mb-4">
-            {mutuals.map((f) => {
-              const on = picked.has(f.id);
-              return (
-                <button key={f.id} onClick={() => toggle(f.id)}
-                  className="w-full flex items-center justify-between px-3 py-2.5 text-sm bg-white active:bg-slate-50">
-                  <span className="font-semibold text-slate-600">@{f.username}</span>
-                  <span className={`w-5 h-5 rounded-full border flex items-center justify-center ${on ? "bg-emerald-500 border-emerald-500 text-white" : "border-slate-300"}`}>
-                    {on && <Check size={12} />}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        )}
-        <button onClick={async () => { setBusy(true); await onCreate(name.trim(), [...picked]); setBusy(false); }} disabled={!valid || busy}
-          className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm py-3 rounded-full shadow disabled:opacity-50">
-          {busy ? "Creating…" : "Create community"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpenTicker, onBack, onGroupChanged, richrData = null }) {
+function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpenTicker, onBack, onGroupChanged, onJoin = null, richrData = null }) {
   const [posts, setPosts] = useState(null);
   const [reactions, setReactions] = useState([]);   // [{post_id,user_id,emoji}]
   const [names, setNames] = useState({});          // user_id -> username
   const [members, setMembers] = useState(group.members || []);
+  const [gone, setGone] = useState(false);          // RLS returned nothing: private and we're not a member
+  const isMember = members.includes(user.id);
+  const [joiningNow, setJoiningNow] = useState(false);
   const [text, setText] = useState("");
   const [replyTo, setReplyTo] = useState(null);    // post being replied to
   const [sharing, setSharing] = useState(false);   // position picker open
@@ -8212,11 +8440,14 @@ function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpe
 
   const load = async (silent) => {
     try {
-      const [{ data: ps, error }, { data: ms }] = await Promise.all([
+      const [{ data: ps, error }, { data: ms }, { data: gr }] = await Promise.all([
         supabase.from("group_posts").select("id, user_id, parent_id, body, tickers, position, card, created_at").eq("group_id", group.id).order("created_at", { ascending: true }).limit(500),
         supabase.from("group_members").select("user_id").eq("group_id", group.id),
+        supabase.from("groups").select("id, name, visibility, description, topics, created_by").eq("id", group.id).maybeSingle(),
       ]);
       if (error) throw error;
+      if (!gr) { setGone(true); setPosts([]); return; }       // not visible to us (private, not a member) or deleted
+      if (gr.visibility !== group.visibility || gr.name !== group.name || gr.description !== group.description) onGroupChanged({ ...group, ...gr, members });
       const memberIds = (ms || []).map((m) => m.user_id);
       setMembers(memberIds);
       const ids = [...new Set([...memberIds, ...(ps || []).map((p) => p.user_id)])];
@@ -8320,6 +8551,13 @@ function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpe
     if (error) { say("Couldn't rename."); return; }
     onGroupChanged({ ...group, name: n });
   };
+  const saveSettings = async ({ visibility, description, topics }) => {
+    const { error } = await supabase.from("groups").update({ visibility, description, topics }).eq("id", group.id);
+    if (error) { say("Couldn't save the settings."); return; }
+    say(visibility !== group.visibility ? `“${group.name}” is now ${VIS_META[visibility].icon} ${VIS_META[visibility].label.toLowerCase()}.` : "Settings saved.");
+    onGroupChanged({ ...group, visibility, description, topics, members });
+  };
+  const joinHere = async () => { if (!onJoin) return; setJoiningNow(true); await onJoin(); setJoiningNow(false); await load(true); };
 
   // thread structure: top-level posts in order, replies grouped under their parent
   const tops = (posts || []).filter((p) => !p.parent_id);
@@ -8372,13 +8610,17 @@ function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpe
         style={{ paddingTop: "max(0.625rem, env(safe-area-inset-top))" }}>
         <button onClick={onBack} className="flex items-center gap-0.5 text-sm font-semibold text-emerald-700 -ml-1 shrink-0"><ChevronLeft size={20} /> Communities</button>
         <button onClick={() => setShowMembers(true)} className="flex-1 min-w-0 text-center">
-          <div className="font-bold text-slate-700 text-sm truncate">{group.name}</div>
-          <div className="text-[11px] text-slate-400">{members.length} member{members.length === 1 ? "" : "s"}</div>
+          <div className="font-bold text-slate-700 text-sm truncate">{visOf(group).icon} {group.name}</div>
+          <div className="text-[11px] text-slate-400">{visOf(group).label} · {members.length} member{members.length === 1 ? "" : "s"}</div>
         </button>
-        <button onClick={() => setShowMembers(true)} title={isOwner ? "Members, leave or delete" : "Members or leave"}
-          className="shrink-0 flex items-center gap-1 text-[11px] font-semibold text-slate-600 bg-white border border-slate-200 rounded-full px-2.5 py-1.5">
-          <Users size={13} /> {isOwner ? "Manage" : "Leave…"}
-        </button>
+        {isMember ? (
+          <button onClick={() => setShowMembers(true)} title={isOwner ? "Members, invites, settings" : "Members, invite link or leave"}
+            className="shrink-0 flex items-center gap-1 text-[11px] font-semibold text-slate-600 bg-white border border-slate-200 rounded-full px-2.5 py-1.5">
+            <Users size={13} /> {isOwner ? "Manage" : "Members"}
+          </button>
+        ) : canSelfJoin(group) && onJoin ? (
+          <button onClick={joinHere} disabled={joiningNow} className="shrink-0 h-8 px-4 rounded-full bg-slate-900 text-white text-xs font-bold disabled:opacity-50">{joiningNow ? "…" : "Join"}</button>
+        ) : null}
       </div>
       {/* sections */}
       <div className="sticky top-[3.1rem] z-20 bg-slate-50/95 backdrop-blur px-4 pt-2 pb-2">
@@ -8390,25 +8632,40 @@ function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpe
         </div>
       </div>
 
-      {section === "holdings" && <CommunityHoldings members={members} names={names} user={user} onOpenTicker={onOpenTicker} />}
-      {section === "sentiment" && <CommunitySentiment members={members} names={names} user={user} onOpenTicker={onOpenTicker} />}
+      {gone && (
+        <div className="px-4 py-10 text-center">
+          <Lock size={22} className="mx-auto text-slate-300 mb-2" />
+          <p className="text-sm font-semibold text-slate-700">This community isn't available</p>
+          <p className="text-xs text-slate-400 mt-1">It's private, or it no longer exists. Ask a member for an invite link.</p>
+          <button onClick={onBack} className="btn-secondary mt-4 text-xs">Back to Communities</button>
+        </div>
+      )}
+      {!gone && !isMember && posts !== null && (
+        <div className="mx-4 mt-3 bg-white border border-sky-100 rounded-2xl p-3.5 flex items-center gap-3">
+          <span className="text-xl">🌐</span>
+          <div className="flex-1 min-w-0 text-[13px] text-slate-600">{group.description ? <span className="block text-slate-800 font-semibold truncate">{group.description}</span> : null}You're viewing a public community. Join to post, vote in polls and share positions.</div>
+          {canSelfJoin(group) && onJoin && <button onClick={joinHere} disabled={joiningNow} className="btn-primary text-xs h-9 shrink-0 disabled:opacity-50">{joiningNow ? "Joining…" : "Join"}</button>}
+        </div>
+      )}
+      {!gone && section === "holdings" && <CommunityHoldings members={members} names={names} user={user} onOpenTicker={onOpenTicker} />}
+      {!gone && section === "sentiment" && <CommunitySentiment members={members} names={names} user={user} onOpenTicker={onOpenTicker} />}
 
       {/* messages */}
-      {section === "chat" && <div className="flex-1 px-4 pb-3">
+      {!gone && section === "chat" && <div className="flex-1 px-4 pb-3">
         {posts === null ? (
           <div className="mt-8 space-y-3" aria-busy="true"><div className="skel h-10 w-3/4" /><div className="skel h-10 w-2/3 ml-auto" /><div className="skel h-10 w-1/2" /></div>
         ) : tops.length === 0 ? (
           <div className="text-center mt-10">
             <MessageCircle size={24} className="mx-auto text-slate-300 mb-2" />
             <p className="text-sm font-semibold text-slate-600">Nothing yet</p>
-            <p className="text-xs text-slate-400 mt-1">Say hi, or tap + to drop in a stock, a position, your Buy/Hold/Sell call or a performance card. Tag tickers with $ — “what do you think of $ASML?”</p>
+            <p className="text-xs text-slate-400 mt-1">{isMember ? "Say hi, or tap + to drop in a stock, a position, your Buy/Hold/Sell call or a performance card. Tag tickers with $ — “what do you think of $ASML?”" : "No messages yet. Join and be the first to post."}</p>
           </div>
         ) : tops.map((p) => renderPost(p, false))}
         <div ref={bottomRef} />
       </div>}
 
-      {/* composer */}
-      {section === "chat" && <div className="sticky z-30 bg-white border-t border-slate-200 px-3 pt-2 pb-2" style={{ bottom: "calc(4.25rem + env(safe-area-inset-bottom, 0px))" }}>
+      {/* composer (members only) */}
+      {!gone && isMember && section === "chat" && <div className="sticky z-30 bg-white border-t border-slate-200 px-3 pt-2 pb-2" style={{ bottom: "calc(4.25rem + env(safe-area-inset-bottom, 0px))" }}>
         {replyTo && (
           <div className="flex items-center justify-between text-[11px] text-slate-500 bg-slate-50 rounded-xl px-2.5 py-1.5 mb-2">
             <span className="truncate">Replying to <b>@{uname(replyTo.user_id)}</b>: {replyTo.card ? `shared ${replyTo.card.kind === "performance" ? "their performance" : replyTo.card.ticker}` : replyTo.position ? `shared ${replyTo.position.ticker}` : replyTo.body}</span>
@@ -8436,8 +8693,8 @@ function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpe
       </div>}
 
       {showMembers && (
-        <MembersSheet group={group} members={members} names={names} user={user} isOwner={isOwner} mutuals={mutuals}
-          onAdd={addMember} onRemove={removeMember} onLeave={leave} onDelete={deleteGroup} onRename={rename}
+        <MembersSheet group={group} members={members} names={names} user={user} isOwner={isOwner} mutuals={mutuals} say={say}
+          onAdd={addMember} onRemove={removeMember} onLeave={leave} onDelete={deleteGroup} onRename={rename} onSettings={saveSettings}
           onClose={() => setShowMembers(false)} />
       )}
     </div>
@@ -8608,22 +8865,100 @@ function SharePositionPicker({ holdings, cur, fx, onPick, onClose }) {
   );
 }
 
-function MembersSheet({ group, members, names, user, isOwner, mutuals, onAdd, onRemove, onLeave, onDelete, onRename, onClose }) {
+
+function MembersSheet({ group, members, names, user, isOwner, mutuals, onAdd, onRemove, onLeave, onDelete, onRename, onSettings, onClose, say }) {
   const [confirm, setConfirm] = useState(null); // "leave" | "delete"
+  const [invites, setInvites] = useState(null);
+  const [minting, setMinting] = useState(false);
+  const [copied, setCopied] = useState(null);
+  const [vis, setVis] = useState(group.visibility || "private");
+  const [desc, setDesc] = useState(group.description || "");
+  const [topics, setTopics] = useState(Array.isArray(group.topics) ? group.topics.join(", ") : "");
+  const isMember = members.includes(user.id);
   const addable = (mutuals || []).filter((f) => !members.includes(f.id));
+  const loadInvites = async () => {
+    const { data } = await supabase.from("group_invites").select("id, code, created_by, created_at, expires_at, revoked_at, max_uses, uses").eq("group_id", group.id).is("revoked_at", null).order("created_at", { ascending: false });
+    setInvites(data || []);
+  };
+  useEffect(() => { if (isMember) loadInvites(); else setInvites([]); }, [group.id, isMember]);
+  const mint = async () => {
+    setMinting(true);
+    const { data, error } = await supabase.rpc("create_group_invite", { gid: group.id });
+    setMinting(false);
+    if (error || !data) { say && say("Couldn't create an invite link."); return; }
+    await loadInvites();
+    copy(data.code, data.id);
+  };
+  const copy = async (code, id) => {
+    const url = inviteUrl(code);
+    try { await navigator.clipboard.writeText(url); setCopied(id); setTimeout(() => setCopied(null), 2000); say && say("Invite link copied."); }
+    catch (e) { window.prompt("Copy this invite link", url); }
+  };
+  const revoke = async (id) => {
+    const { data } = await supabase.rpc("revoke_group_invite", { invite_id: id });
+    if (data) { say && say("Invite link revoked — it no longer works."); await loadInvites(); }
+  };
+  const dirtySettings = vis !== (group.visibility || "private") || desc.trim() !== (group.description || "") || parseTopics(topics).join(",") !== (Array.isArray(group.topics) ? group.topics : []).join(",");
+  const m = visOf(group);
   return (
     <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
       <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl max-h-[92vh] overflow-y-auto overscroll-contain p-5" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center justify-between mb-1">
           {isOwner ? (
-            <input defaultValue={group.name} onBlur={(e) => onRename(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
-              className="font-bold text-lg text-slate-700 bg-transparent border-b border-dashed border-slate-300 focus:border-indigo-400 outline-none min-w-0 flex-1 mr-2" />
+            <input defaultValue={group.name} onBlur={(e) => onRename(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }} aria-label="Community name"
+              className="font-bold text-lg text-slate-700 bg-transparent border-b border-dashed border-slate-300 focus:border-emerald-400 outline-none min-w-0 flex-1 mr-2" />
           ) : (
             <h3 className="font-bold text-lg text-slate-700 truncate">{group.name}</h3>
           )}
-          <button onClick={onClose} className="w-8 h-8 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center shrink-0"><X size={14} /></button>
+          <button onClick={onClose} aria-label="Close" className="w-8 h-8 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center shrink-0"><X size={14} /></button>
         </div>
-        {isOwner && <p className="text-[11px] text-slate-400 mb-3">You created this community — tap the name to rename it.</p>}
+        <div className="flex items-center gap-2 mb-3"><VisChip visibility={group.visibility} /><span className="text-[11px] text-slate-400">{m.blurb}</span></div>
+        {group.description && !isOwner && <p className="text-sm text-slate-600 mb-3">{group.description}</p>}
+
+        {/* owner settings */}
+        {isOwner && (
+          <div className="bg-slate-50 rounded-2xl p-3 mb-4 space-y-2.5">
+            <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400">Settings</div>
+            <div role="radiogroup" aria-label="Visibility" className="grid grid-cols-2 gap-2">
+              {["public", "private"].map((v) => (
+                <button key={v} role="radio" aria-checked={vis === v} onClick={() => setVis(v)}
+                  className={`rounded-xl border-2 px-3 py-2 text-left ${vis === v ? (v === "public" ? "border-sky-500 bg-sky-50" : "border-slate-800 bg-white") : "border-slate-200 bg-white"}`}>
+                  <div className="text-sm font-bold text-slate-800">{VIS_META[v].icon} {VIS_META[v].label}</div>
+                  <div className="text-[10px] text-slate-500 leading-snug">{VIS_META[v].blurb}</div>
+                </button>
+              ))}
+            </div>
+            {vis !== (group.visibility || "private") && (
+              <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1.5">
+                {vis === "public" ? "Switching to public makes the name, members and all messages readable by everyone on RichR." : "Switching to private hides this community from everyone who isn't a member."}
+              </p>
+            )}
+            <textarea value={desc} onChange={(e) => setDesc(e.target.value.slice(0, 280))} rows={2} placeholder="Description" aria-label="Description" className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm bg-white resize-none" />
+            <input value={topics} onChange={(e) => setTopics(e.target.value.slice(0, 120))} placeholder="Topics & tickers: NVDA, TSM, AI" aria-label="Topics" className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm bg-white" />
+            <button disabled={!dirtySettings} onClick={() => onSettings({ visibility: vis, description: desc.trim(), topics: parseTopics(topics) })} className="btn-primary w-full text-xs h-9 disabled:opacity-40">Save settings</button>
+          </div>
+        )}
+
+        {/* invite link — every member of a private community can invite; public too, for convenience */}
+        {isMember && (
+          <div className="mb-4">
+            <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1 flex items-center gap-1"><Share2 size={12} /> Invite link</div>
+            {invites === null ? <Skeleton lines={1} /> : (
+              <div className="space-y-1.5">
+                {invites.map((inv) => (
+                  <div key={inv.id} className="flex items-center gap-2 bg-slate-50 rounded-xl px-3 py-2">
+                    <code className="text-[11px] text-slate-600 truncate flex-1">…/?invite={inv.code.slice(0, 6)}…{inv.code.slice(-4)}</code>
+                    <span className="text-[10px] text-slate-400 shrink-0">{inv.uses} use{inv.uses === 1 ? "" : "s"}</span>
+                    <button onClick={() => copy(inv.code, inv.id)} className="text-[11px] font-bold text-emerald-700 shrink-0">{copied === inv.id ? "Copied" : "Copy"}</button>
+                    {(inv.created_by === user.id || isOwner) && <button onClick={() => revoke(inv.id)} className="text-[11px] font-semibold text-rose-600 shrink-0">Revoke</button>}
+                  </div>
+                ))}
+                <button onClick={mint} disabled={minting} className="btn-secondary w-full text-xs h-9 disabled:opacity-50">{minting ? "Creating…" : invites.length ? "New invite link" : "Create invite link"}</button>
+                <p className="text-[11px] text-slate-400">Anyone with the link can join{group.visibility === "private" ? " this private community" : ""}. Revoke a link to stop it working.</p>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1">Members · {members.length}</div>
         <div className="border border-slate-100 rounded-2xl divide-y divide-slate-50 overflow-hidden mb-4">
@@ -8637,22 +8972,23 @@ function MembersSheet({ group, members, names, user, isOwner, mutuals, onAdd, on
           ))}
         </div>
 
-        <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1 flex items-center gap-1"><UserPlus size={12} /> Add friends</div>
-        {addable.length === 0 ? (
-          <p className="text-sm text-slate-400 mb-4">All your mutual friends are already here. Only people who've added you back can be added.</p>
-        ) : (
-          <div className="border border-slate-100 rounded-2xl divide-y divide-slate-50 overflow-hidden mb-4">
-            {addable.map((f) => (
-              <button key={f.id} onClick={() => onAdd(f.id, f.username)}
-                className="w-full flex items-center justify-between px-3 py-2.5 text-sm bg-white active:bg-slate-50">
-                <span className="font-semibold text-slate-600">@{f.username}</span>
-                <span className="text-xs font-semibold text-emerald-700">Add</span>
-              </button>
-            ))}
-          </div>
-        )}
+        {isMember && (<>
+          <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1 flex items-center gap-1"><UserPlus size={12} /> Add friends</div>
+          {addable.length === 0 ? (
+            <p className="text-sm text-slate-400 mb-4">{(mutuals || []).length === 0 ? "Mutual friends can be added directly; anyone else joins with the invite link." : "All your mutual friends are already here — share the invite link with anyone else."}</p>
+          ) : (
+            <div className="border border-slate-100 rounded-2xl divide-y divide-slate-50 overflow-hidden mb-4">
+              {addable.map((f) => (
+                <button key={f.id} onClick={() => onAdd(f.id, f.username)} className="w-full flex items-center justify-between px-3 py-2.5 text-sm bg-white active:bg-slate-50">
+                  <span className="font-semibold text-slate-600">@{f.username}</span>
+                  <span className="text-xs font-semibold text-emerald-700">Add</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </>)}
 
-        {confirm ? (
+        {!isMember ? null : confirm ? (
           <div className="bg-rose-50 rounded-2xl p-3 text-sm">
             <p className="text-rose-700 font-semibold mb-2">{confirm === "delete" ? "Delete this community for everyone? Messages are gone for good." : "Leave this community?"}</p>
             <div className="flex gap-2">
@@ -8966,4 +9302,5 @@ export function PublicProfile({ username }) {
 /* Pure helpers exposed for unit tests only (see src/*.test.js). */
 export const __helpers = { pct, money, moneyShort, fxConvert, parseHoldingsCsv, latestCalls, activeCalls, tallyAfterVote, castVote, removeVote, SENT_CACHE, sentimentBus, SOCIAL_ME,
   editHolding, removeHoldings, setHoldingShares, addHoldingShares, portfolioTotals, holdingValue, round6,
-  QuickEditSheet, SharesSheet, ConfirmDialog, EditPortfolio, Stepper, cutSeries, exchangeOf, isFund, pctOf, daysOld, withTimeout, periodReturn, idxOnOrBefore, computeScore };
+  QuickEditSheet, SharesSheet, ConfirmDialog, EditPortfolio, Stepper,
+  VIS_META, visOf, isDiscoverable, canSelfJoin, parseTopics, communityMatches, inviteUrl, CommunityCard, NewGroupModal, InviteSheet, ScopeSummary, cutSeries, exchangeOf, isFund, pctOf, daysOld, withTimeout, periodReturn, idxOnOrBefore, computeScore };

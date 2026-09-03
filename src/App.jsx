@@ -2,6 +2,20 @@ import { useEffect, useRef, useState } from "react";
 import { supabase } from "./supabase";
 import RichR, { PublicProfile } from "./RichR";
 
+/* Invite links (/?invite=CODE) survive the OAuth round-trip through localStorage;
+   RichR consumes the code once the user is signed in. */
+const INVITE_KEY = "richr_invite";
+if (typeof window !== "undefined") {
+  try {
+    const code = new URLSearchParams(window.location.search).get("invite");
+    if (code && /^[A-Za-z0-9_-]{16,64}$/.test(code)) {
+      localStorage.setItem(INVITE_KEY, code);
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  } catch (e) { /* storage blocked — the link just opens the app */ }
+}
+const hasPendingInvite = () => { try { return !!localStorage.getItem(INVITE_KEY); } catch (e) { return false; } };
+
 export default function App() {
   // undefined = still checking the stored session, null = signed out
   const [session, setSession] = useState(undefined);
@@ -101,6 +115,11 @@ function Login() {
     <div ref={signInRef} id="signin" className="bg-white rounded-3xl p-6 sm:p-8 shadow-lg shadow-slate-200/60 border border-slate-100 w-full max-w-[580px] mx-auto">
       <h2 className="font-bold text-[22px] tracking-tight text-slate-900">Create your portfolio</h2>
       <p className="text-[15px] text-slate-500 mt-1">Create your portfolio in about 20 seconds. It’s free.</p>
+      {hasPendingInvite() && (
+        <div className="mt-3 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2 text-[13px] text-emerald-800">
+          🔒 You've been invited to a private community — sign in and we'll take you there.
+        </div>
+      )}
 
       <button onClick={() => signInWith("google", "Google")} disabled={!!busy}
         className="mt-6 w-full h-14 flex items-center justify-center gap-3 rounded-2xl bg-slate-900 hover:bg-slate-800 text-white font-semibold text-[15px] transition disabled:opacity-60">
