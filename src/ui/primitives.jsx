@@ -188,22 +188,38 @@ export function SwipeRow({ open, onOpen, onClose, actions, children }) {
 }
 
 /* One-tap confirmation: "Delete NVDA from your portfolio?"  Cancel / Delete */
-export function ConfirmDialog({ text, label = "Delete", onCancel, onConfirm }) {
+export function ConfirmDialog({ text, title = null, label = "Delete", onCancel, onConfirm, busy = false, error = "" }) {
   useEffect(() => {
-    const esc = (e) => { if (e.key === "Escape") onCancel(); if (e.key === "Enter") onConfirm(); };
+    const esc = (e) => { if (busy) return; if (e.key === "Escape") onCancel(); if (e.key === "Enter") onConfirm(); };
     window.addEventListener("keydown", esc); return () => window.removeEventListener("keydown", esc);
-  }, []);
+  }, [busy, onCancel, onConfirm]);
   return (
-    <div className="fixed inset-0 bg-slate-900/40 z-[60] flex items-center justify-center p-6" onClick={onCancel}>
-      <div role="alertdialog" className="bg-white rounded-2xl p-5 w-full max-w-xs shadow-xl" style={{ animation: "richr-in .15s ease-out both" }} onClick={(e) => e.stopPropagation()}>
-        <div className="text-[15px] font-bold text-slate-900 leading-snug">{text}</div>
+    <div className="fixed inset-0 bg-slate-900/40 z-[60] flex items-center justify-center p-6" onClick={() => !busy && onCancel()}>
+      <div role="alertdialog" aria-busy={busy} className="bg-white rounded-2xl p-5 w-full max-w-xs shadow-xl" style={{ animation: "richr-in .15s ease-out both" }} onClick={(e) => e.stopPropagation()}>
+        {title && <div className="text-[17px] font-bold text-slate-900 leading-snug">{title}</div>}
+        <div className={title ? "text-[13px] text-slate-600 leading-relaxed mt-1.5" : "text-[15px] font-bold text-slate-900 leading-snug"}>{text}</div>
+        {error && <div role="alert" className="mt-3 text-[12px] text-rose-700 bg-rose-50 border border-rose-100 rounded-lg px-2.5 py-2">{error}</div>}
         <div className="grid grid-cols-2 gap-2 mt-4">
-          <button onClick={onCancel} className="h-11 rounded-xl bg-slate-100 text-slate-700 text-sm font-semibold">Cancel</button>
-          <button onClick={onConfirm} autoFocus className="h-11 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-sm font-bold">{label}</button>
+          <button onClick={onCancel} disabled={busy} className="h-11 rounded-xl bg-slate-100 text-slate-700 text-sm font-semibold disabled:opacity-50">Cancel</button>
+          <button onClick={onConfirm} disabled={busy} autoFocus className="h-11 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-sm font-bold disabled:opacity-60 flex items-center justify-center gap-2">
+            {busy && <span className="w-3.5 h-3.5 rounded-full border-2 border-white/40 border-t-white" style={{ animation: "spin .8s linear infinite" }} />}{busy ? "Deleting…" : label}
+          </button>
         </div>
       </div>
     </div>
   );
+}
+
+/* Runs an async confirm action with loading / error / double-tap protection. */
+export function AsyncConfirm({ text, title, label, onCancel, action }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const go = async () => {
+    if (busy) return;
+    setBusy(true); setError("");
+    try { await action(); } catch (e) { setError((e && e.message) || "Something went wrong — nothing was deleted."); setBusy(false); }
+  };
+  return <ConfirmDialog text={text} title={title} label={label} busy={busy} error={error} onCancel={onCancel} onConfirm={go} />;
 }
 
 /* [ − ] 20 [ + ] with direct numeric input */
