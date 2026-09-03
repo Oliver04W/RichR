@@ -1,9 +1,10 @@
 
 import React, { useState, useEffect, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
 import {
   Plus, RefreshCw, Trash2, Users, BookOpen, Home, Briefcase, Check, X,
   Clock, HelpCircle, Pencil, Trophy, Share2, TrendingUp, TrendingDown,
-  ChevronDown, ChevronLeft, ChevronRight, Lock, Target, Sparkles, Flag, Activity, Calendar, Camera, Upload, Search, Star, ExternalLink, User, MessageCircle, Send, UserPlus, LogOut, CornerDownRight, UsersRound, Handshake, PenLine, Vote, ArrowLeftRight
+  ChevronDown, ChevronLeft, ChevronRight, Lock, Target, Sparkles, Flag, Activity, Calendar, Camera, Upload, Search, Star, ExternalLink, User, MessageCircle, Send, UserPlus, LogOut, CornerDownRight, UsersRound, Handshake, PenLine, Vote, ArrowLeftRight, MoreHorizontal, Minus, SlidersHorizontal
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine,
@@ -272,6 +273,47 @@ const holdingValue = (h, cur, fx) => {
 };
 const byValueDesc = (holdings, cur, fx) =>
   [...holdings].sort((a, b) => holdingValue(b, cur, fx) - holdingValue(a, cur, fx));
+
+/* ---------- holdings maintenance (pure, unit-tested) ----------
+   Every quick edit goes through these so the list, totals, chart key,
+   leaderboard row and public profile all derive from one array. */
+const round6 = (n) => Math.round(Number(n) * 1e6) / 1e6;
+const cleanHolding = (h) => ({
+  ...h,
+  shares: round6(Math.max(0, Number(h.shares) || 0)),
+  buyPrice: Math.max(0, Number(h.buyPrice) || 0),
+  currency: String(h.currency || "").toUpperCase() || undefined,
+});
+/* Change any fields of one holding (shares, buyPrice, buyDate, currency, …). */
+const editHolding = (holdings, id, patch) =>
+  (holdings || []).map((h) => (h.id === id ? cleanHolding({ ...h, ...patch, sample: false }) : h));
+/* Remove one or many holdings by id. */
+const removeHoldings = (holdings, ids) => {
+  const set = new Set(Array.isArray(ids) ? ids : [ids]);
+  return (holdings || []).filter((h) => !set.has(h.id));
+};
+/* Set the share count; zero (or less) removes the holding. */
+const setHoldingShares = (holdings, id, n) =>
+  round6(n) > 0 ? editHolding(holdings, id, { shares: n }) : removeHoldings(holdings, id);
+/* Add shares bought at `price` (weighted average buy price); a negative
+   delta simply reduces the count without changing the average. */
+const addHoldingShares = (holdings, id, delta, price = null) => {
+  const h = (holdings || []).find((x) => x.id === id);
+  if (!h) return holdings;
+  const s0 = Number(h.shares) || 0, d = Number(delta) || 0, total = round6(s0 + d);
+  if (total <= 0) return removeHoldings(holdings, id);
+  if (d <= 0 || !(Number(price) > 0)) return editHolding(holdings, id, { shares: total });
+  return editHolding(holdings, id, { shares: total, buyPrice: (s0 * Number(h.buyPrice) + d * Number(price)) / total });
+};
+/* Value, cost and return of a holdings array in the display currency. */
+const portfolioTotals = (holdings, cur, fx) => {
+  let value = 0, cost = 0;
+  (holdings || []).forEach((h) => {
+    value += holdingValue(h, cur, fx);
+    cost += fxConvert(Number(h.shares) * Number(h.buyPrice), h.currency || cur, cur, fx);
+  });
+  return { value, cost, pl: value - cost, plPct: cost > 0 ? ((value - cost) / cost) * 100 : 0 };
+};
 
 /* Social metrics from a portfolio's open (holdings) + closed trades. */
 const socialStats = (p, cur, fx) => {
@@ -1032,7 +1074,11 @@ export default function RichR({ user, onSignOut }) {
         : [...p.holdings, h],
     }));
   };
-  const removeHolding = (id) => patchActive((p) => ({ holdings: p.holdings.filter((h) => h.id !== id) }));
+  const removeHolding = (id) => patchActive((p) => ({ holdings: removeHoldings(p.holdings, id) }));
+  const removeMany = (ids) => patchActive((p) => ({ holdings: removeHoldings(p.holdings, ids) }));
+  const editFields = (id, fields) => patchActive((p) => ({ holdings: editHolding(p.holdings, id, fields) }));
+  const setShares = (id, n) => patchActive((p) => ({ holdings: setHoldingShares(p.holdings, id, n) }));
+  const addShares = (id, n, price) => patchActive((p) => ({ holdings: addHoldingShares(p.holdings, id, n, price) }));
   /* Sell part of a position: the sold shares become a closed trade, the rest stays open. */
   const sellShares = (id, n, sellPrice, sellDate) =>
     patchActive((p) => {
@@ -1213,6 +1259,7 @@ export default function RichR({ user, onSignOut }) {
           <PositionsTab active={active} cur={cur} fx={data.fx || DEFAULT_FX}
             companyInfo={data.companyInfo || {}} onSaveInfo={saveCompanyInfo}
             onUpsert={upsertHolding} onRemove={removeHolding} onSetPrice={setPrice} onLoadSample={loadSample} onClosePosition={closePosition}
+            onEditFields={editFields} onSetShares={setShares} onAddShares={addShares} onRemoveMany={removeMany} onSell={sellShares} say={say}
             watchlist={data.watchlist || []} onRemoveWatch={removeWatch} onSetWatchPrice={setWatchPrice}
             goResearch={() => setTab("research")}
             openImport={importOnce} onImportOpened={() => setImportOnce(false)} />
@@ -2554,8 +2601,19 @@ function AllocationCard({ active, cur, fx }) {
 }
 
 /* ================= POSITIONS ================= */
-function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRemove, onSetPrice, onLoadSample, onClosePosition, watchlist, onRemoveWatch, onSetWatchPrice, goResearch, openImport, onImportOpened }) {
+function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRemove, onSetPrice, onLoadSample, onClosePosition,
+  onEditFields, onSetShares, onAddShares, onRemoveMany, onSell, say, watchlist, onRemoveWatch, onSetWatchPrice, goResearch, openImport, onImportOpened }) {
   const [editing, setEditing] = useState(null);
+  const [quick, setQuick] = useState(null);      // holding in the quick edit sheet
+  const [shares, setSharesUi] = useState(null);  // { h, mode: "add" | "reduce" }
+  const [confirm, setConfirm] = useState(null);  // { text, label, onYes }
+  const [swipeOpen, setSwipeOpen] = useState(null);
+  const [editMode, setEditMode] = useState(false);
+  const live = (h) => active.holdings.find((x) => x.id === h.id) || null;
+  const askDelete = (h, after) => setConfirm({
+    text: `Delete ${h.ticker} from your portfolio?`, label: "Delete",
+    onYes: () => { onRemove(h.id); setConfirm(null); setSwipeOpen(null); if (after) after(); say && say(`${h.ticker} removed.`); },
+  });
   const [importing, setImporting] = useState(false);
   const [dense, setDense] = useState(true); // compact rows by default; "Show details" expands
   const totalValue = active.holdings.reduce((s, h) => s + holdingValue(h, cur, fx), 0);
@@ -2579,8 +2637,16 @@ function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRe
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <h2 className="font-bold text-lg text-slate-700">Positions</h2>
-        {view === "holdings" && (
+        {view === "holdings" && editMode ? (
+          <button onClick={() => setEditMode(false)} className="bg-slate-900 text-white text-sm font-semibold px-4 py-2 rounded-full">Done</button>
+        ) : view === "holdings" && (
           <div className="flex gap-2">
+            {active.holdings.length > 1 && (
+              <button onClick={() => { setEditMode(true); setSwipeOpen(null); }} aria-label="Edit portfolio" title="Edit portfolio"
+                className="w-9 h-9 flex items-center justify-center bg-white border border-slate-200 text-slate-600 rounded-full shadow-sm">
+                <SlidersHorizontal size={16} />
+              </button>
+            )}
             <button onClick={() => setImporting(true)}
               className="flex items-center gap-1.5 bg-white border border-slate-200 text-slate-600 text-sm font-semibold px-3.5 py-2 rounded-full shadow-sm">
               <Camera size={15} /> Import
@@ -2632,17 +2698,36 @@ function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRe
             </button>
           </div>
         )}
+        {editMode ? (
+          <EditPortfolio holdings={active.holdings} cur={cur} fx={fx} onEditFields={onEditFields} onRemoveMany={onRemoveMany}
+            onConfirm={setConfirm} onDone={() => setEditMode(false)} />
+        ) : (<>
         <div className="flex items-center justify-between">
           <div className="text-xs text-slate-400 tabular-nums">{active.holdings.length} positions · {money(totalValue, cur)}</div>
           <button onClick={() => setDense((v) => !v)} className="text-xs font-semibold text-slate-500 bg-slate-100 px-2.5 py-1 rounded-lg">{dense ? "Show details" : "Compact"}</button>
         </div>
-        <div className="card-tight divide-y divide-slate-100 !py-1">
+        <div className="card-tight divide-y divide-slate-100 !py-1 overflow-hidden">
           {byValueDesc(active.holdings, cur, fx).map((h) => (
-            <PositionCard key={h.id} h={h} cur={cur} fx={fx} onOpen={() => setDetail(h)}
-              weight={totalValue > 0 ? (holdingValue(h, cur, fx) / totalValue) * 100 : 0} expanded={!dense}
-              onEdit={() => setEditing(h)} onRemove={() => onRemove(h.id)} onSetPrice={onSetPrice} />
+            <SwipeRow key={h.id} open={swipeOpen === h.id} onOpen={() => setSwipeOpen(h.id)} onClose={() => setSwipeOpen((v) => (v === h.id ? null : v))}
+              actions={[
+                { label: "Edit", tone: "bg-slate-700 text-white", onClick: () => { setSwipeOpen(null); setQuick(h); } },
+                { label: "Delete", tone: "bg-rose-500 text-white", onClick: () => askDelete(h) },
+              ]}>
+              <PositionCard h={h} cur={cur} fx={fx} onOpen={() => (swipeOpen ? setSwipeOpen(null) : setQuick(h))}
+                weight={totalValue > 0 ? (holdingValue(h, cur, fx) / totalValue) * 100 : 0} expanded={!dense}
+                onEdit={() => setQuick(h)} onRemove={() => askDelete(h)} onSetPrice={onSetPrice}
+                menu={[
+                  { label: "Edit", icon: Pencil, onClick: () => setQuick(h) },
+                  { label: "Add shares", icon: Plus, onClick: () => setSharesUi({ h, mode: "add" }) },
+                  { label: "Reduce shares", icon: Minus, onClick: () => setSharesUi({ h, mode: "reduce" }) },
+                  { label: "Details & discussion", icon: MessageCircle, onClick: () => setDetail(h) },
+                  { label: "Delete", icon: Trash2, danger: true, onClick: () => askDelete(h) },
+                ]} />
+            </SwipeRow>
           ))}
         </div>
+        <p className="text-[11px] text-slate-400 text-center">Tap a position to edit it · swipe left for Edit / Delete</p>
+        </>)}
       </>)}
 
       {(active.closed && active.closed.length > 0) && (
@@ -2707,6 +2792,27 @@ function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRe
         <ImportModal cur={cur} onClose={() => setImporting(false)}
           onImport={(rows) => { rows.forEach(onUpsert); setImporting(false); }} />
       )}
+
+      {quick && live(quick) && (
+        <QuickEditSheet h={live(quick)} cur={cur} fx={fx}
+          onSave={(fields) => { onEditFields(quick.id, fields); setQuick(null); say && say(`${quick.ticker} updated.`); }}
+          onRemove={() => askDelete(quick, () => setQuick(null))}
+          onZero={() => setConfirm({ text: `Remove ${quick.ticker} entirely?`, label: "Remove", onYes: () => { onRemove(quick.id); setConfirm(null); setQuick(null); say && say(`${quick.ticker} removed.`); } })}
+          onAdd={() => setSharesUi({ h: quick, mode: "add" })} onReduce={() => setSharesUi({ h: quick, mode: "reduce" })}
+          onDetails={() => { setDetail(quick); setQuick(null); }}
+          onClose={() => setQuick(null)} />
+      )}
+      {shares && live(shares.h) && (
+        <SharesSheet h={live(shares.h)} mode={shares.mode} cur={cur}
+          onAdd={(n, price) => { onAddShares(shares.h.id, n, price); setSharesUi(null); say && say(`Added ${n} ${shares.h.ticker}.`); }}
+          onReduce={(n, price, asSale) => {
+            const h = live(shares.h); const left = round6(Number(h.shares) - n);
+            const apply = () => { if (asSale) onSell(h.id, n, price, new Date().toISOString().slice(0, 10)); else onSetShares(h.id, left); setSharesUi(null); setConfirm(null); say && say(left > 0 ? `${h.ticker}: now ${left} shares.` : `${h.ticker} removed.`); };
+            if (left > 0) apply(); else setConfirm({ text: `Remove ${h.ticker} entirely?`, label: "Remove", onYes: apply });
+          }}
+          onClose={() => setSharesUi(null)} />
+      )}
+      {confirm && <ConfirmDialog text={confirm.text} label={confirm.label} onCancel={() => setConfirm(null)} onConfirm={confirm.onYes} />}
 
       {detail && (
         <DetailSheet h={active.holdings.find((x) => x.id === detail.id) || detail}
@@ -2805,8 +2911,9 @@ function WatchCard({ w, cur, onBuy, onRemove, onSetPrice }) {
   );
 }
 
-function PositionCard({ h, cur, fx, onOpen, onEdit, onRemove, onSetPrice, weight = null, expanded = false }) {
+function PositionCard({ h, cur, fx, onOpen, onEdit, onRemove, onSetPrice, weight = null, expanded = false, menu = null }) {
   const [editPrice, setEditPrice] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(null); // button rect while open
   const hc = h.currency || cur;
   const cp = h.currentPrice > 0 ? h.currentPrice : h.buyPrice;
   const value = fxConvert(h.shares * cp, hc, cur, fx);
@@ -2826,9 +2933,11 @@ function PositionCard({ h, cur, fx, onOpen, onEdit, onRemove, onSetPrice, weight
               {h.sample && <span className="text-[9px] font-bold uppercase tracking-wide text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded">sample</span>}
               {hc !== cur && <span className="text-[9px] font-bold text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">{hc}</span>}
             </div>
-            {weight != null && <div className="text-xs font-semibold text-slate-500 tabular-nums">{weight.toFixed(1)}%</div>}
           </div>
-          <div className="text-xs text-slate-400 truncate">{h.name}</div>
+          <div className="flex items-baseline justify-between gap-2">
+            <div className="text-xs text-slate-400 truncate">{h.name}</div>
+            {weight != null && <div className="text-[11px] font-semibold text-slate-500 tabular-nums shrink-0">{weight.toFixed(1)}%</div>}
+          </div>
           {weight != null && (
             <div className="mt-1.5 h-1.5 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-slate-800 rounded-full" style={{ width: `${Math.min(100, weight)}%` }} /></div>
           )}
@@ -2837,6 +2946,13 @@ function PositionCard({ h, cur, fx, onOpen, onEdit, onRemove, onSetPrice, weight
           <div className="font-bold text-slate-900 text-[15px] tabular-nums leading-tight">{money(value, cur)}</div>
           <Ret v={plPct} className="text-xs font-bold block mt-0.5" />
         </div>
+        {menu && (
+          <div className="relative shrink-0 -mr-1.5">
+            <button onClick={(e) => { e.stopPropagation(); setMenuOpen((v) => (v ? null : e.currentTarget.getBoundingClientRect())); }} aria-label={`More actions for ${h.ticker}`} aria-haspopup="menu"
+              className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:bg-slate-100 active:bg-slate-100"><MoreHorizontal size={18} /></button>
+            {menuOpen && <RowMenu items={menu} anchor={menuOpen} onClose={() => setMenuOpen(null)} />}
+          </div>
+        )}
       </div>
 
       {expanded && (
@@ -2861,6 +2977,284 @@ function PositionCard({ h, cur, fx, onOpen, onEdit, onRemove, onSetPrice, weight
           {h.thesis && <p className="w-full text-xs text-slate-400 italic truncate">“{h.thesis}”</p>}
         </div>
       )}
+    </div>
+  );
+}
+
+/* ================= QUICK HOLDINGS MAINTENANCE ================= */
+/* The goal is speed: change or remove a holding in a few seconds, from the
+   list (••• menu, swipe) or from a tap. Every change lands in the same
+   holdings array, so totals, chart, leaderboard and profile follow at once. */
+
+/* ••• dropdown — closes on any outside tap */
+function RowMenu({ items, onClose, anchor }) {
+  /* Portalled: the rows are transformed (swipe) and clipped, so the menu
+     lives on <body> at the button's screen position. */
+  const r = anchor || { bottom: 0, right: 0 };
+  const flipUp = typeof window !== "undefined" && r.bottom + 44 * items.length + 16 > window.innerHeight;
+  const pos = { position: "fixed", right: Math.max(8, (typeof window !== "undefined" ? window.innerWidth : 0) - r.right), ...(flipUp ? { bottom: window.innerHeight - r.top + 4 } : { top: r.bottom + 4 }) };
+  return createPortal(
+    <>
+      <div className="fixed inset-0 z-[55]" onClick={(e) => { e.stopPropagation(); onClose(); }} />
+      <div role="menu" className="z-[56] w-48 bg-white rounded-xl shadow-lg border border-slate-100 py-1" style={{ ...pos, animation: "richr-in .12s ease-out both" }} onClick={(e) => e.stopPropagation()}>
+        {items.map((it) => (
+          <button key={it.label} role="menuitem" onClick={() => { onClose(); it.onClick(); }}
+            className={`w-full flex items-center gap-2.5 px-3 h-10 text-sm font-semibold text-left ${it.danger ? "text-rose-600" : "text-slate-700"} hover:bg-slate-50`}>
+            {it.icon && <it.icon size={15} className={it.danger ? "text-rose-500" : "text-slate-400"} />} {it.label}
+          </button>
+        ))}
+      </div>
+    </>, document.body);
+}
+
+/* Swipe left to reveal actions (touch only; mouse users get the ••• menu). */
+function SwipeRow({ open, onOpen, onClose, actions, children }) {
+  const W = 72 * actions.length;
+  const start = useRef(null);
+  const st = useRef({ drag: false, dx: 0 });          // gesture truth lives in refs (touch events arrive faster than renders)
+  const [, tick] = useState(0);
+  const render = () => tick((n) => n + 1);
+  const x = st.current.drag ? st.current.dx : open ? -W : 0;
+  const onStart = (e) => { const t = e.touches[0]; start.current = { x: t.clientX, y: t.clientY, dead: false }; };
+  const onMove = (e) => {
+    if (!start.current || start.current.dead) return;
+    const t = e.touches[0]; const ddx = t.clientX - start.current.x, ddy = t.clientY - start.current.y;
+    if (!st.current.drag) { if (Math.abs(ddy) > Math.abs(ddx)) { start.current.dead = true; return; } if (Math.abs(ddx) < 6) return; st.current.drag = true; }
+    st.current.dx = Math.max(-W, Math.min(0, (open ? -W : 0) + ddx));
+    render();
+  };
+  const onEnd = () => {
+    if (st.current.drag) { if (st.current.dx < -W / 2) onOpen(); else onClose(); }
+    st.current = { drag: false, dx: 0 }; start.current = null; render();
+  };
+  return (
+    <div className="relative overflow-hidden" onTouchStart={onStart} onTouchMove={onMove} onTouchEnd={onEnd} onTouchCancel={onEnd}>
+      <div className="absolute inset-y-0 right-0 flex" style={{ width: W }} aria-hidden={!open}>
+        {actions.map((a) => (
+          <button key={a.label} tabIndex={open ? 0 : -1} onClick={a.onClick} className={`flex-1 text-sm font-bold ${a.tone}`}>{a.label}</button>
+        ))}
+      </div>
+      <div className="relative bg-white" style={{ transform: `translateX(${x}px)`, transition: st.current.drag ? "none" : "transform .2s cubic-bezier(.2,.8,.2,1)" }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/* One-tap confirmation: "Delete NVDA from your portfolio?"  Cancel / Delete */
+function ConfirmDialog({ text, label = "Delete", onCancel, onConfirm }) {
+  useEffect(() => {
+    const esc = (e) => { if (e.key === "Escape") onCancel(); if (e.key === "Enter") onConfirm(); };
+    window.addEventListener("keydown", esc); return () => window.removeEventListener("keydown", esc);
+  }, []);
+  return (
+    <div className="fixed inset-0 bg-slate-900/40 z-[60] flex items-center justify-center p-6" onClick={onCancel}>
+      <div role="alertdialog" className="bg-white rounded-2xl p-5 w-full max-w-xs shadow-xl" style={{ animation: "richr-in .15s ease-out both" }} onClick={(e) => e.stopPropagation()}>
+        <div className="text-[15px] font-bold text-slate-900 leading-snug">{text}</div>
+        <div className="grid grid-cols-2 gap-2 mt-4">
+          <button onClick={onCancel} className="h-11 rounded-xl bg-slate-100 text-slate-700 text-sm font-semibold">Cancel</button>
+          <button onClick={onConfirm} autoFocus className="h-11 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-sm font-bold">{label}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* [ − ] 20 [ + ] with direct numeric input */
+function Stepper({ value, onChange, min = 0, step = 1, size = "md", ariaLabel = "Shares" }) {
+  const [text, setText] = useState(String(value));
+  useEffect(() => { setText(String(value)); }, [value]);
+  const commit = (raw) => { const n = parseFloat(String(raw).replace(",", ".")); onChange(Number.isFinite(n) ? round6(Math.max(min, n)) : value); };
+  const bump = (d) => onChange(round6(Math.max(min, (Number(value) || 0) + d)));
+  const h = size === "sm" ? "h-9" : "h-12";
+  const btn = `${h} ${size === "sm" ? "w-9" : "w-12"} rounded-xl bg-slate-100 active:bg-slate-200 text-slate-700 flex items-center justify-center shrink-0 disabled:opacity-40`;
+  return (
+    <div className="flex items-center gap-1.5">
+      <button type="button" onClick={() => bump(-step)} disabled={Number(value) - step < min} aria-label={`Decrease ${ariaLabel}`} className={btn}><Minus size={16} /></button>
+      <input inputMode="decimal" value={text} onChange={(e) => setText(e.target.value)} onBlur={(e) => commit(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }} aria-label={ariaLabel}
+        className={`${h} ${size === "sm" ? "w-14 text-sm" : "w-24 text-lg"} text-center font-bold tabular-nums border border-slate-200 rounded-xl bg-white outline-none focus:border-emerald-400`} />
+      <button type="button" onClick={() => bump(step)} aria-label={`Increase ${ariaLabel}`} className={btn}><Plus size={16} /></button>
+    </div>
+  );
+}
+
+/* Tap a holding → change shares, price, date, currency; delete at the bottom. */
+function QuickEditSheet({ h, cur, fx, onSave, onRemove, onZero, onAdd, onReduce, onDetails, onClose }) {
+  const hc = h.currency || cur;
+  const [f, setF] = useState({ shares: Number(h.shares) || 0, buyPrice: Number(h.buyPrice) || 0, buyDate: h.buyDate || "", currency: hc });
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const cp = h.currentPrice > 0 ? h.currentPrice : Number(f.buyPrice);
+  const value = fxConvert(Number(f.shares) * cp, f.currency, cur, fx);
+  const ret = Number(f.buyPrice) > 0 ? ((cp - Number(f.buyPrice)) / Number(f.buyPrice)) * 100 : 0;
+  const dirty = round6(f.shares) !== round6(h.shares) || Number(f.buyPrice) !== Number(h.buyPrice) || (f.buyDate || "") !== (h.buyDate || "") || f.currency !== hc;
+  const zero = round6(f.shares) <= 0;
+  const save = () => {
+    if (zero) { onZero(); return; }
+    onSave({ shares: f.shares, buyPrice: Number(f.buyPrice) || 0, buyDate: f.buyDate || undefined, currency: f.currency });
+  };
+  const field = "w-full h-11 border border-slate-200 rounded-xl px-3 text-sm bg-white outline-none focus:border-emerald-400 tabular-nums";
+  return (
+    <BottomSheet title={`Edit ${h.ticker}`} onClose={onClose}>
+      <div className="px-5 pb-5 space-y-4">
+        <div className="flex items-center gap-3">
+          <Logo h={h} size={40} rounded="rounded-xl" />
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-semibold text-slate-700 truncate">{h.name || h.ticker}</div>
+            <div className="text-[11px] text-slate-400">Current: {h.shares} share{Number(h.shares) === 1 ? "" : "s"}{h.currentPrice > 0 ? ` · now ${money(h.currentPrice, hc)}` : ""}</div>
+          </div>
+          <button onClick={onDetails} className="text-xs font-semibold text-emerald-700 shrink-0">Details →</button>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="text-[11px] font-bold text-slate-400 tracking-wide">SHARES</label>
+            <div className="flex gap-3 text-[11px] font-semibold">
+              <button onClick={onAdd} className="text-emerald-700">Bought more</button>
+              <button onClick={onReduce} className="text-slate-500">Sold some</button>
+            </div>
+          </div>
+          <Stepper value={f.shares} onChange={(n) => set("shares", n)} />
+          {zero && <p className="text-[11px] text-rose-600 mt-1.5">0 shares — saving will remove {h.ticker} from your portfolio.</p>}
+        </div>
+
+        <div className="grid grid-cols-2 gap-2.5">
+          <div>
+            <label className="block text-[11px] font-bold text-slate-400 tracking-wide mb-1.5">AVG. BUY PRICE ({f.currency})</label>
+            <input type="number" inputMode="decimal" step="any" value={f.buyPrice} onChange={(e) => set("buyPrice", e.target.value)} aria-label="Average buy price" className={field} />
+          </div>
+          <div>
+            <label className="block text-[11px] font-bold text-slate-400 tracking-wide mb-1.5">BUY DATE</label>
+            <input type="date" value={f.buyDate} max={new Date().toISOString().slice(0, 10)} onChange={(e) => set("buyDate", e.target.value)} className={field} />
+          </div>
+          <div>
+            <label className="block text-[11px] font-bold text-slate-400 tracking-wide mb-1.5">CURRENCY</label>
+            <select value={f.currency} onChange={(e) => set("currency", e.target.value)} className={field}>
+              {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code}</option>)}
+              {!CURRENCIES.some((c) => c.code === f.currency) && <option value={f.currency}>{f.currency}</option>}
+            </select>
+          </div>
+          <div className="self-end text-right text-[12px] text-slate-500 tabular-nums pb-2.5">
+            {f.shares} × {money(cp, f.currency)} = <b className="text-slate-800">{money(value, cur)}</b>
+            {Number(f.buyPrice) > 0 && <div><Ret v={ret} className="font-bold" /></div>}
+          </div>
+        </div>
+
+        <button onClick={save} disabled={!dirty} className={`w-full h-12 rounded-xl text-sm font-bold ${zero ? "bg-rose-600 text-white" : "btn-primary"} disabled:opacity-40`}>
+          {zero ? `Remove ${h.ticker}` : dirty ? "Save changes" : "No changes"}
+        </button>
+        <button onClick={onRemove} className="w-full h-10 text-sm font-semibold text-rose-600 flex items-center justify-center gap-1.5"><Trash2 size={14} /> Delete holding</button>
+      </div>
+    </BottomSheet>
+  );
+}
+
+/* Very fast quantity change: NVDA · Current: 20 shares · [ − ] 5 [ + ] */
+function SharesSheet({ h, mode, cur, onAdd, onReduce, onClose }) {
+  const hc = h.currency || cur;
+  const have = Number(h.shares) || 0;
+  const [n, setN] = useState(1);
+  const [price, setPrice] = useState(h.currentPrice > 0 ? h.currentPrice : Number(h.buyPrice) || "");
+  const [asSale, setAsSale] = useState(true);
+  const add = mode === "add";
+  const qty = add ? Math.max(0, n) : Math.min(have, Math.max(0, n));
+  const after = round6(add ? have + qty : have - qty);
+  const p = Number(price);
+  const avgAfter = add && qty > 0 && p > 0 ? (have * Number(h.buyPrice) + qty * p) / (have + qty) : Number(h.buyPrice);
+  const ok = qty > 0 && (add ? p > 0 : (!asSale || p > 0));
+  return (
+    <BottomSheet title={add ? "Add shares" : "Reduce shares"} onClose={onClose}>
+      <div className="px-5 pb-5 space-y-4">
+        <div className="flex items-center gap-3">
+          <Logo h={h} size={40} rounded="rounded-xl" />
+          <div className="min-w-0">
+            <div className="font-bold text-slate-900">{h.ticker}</div>
+            <div className="text-[12px] text-slate-500">Current: <b className="text-slate-700">{have} share{have === 1 ? "" : "s"}</b> · avg. {money(h.buyPrice, hc)}</div>
+          </div>
+        </div>
+        <div>
+          <label className="block text-[11px] font-bold text-slate-400 tracking-wide mb-1.5">{add ? "SHARES BOUGHT" : "SHARES TO REMOVE"}</label>
+          <div className="flex items-center gap-3">
+            <Stepper value={n} onChange={setN} ariaLabel={add ? "Shares bought" : "Shares to remove"} />
+            {!add && <button onClick={() => setN(have)} className="text-[11px] font-semibold text-slate-500 bg-slate-100 px-2.5 h-8 rounded-lg">All</button>}
+          </div>
+        </div>
+        <div>
+          <label className="block text-[11px] font-bold text-slate-400 tracking-wide mb-1.5">{add ? "PRICE PAID PER SHARE" : "SELL PRICE"} ({hc})</label>
+          <input type="number" inputMode="decimal" step="any" value={price} onChange={(e) => setPrice(e.target.value)}
+            aria-label={add ? "Price paid per share" : "Sell price"}
+            className="w-full h-11 border border-slate-200 rounded-xl px-3 text-sm bg-white outline-none focus:border-emerald-400 tabular-nums" />
+        </div>
+        {!add && (
+          <label className="flex items-center gap-2.5 text-[13px] text-slate-700">
+            <input type="checkbox" checked={asSale} onChange={(e) => setAsSale(e.target.checked)} className="w-4 h-4 accent-emerald-600" />
+            Record as a sale <span className="text-slate-400 text-[11px]">(counts toward realized return)</span>
+          </label>
+        )}
+        <div className="bg-slate-50 rounded-xl px-3 py-2.5 text-[12px] text-slate-600 tabular-nums">
+          → <b className="text-slate-800">{after} share{after === 1 ? "" : "s"}</b>{add && p > 0 ? <> · avg. {money(avgAfter, hc)}</> : null}
+          {!add && after <= 0 && <span className="text-rose-600 font-semibold"> · removes {h.ticker} from your portfolio</span>}
+        </div>
+        <button disabled={!ok} onClick={() => (add ? onAdd(qty, p) : onReduce(qty, p, asSale))}
+          className={`w-full h-12 rounded-xl text-sm font-bold disabled:opacity-40 ${!add && after <= 0 ? "bg-rose-600 text-white" : "btn-primary"}`}>
+          {add ? `Add ${qty} ${h.ticker}` : after <= 0 ? `Remove ${h.ticker}` : `Reduce by ${qty}`}
+        </button>
+      </div>
+    </BottomSheet>
+  );
+}
+
+/* Edit Portfolio mode: many holdings on one screen — quantities, prices,
+   multi-select delete. Row order is frozen while editing so nothing jumps. */
+function EditPortfolio({ holdings, cur, fx, onEditFields, onRemoveMany, onConfirm, onDone }) {
+  const orderRef = useRef(byValueDesc(holdings, cur, fx).map((h) => h.id));
+  const [sel, setSel] = useState(() => new Set());
+  const rows = orderRef.current.map((id) => holdings.find((h) => h.id === id)).filter(Boolean);
+  const toggle = (id) => setSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const totals = portfolioTotals(holdings, cur, fx);
+  const delSel = () => {
+    const ids = [...sel].filter((id) => holdings.some((h) => h.id === id));
+    if (!ids.length) return;
+    const names = ids.map((id) => holdings.find((h) => h.id === id).ticker);
+    onConfirm({ text: ids.length === 1 ? `Delete ${names[0]} from your portfolio?` : `Delete ${ids.length} holdings (${names.slice(0, 3).join(", ")}${ids.length > 3 ? "…" : ""})?`, label: "Delete",
+      onYes: () => { onRemoveMany(ids); setSel(new Set()); onConfirm(null); } });
+  };
+  const zeroRow = (h) => onConfirm({ text: `Remove ${h.ticker} entirely?`, label: "Remove", onYes: () => { onRemoveMany([h.id]); onConfirm(null); } });
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between text-xs text-slate-400 tabular-nums">
+        <span>{holdings.length} positions · {money(totals.value, cur)}</span>
+        <button onClick={() => setSel(sel.size === rows.length ? new Set() : new Set(rows.map((r) => r.id)))} className="font-semibold text-slate-500">{sel.size === rows.length ? "Select none" : "Select all"}</button>
+      </div>
+      <div className="card-tight divide-y divide-slate-100 !py-1">
+        {rows.map((h) => {
+          const hc = h.currency || cur;
+          return (
+            <div key={h.id} className="py-2.5 flex items-center gap-2">
+              <input type="checkbox" checked={sel.has(h.id)} onChange={() => toggle(h.id)} aria-label={`Select ${h.ticker}`} className="w-[18px] h-[18px] accent-emerald-600 shrink-0" />
+              <div className="min-w-0 flex-1">
+                <div className="font-bold text-slate-900 text-[13px] leading-tight truncate">{h.ticker}</div>
+                <div className="text-[10px] text-slate-400 truncate tabular-nums">{moneyShort(holdingValue(h, cur, fx), cur)}</div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <Stepper size="sm" value={Number(h.shares)} ariaLabel={`${h.ticker} shares`}
+                  onChange={(n) => { if (n > 0) onEditFields(h.id, { shares: n }); else zeroRow(h); }} />
+                <input type="number" inputMode="decimal" step="any" defaultValue={h.buyPrice} key={h.id + h.buyPrice} aria-label={`${h.ticker} average price`}
+                  onBlur={(e) => { const v = parseFloat(e.target.value); if (v >= 0 && v !== Number(h.buyPrice)) onEditFields(h.id, { buyPrice: v }); }}
+                  onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }} title={`Avg. price (${hc})`}
+                  className="h-9 w-[4.25rem] text-sm text-right tabular-nums border border-slate-200 rounded-xl px-2 bg-white outline-none focus:border-emerald-400" />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="sticky bottom-[4.75rem] z-30 flex gap-2">
+        <button onClick={delSel} disabled={!sel.size} className="flex-1 h-11 rounded-xl bg-rose-600 text-white text-sm font-bold shadow disabled:opacity-40 disabled:shadow-none">
+          Delete{sel.size ? ` ${sel.size}` : ""} selected
+        </button>
+        <button onClick={onDone} className="h-11 px-5 rounded-xl bg-white border border-slate-200 text-slate-700 text-sm font-bold shadow-sm">Done</button>
+      </div>
+      <p className="text-[11px] text-slate-400 text-center">Changes save instantly. Shares · avg. price per row.</p>
     </div>
   );
 }
@@ -8570,4 +8964,6 @@ export function PublicProfile({ username }) {
 }
 
 /* Pure helpers exposed for unit tests only (see src/*.test.js). */
-export const __helpers = { pct, money, moneyShort, fxConvert, parseHoldingsCsv, latestCalls, activeCalls, tallyAfterVote, castVote, removeVote, SENT_CACHE, sentimentBus, SOCIAL_ME, cutSeries, exchangeOf, isFund, pctOf, daysOld, withTimeout, periodReturn, idxOnOrBefore, computeScore };
+export const __helpers = { pct, money, moneyShort, fxConvert, parseHoldingsCsv, latestCalls, activeCalls, tallyAfterVote, castVote, removeVote, SENT_CACHE, sentimentBus, SOCIAL_ME,
+  editHolding, removeHoldings, setHoldingShares, addHoldingShares, portfolioTotals, holdingValue, round6,
+  QuickEditSheet, SharesSheet, ConfirmDialog, EditPortfolio, Stepper, cutSeries, exchangeOf, isFund, pctOf, daysOld, withTimeout, periodReturn, idxOnOrBefore, computeScore };
