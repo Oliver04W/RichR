@@ -8,7 +8,7 @@ import { RecheckCalls } from "./sentiment.jsx";
 import { fmtDate, fmtDateTime, fmtTime, money, moneyShort, pct, priceStaleness, sym, uid, withTimeout } from "../lib/format.js";
 import { BENCHMARKS, DEFAULT_BENCH, PH_RANGES, PH_SERVICE_RANGE, SCORE_LABEL, SCORE_WEIGHTS, benchOf, byValueDesc, computeScore, cutSeries, explainScoreChange, holdingValue, holdingsKey, idxOnOrBefore, loadDailySeries, perfTheme, periodReturn, profileOf, scoreTone, winningStreak } from "../lib/portfolio.js";
 import { dataKey } from "../lib/storage.js";
-import { ChartTip, Logo, MEDAL, Ret, Sparkline } from "../ui/primitives.jsx";
+import { AsyncConfirm, ChartTip, Logo, MEDAL, Ret, Sparkline } from "../ui/primitives.jsx";
 
 /* ================= HOME ================= */
 export function HomeTab({ data, active, cur, totals, chartData, refreshing, onRefresh, onSwitch, onAddPortfolio, onDeletePortfolio, onRename, goPositions, goImport, onLoadSample, goals, allValue, fx, autoRefresh, onToggleAuto, pricesAt, priceDataAt, onAddGoal, onUpdateGoal, onRemoveGoal, onBenchmark, onScoreLog, user, goFriends, goCommunities = null, onDismissOnboarding, onOpenProfile, onRankLog, onOpenTicker }) {
@@ -37,6 +37,13 @@ export function HomeTab({ data, active, cur, totals, chartData, refreshing, onRe
      "Live" — a stale number is worse than no number. */
   const staleness = priceStaleness(priceDataAt);
 
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const deleteModal = confirmDelete && (
+    <AsyncConfirm title="Delete portfolio?" label="Delete portfolio"
+      text={`This will permanently delete “${active.name}” and all of its holdings. This action cannot be undone.`}
+      onCancel={() => setConfirmDelete(false)}
+      action={async () => { await onDeletePortfolio(); setConfirmDelete(false); }} />
+  );
   /* Portfolio switcher — shared by both the empty and the full layout. */
   const switcher = (
     <div className="flex items-center gap-2 overflow-x-auto pb-1">
@@ -62,6 +69,7 @@ export function HomeTab({ data, active, cur, totals, chartData, refreshing, onRe
   if (empty) {
     return (
       <div className="space-y-6 lg:max-w-md lg:mx-auto">
+        {deleteModal}
         {data.portfolios.length > 1 && switcher}
         <div className="card">
           <div className="flex items-center justify-between">
@@ -75,9 +83,7 @@ export function HomeTab({ data, active, cur, totals, chartData, refreshing, onRe
                 {active.name} <Pencil size={12} className="opacity-70" />
               </button>
             )}
-            {data.portfolios.length > 1 && (
-              <button onClick={onDeletePortfolio} className="text-slate-300"><Trash2 size={15} /></button>
-            )}
+            <button onClick={() => setConfirmDelete(true)} aria-label="Delete this portfolio" title="Delete this portfolio" className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-300 hover:text-rose-500 hover:bg-rose-50"><Trash2 size={15} /></button>
           </div>
           <div className="w-12 h-12 mt-5 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center mb-3">
             <Sparkles size={22} />
@@ -119,6 +125,7 @@ export function HomeTab({ data, active, cur, totals, chartData, refreshing, onRe
 
   return (
     <div className="space-y-10">
+      {deleteModal}
       <IdentityStrip data={data} active={active} cur={cur} fx={fx} social={social} streak={streak} onProfile={onOpenProfile} />
       {data.portfolios.length > 1 && switcher}
       {/* ===== anchor: the number, then performance, then the graph ===== */}
@@ -135,9 +142,7 @@ export function HomeTab({ data, active, cur, totals, chartData, refreshing, onRe
                 {active.name} <Pencil size={11} className="opacity-60" />
               </button>
             )}
-            {data.portfolios.length > 1 && (
-              <button onClick={onDeletePortfolio} className="text-slate-300 hover:text-rose-400" title="Delete this portfolio"><Trash2 size={13} /></button>
-            )}
+            <button onClick={() => setConfirmDelete(true)} aria-label="Delete this portfolio" title="Delete this portfolio" className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-300 hover:text-rose-500 hover:bg-rose-50"><Trash2 size={13} /></button>
           </div>
           <div className="flex items-center gap-1.5">
             <button onClick={onToggleAuto} title={staleness.title}

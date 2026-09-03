@@ -8,7 +8,7 @@ import { StockSocial } from "./sentiment.jsx";
 import { CURRENCIES, DEFAULT_FX, TYPES, daysHeld, fmtDate, fxConvert, money, moneyShort, pct, round6, sym, uid } from "../lib/format.js";
 import { VERDICTS, byValueDesc, exchangeOf, holdingValue, isFund, portfolioTotals } from "../lib/portfolio.js";
 import { aiFetch } from "../lib/storage.js";
-import { BottomSheet, ConfirmDialog, Logo, Ret, RowMenu, Stepper, SwipeRow } from "../ui/primitives.jsx";
+import { AsyncConfirm, BottomSheet, Logo, Ret, RowMenu, Stepper, SwipeRow } from "../ui/primitives.jsx";
 
 /* ================= POSITIONS ================= */
 export function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpsert, onRemove, onSetPrice, onLoadSample, onClosePosition,
@@ -20,10 +20,13 @@ export function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpser
   const [swipeOpen, setSwipeOpen] = useState(null);
   const [editMode, setEditMode] = useState(false);
   const live = (h) => active.holdings.find((x) => x.id === h.id) || null;
+  /* Every delete goes through the cloud first (onRemove resolves only once the
+     server confirmed); the dialog shows progress and any error itself. */
   const askDelete = (h, after) => setConfirm({
     text: `Delete ${h.ticker} from your portfolio?`, label: "Delete",
-    onYes: () => { onRemove(h.id); setConfirm(null); setSwipeOpen(null); if (after) after(); say && say(`${h.ticker} removed.`); },
+    onYes: async () => { await onRemove(h.id); setConfirm(null); setSwipeOpen(null); if (after) after(); say && say(`${h.ticker} removed.`); },
   });
+  const [clearing, setClearing] = useState(false);
   const [importing, setImporting] = useState(false);
   const [dense, setDense] = useState(true); // compact rows by default; "Show details" expands
   const totalValue = active.holdings.reduce((s, h) => s + holdingValue(h, cur, fx), 0);
@@ -102,9 +105,9 @@ export function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpser
               <div className="text-sm font-semibold text-amber-800">Sample positions</div>
               <p className="text-[11px] text-amber-700 leading-snug">These aren't real — edit one to keep it, or clear them and add your own. Sample data can't be shared with friends.</p>
             </div>
-            <button onClick={() => active.holdings.filter((h) => h.sample).forEach((h) => onRemove(h.id))}
-              className="shrink-0 bg-white border border-amber-200 text-amber-800 text-xs font-semibold px-3 py-1.5 rounded-full">
-              Clear
+            <button disabled={clearing} onClick={async () => { setClearing(true); try { await onRemoveMany(active.holdings.filter((h) => h.sample).map((h) => h.id)); } catch (e) { say && say(e.message); } finally { setClearing(false); } }}
+              className="shrink-0 bg-white border border-amber-200 text-amber-800 text-xs font-semibold px-3 py-1.5 rounded-full disabled:opacity-50">
+              {clearing ? "Clearing…" : "Clear"}
             </button>
           </div>
         )}
@@ -207,7 +210,7 @@ export function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpser
         <QuickEditSheet h={live(quick)} cur={cur} fx={fx}
           onSave={(fields) => { onEditFields(quick.id, fields); setQuick(null); say && say(`${quick.ticker} updated.`); }}
           onRemove={() => askDelete(quick, () => setQuick(null))}
-          onZero={() => setConfirm({ text: `Remove ${quick.ticker} entirely?`, label: "Remove", onYes: () => { onRemove(quick.id); setConfirm(null); setQuick(null); say && say(`${quick.ticker} removed.`); } })}
+          onZero={() => setConfirm({ text: `Remove ${quick.ticker} entirely?`, label: "Remove", onYes: async () => { await onRemove(quick.id); setConfirm(null); setQuick(null); say && say(`${quick.ticker} removed.`); } })}
           onAdd={() => setSharesUi({ h: quick, mode: "add" })} onReduce={() => setSharesUi({ h: quick, mode: "reduce" })}
           onDetails={() => { setDetail(quick); setQuick(null); }}
           onClose={() => setQuick(null)} />
@@ -217,12 +220,12 @@ export function PositionsTab({ active, cur, fx, companyInfo, onSaveInfo, onUpser
           onAdd={(n, price) => { onAddShares(shares.h.id, n, price); setSharesUi(null); say && say(`Added ${n} ${shares.h.ticker}.`); }}
           onReduce={(n, price, asSale) => {
             const h = live(shares.h); const left = round6(Number(h.shares) - n);
-            const apply = () => { if (asSale) onSell(h.id, n, price, new Date().toISOString().slice(0, 10)); else onSetShares(h.id, left); setSharesUi(null); setConfirm(null); say && say(left > 0 ? `${h.ticker}: now ${left} shares.` : `${h.ticker} removed.`); };
+            const apply = async () => { if (asSale) onSell(h.id, n, price, new Date().toISOString().slice(0, 10)); else if (left > 0) onSetShares(h.id, left); else await onRemove(h.id); setSharesUi(null); setConfirm(null); say && say(left > 0 ? `${h.ticker}: now ${left} shares.` : `${h.ticker} removed.`); };
             if (left > 0) apply(); else setConfirm({ text: `Remove ${h.ticker} entirely?`, label: "Remove", onYes: apply });
           }}
           onClose={() => setSharesUi(null)} />
       )}
-      {confirm && <ConfirmDialog text={confirm.text} label={confirm.label} onCancel={() => setConfirm(null)} onConfirm={confirm.onYes} />}
+      {confirm && <AsyncConfirm text={confirm.text} label={confirm.label} onCancel={() => setConfirm(null)} action={confirm.onYes} />}
 
       {detail && (
         <DetailSheet h={active.holdings.find((x) => x.id === detail.id) || detail}
@@ -529,9 +532,9 @@ export function EditPortfolio({ holdings, cur, fx, onEditFields, onRemoveMany, o
     if (!ids.length) return;
     const names = ids.map((id) => holdings.find((h) => h.id === id).ticker);
     onConfirm({ text: ids.length === 1 ? `Delete ${names[0]} from your portfolio?` : `Delete ${ids.length} holdings (${names.slice(0, 3).join(", ")}${ids.length > 3 ? "…" : ""})?`, label: "Delete",
-      onYes: () => { onRemoveMany(ids); setSel(new Set()); onConfirm(null); } });
+      onYes: async () => { await onRemoveMany(ids); setSel(new Set()); onConfirm(null); } });
   };
-  const zeroRow = (h) => onConfirm({ text: `Remove ${h.ticker} entirely?`, label: "Remove", onYes: () => { onRemoveMany([h.id]); onConfirm(null); } });
+  const zeroRow = (h) => onConfirm({ text: `Remove ${h.ticker} entirely?`, label: "Remove", onYes: async () => { await onRemoveMany([h.id]); onConfirm(null); } });
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between text-xs text-slate-400 tabular-nums">
