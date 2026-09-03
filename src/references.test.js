@@ -5,7 +5,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { parse } from "@babel/parser";
 import { join } from "node:path";
 
-const files = readdirSync("src").filter((f) => /\.jsx$/.test(f) && !/\.test\./.test(f)).map((f) => join("src", f));
+const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)]);
+const files = walk("src").filter((f) => /\.jsx$/.test(f) && !/\.test\./.test(f));
 
 describe("JSX references", () => {
   for (const file of files) {
