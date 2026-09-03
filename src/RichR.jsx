@@ -8213,210 +8213,148 @@ function InviteSheet({ code, user, onJoined, onClose }) {
   );
 }
 
-function NewGroupModal({ mutuals, onClose, onCreate }) {
-  const [name, setName] = useState("");
-  const [visibility, setVisibility] = useState(null);   // must be chosen explicitly
-  const [description, setDescription] = useState("");
-  const [topics, setTopics] = useState("");
-  const [picked, setPicked] = useState(new Set());
-  const [busy, setBusy] = useState(false);
-  const toggle = (id) => setPicked((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
-  const valid = name.trim().length > 0 && !!visibility;
-  const field = "w-full border border-slate-200 rounded-xl px-3 py-2 text-sm bg-white outline-none focus:border-emerald-400";
+/* Chips for topics & tickers: "nvda, $tsm ai" → $NVDA · $TSM · AI (removable). */
+const looksLikeTicker = (t, typedDollar = false) => typedDollar || /^[A-Z0-9.\-]{3,6}$/.test(t);
+function TopicInput({ value, onChange, placeholder = "NVDA, TSM, AI", ariaLabel = "Topics" }) {
+  const [draft, setDraft] = useState("");
+  const [dollar, setDollar] = useState({});      // topic -> typed with $
+  const add = (raw) => {
+    const parts = parseTopics(raw);
+    if (!parts.length) return;
+    const typed = {}; String(raw).split(/[,\s]+/).forEach((p) => { if (p.trim().startsWith("$")) typed[p.trim().slice(1).toUpperCase()] = true; });
+    setDollar((d) => ({ ...d, ...typed }));
+    onChange([...new Set([...value, ...parts])].slice(0, 8));
+    setDraft("");
+  };
+  const remove = (t) => onChange(value.filter((x) => x !== t));
   return (
-    <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl max-h-[92vh] overflow-y-auto overscroll-contain p-5" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="font-bold text-lg text-slate-700">New community</h3>
-          <button onClick={onClose} aria-label="Close" className="w-8 h-8 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center"><X size={14} /></button>
-        </div>
-        <label className="block text-xs font-semibold text-slate-400 mb-1.5">COMMUNITY NAME</label>
-        <input autoFocus value={name} onChange={(e) => setName(e.target.value.slice(0, 60))} placeholder="e.g. AI & Semiconductors" aria-label="Community name" className={`${field} mb-4`} />
-
-        <label className="block text-xs font-semibold text-slate-400 mb-1.5">COMMUNITY VISIBILITY</label>
-        <div role="radiogroup" aria-label="Community visibility" className="space-y-2 mb-4">
-          {["public", "private"].map((v) => {
-            const m = VIS_META[v]; const on = visibility === v;
-            return (
-              <button key={v} role="radio" aria-checked={on} onClick={() => setVisibility(v)}
-                className={`w-full text-left rounded-2xl border-2 p-3.5 flex items-start gap-3 transition ${on ? (v === "public" ? "border-sky-500 bg-sky-50" : "border-slate-800 bg-slate-50") : "border-slate-200 bg-white"}`}>
-                <span className="text-xl leading-none mt-0.5">{m.icon}</span>
-                <span className="min-w-0 flex-1">
-                  <span className="block font-bold text-slate-900 text-sm">{m.label}</span>
-                  <span className="block text-[12px] text-slate-500 leading-snug mt-0.5">{m.blurb}</span>
-                  {v === "private" && <span className="block text-[11px] text-slate-400 mt-1">Not in search or Discover. Name, members and messages stay hidden from everyone else.</span>}
-                  {v === "public" && <span className="block text-[11px] text-slate-400 mt-1">Listed in search and Discover for every RichR user.</span>}
-                </span>
-                <span className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 mt-0.5 ${on ? (v === "public" ? "bg-sky-500 border-sky-500 text-white" : "bg-slate-800 border-slate-800 text-white") : "border-slate-300"}`}>{on && <Check size={12} />}</span>
-              </button>
-            );
-          })}
-        </div>
-
-        <label className="block text-xs font-semibold text-slate-400 mb-1.5">DESCRIPTION <span className="font-normal">(optional{visibility === "public" ? " · shown in search" : ""})</span></label>
-        <textarea value={description} onChange={(e) => setDescription(e.target.value.slice(0, 280))} rows={2} placeholder="What's this community about?" aria-label="Description" className={`${field} mb-3 resize-none`} />
-        <label className="block text-xs font-semibold text-slate-400 mb-1.5">TOPICS & TICKERS <span className="font-normal">(optional{visibility === "public" ? " · searchable" : ""})</span></label>
-        <input value={topics} onChange={(e) => setTopics(e.target.value.slice(0, 120))} placeholder="NVDA, TSM, AI" aria-label="Topics" className={`${field} mb-1`} />
-        {parseTopics(topics).length > 0 && <div className="flex flex-wrap gap-1 mb-3">{parseTopics(topics).map((t) => <span key={t} className="text-[10px] font-bold bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded">{t}</span>)}</div>}
-
-        <label className="block text-xs font-semibold text-slate-400 mb-1.5 mt-3">ADD FRIENDS · {picked.size} picked</label>
-        {mutuals.length === 0 ? (
-          <p className="text-sm text-slate-400 mb-4">No mutual friends yet — that's fine. {visibility === "private" ? "You'll get an invite link right after creating it." : "Anyone on RichR can join a public community."}</p>
-        ) : (
-          <div className="border border-slate-100 rounded-2xl divide-y divide-slate-50 overflow-hidden mb-4">
-            {mutuals.map((f) => {
-              const on = picked.has(f.id);
-              return (
-                <button key={f.id} onClick={() => toggle(f.id)} className="w-full flex items-center justify-between px-3 py-2.5 text-sm bg-white active:bg-slate-50">
-                  <span className="font-semibold text-slate-600">@{f.username}</span>
-                  <span className={`w-5 h-5 rounded-full border flex items-center justify-center ${on ? "bg-emerald-500 border-emerald-500 text-white" : "border-slate-300"}`}>{on && <Check size={12} />}</span>
-                </button>
-              );
-            })}
-          </div>
-        )}
-        <button onClick={async () => { setBusy(true); await onCreate({ name: name.trim(), visibility, description: description.trim(), topics: parseTopics(topics), memberIds: [...picked] }); setBusy(false); }} disabled={!valid || busy}
-          className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm py-3 rounded-full shadow disabled:opacity-50">
-          {busy ? "Creating…" : !visibility ? "Choose public or private" : `Create ${VIS_META[visibility].icon} ${VIS_META[visibility].label.toLowerCase()} community`}
-        </button>
-      </div>
+    <div className="min-h-[2.75rem] w-full border border-slate-200 rounded-xl bg-white px-2 py-1.5 flex flex-wrap items-center gap-1.5 focus-within:border-emerald-400"
+      onClick={(e) => e.currentTarget.querySelector("input")?.focus()}>
+      {value.map((t) => (
+        <span key={t} className="inline-flex items-center gap-1 h-7 pl-2 pr-1 rounded-lg bg-slate-900 text-white text-[12px] font-bold tabular-nums">
+          {looksLikeTicker(t, dollar[t]) ? `$${t}` : t}
+          <button type="button" onClick={(e) => { e.stopPropagation(); remove(t); }} aria-label={`Remove ${t}`} className="w-5 h-5 rounded-md flex items-center justify-center text-white/70 hover:text-white hover:bg-white/10"><X size={11} /></button>
+        </span>
+      ))}
+      {value.length < 8 && (
+        <input value={draft} aria-label={ariaLabel} placeholder={value.length ? "Add more…" : placeholder}
+          onChange={(e) => { const v = e.target.value; if (/[,\s]$/.test(v)) add(v); else setDraft(v.slice(0, 20)); }}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(draft); } if (e.key === "Backspace" && !draft && value.length) remove(value[value.length - 1]); }}
+          onBlur={() => add(draft)}
+          className="flex-1 min-w-[6rem] h-7 text-sm bg-transparent outline-none uppercase placeholder:normal-case" />
+      )}
     </div>
   );
 }
 
-/* ================= ACTIVITY FEED ================= */
-function ActivityFeed({ user, friends, names, myName, onOpenProfile, board, onOpenTicker }) {
-  const [events, setEvents] = useState(null);
-  const [showAll, setShowAll] = useState(false);
-  const [reactions, setReactions] = useState([]); // {event_id,user_id,emoji}
-  const [comments, setComments] = useState([]);   // {id,event_id,user_id,body,created_at}
-  const [openComments, setOpenComments] = useState({}); // event id -> bool
-  const [draft, setDraft] = useState({});
-  const load = async () => {
-    try {
-      const { data: rows, error } = await supabase
-        .from("portfolio_events").select("id, user_id, kind, ticker, from_pct, to_pct, created_at")
-        .order("created_at", { ascending: false }).limit(60);
-      if (error) throw error;
-      const ids = (rows || []).map((r) => r.id);
-      let rs = [], cs = [];
-      if (ids.length) {
-        const [{ data: r1 }, { data: c1 }] = await Promise.all([
-          supabase.from("event_reactions").select("event_id, user_id, emoji").in("event_id", ids),
-          supabase.from("event_comments").select("id, event_id, user_id, body, created_at").in("event_id", ids).order("created_at", { ascending: true }),
-        ]);
-        rs = r1 || []; cs = c1 || [];
-      }
-      setEvents(rows || []); setReactions(rs); setComments(cs);
-    } catch (e) { setEvents([]); }
-  };
-  useEffect(() => { load(); }, [user.id, (friends || []).length]);
-
-  const react = async (ev, emoji) => {
-    const mine = reactions.find((r) => r.event_id === ev.id && r.user_id === user.id && r.emoji === emoji);
-    setReactions((rs) => mine ? rs.filter((r) => r !== mine) : [...rs, { event_id: ev.id, user_id: user.id, emoji }]);
-    if (mine) await supabase.from("event_reactions").delete().match({ event_id: ev.id, user_id: user.id, emoji });
-    else await supabase.from("event_reactions").insert({ event_id: ev.id, user_id: user.id, emoji });
-  };
-  const comment = async (ev) => {
-    const body = (draft[ev.id] || "").trim().slice(0, 500);
-    if (!body) return;
-    const { error } = await supabase.from("event_comments").insert({ event_id: ev.id, user_id: user.id, body });
-    if (error) return;
-    setDraft((d) => ({ ...d, [ev.id]: "" }));
-    await load();
-  };
-
-  /* "3 of your friends own NVDA" — from mutual friends' shared top holdings. */
-  const popular = (() => {
-    const rows = (board || []).filter((b) => b.userId !== user.id && Array.isArray(b.topHoldings));
-    const count = {};
-    rows.forEach((b) => b.topHoldings.forEach((h) => { count[h.ticker] = (count[h.ticker] || 0) + 1; }));
-    return Object.entries(count).filter(([, n]) => n >= 2).sort((a, b) => b[1] - a[1]).slice(0, 6);
-  })();
-
-  if (events === null) return null;
-  const text = eventText;
-  const shown = showAll ? events : events.slice(0, 8);
+function NewGroupModal({ mutuals, onClose, onCreate }) {
+  const [name, setName] = useState("");
+  const [visibility, setVisibility] = useState(null);   // must be chosen explicitly
+  const [description, setDescription] = useState("");
+  const [topics, setTopics] = useState([]);
+  const [picked, setPicked] = useState(new Set());
+  const [fq, setFq] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const prev = document.body.style.overflow; document.body.style.overflow = "hidden";
+    const esc = (e) => { if (e.key === "Escape") onClose(); }; window.addEventListener("keydown", esc);
+    return () => { document.body.style.overflow = prev; window.removeEventListener("keydown", esc); };
+  }, []);
+  const toggle = (id) => setPicked((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const valid = name.trim().length > 0 && !!visibility;
+  const friends = mutuals.filter((f) => !fq.trim() || String(f.username || "").toLowerCase().includes(fq.trim().toLowerCase()));
+  const field = "w-full h-11 border border-slate-200 rounded-xl px-3 text-sm bg-white outline-none focus:border-emerald-400";
+  const label = "block text-[11px] font-bold tracking-wide text-slate-400 mb-1.5";
+  const create = async () => { if (!valid || busy) return; setBusy(true); await onCreate({ name: name.trim(), visibility, description: description.trim(), topics, memberIds: [...picked] }); setBusy(false); };
   return (
-    <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
-      <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-1">
-        <Activity size={16} className="text-emerald-500" /> Activity
-      </h3>
-      {popular.length > 0 && (
-        <div className="bg-slate-50 rounded-2xl p-3 mb-2">
-          <div className="text-[10px] font-bold text-slate-400 mb-1">POPULAR AMONG YOUR FRIENDS</div>
-          <div className="flex flex-wrap gap-1.5">
-            {popular.map(([t, n]) => (
-              <button key={t} onClick={() => onOpenTicker && onOpenTicker(t)}
-                className="text-xs font-semibold text-slate-700 bg-white border border-slate-200 px-2 py-1 rounded-full">
-                {n} of your friends own <b>{t}</b>
-              </button>
-            ))}
-          </div>
+    <div className="fixed inset-0 bg-slate-900/40 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
+      <div className="bg-white w-full sm:max-w-md h-[100dvh] sm:h-auto sm:max-h-[92vh] sm:rounded-2xl flex flex-col" style={{ animation: "richr-up .22s cubic-bezier(.2,.8,.2,1) both" }} onClick={(e) => e.stopPropagation()}>
+        {/* header */}
+        <div className="shrink-0 px-5 pb-3 flex items-center justify-between border-b border-slate-100" style={{ paddingTop: "max(1rem, env(safe-area-inset-top, 0px))" }}>
+          <h3 className="font-bold text-lg text-slate-900">New community</h3>
+          <button onClick={onClose} aria-label="Close" className="w-9 h-9 rounded-full bg-slate-100 text-slate-500 flex items-center justify-center"><X size={15} /></button>
         </div>
-      )}
-      {events.length === 0 ? (
-        <p className="text-sm text-slate-400">Nothing yet. When you or a friend changes a shared portfolio, it shows up here — as percentages, never amounts.</p>
-      ) : (
-        <div className="divide-y divide-slate-50">
-          {shown.map((e) => {
-            const me = e.user_id === user.id;
-            const who = me ? "You" : `@${names[e.user_id] || "friend"}`;
-            const rs = reactions.filter((r) => r.event_id === e.id);
-            const cs = comments.filter((c) => c.event_id === e.id);
-            const open = !!openComments[e.id];
-            return (
-              <div key={e.id} className="py-2.5">
-                <div className="flex items-start gap-2">
-                  <div className="flex-1 min-w-0 text-sm text-slate-600">
-                    <button onClick={() => !me && onOpenProfile(e.user_id, names[e.user_id])} className={`font-semibold ${me ? "text-slate-700" : "text-emerald-700"}`}>{who}</button>{" "}
-                    {text(e)}
+
+        {/* body */}
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-5 py-4 space-y-4">
+          <div>
+            <label className={label}>NAME</label>
+            <input autoFocus value={name} onChange={(e) => setName(e.target.value.slice(0, 60))} placeholder="e.g. AI & Semiconductors" aria-label="Community name" className={field} />
+          </div>
+
+          <div>
+            <label className={label}>VISIBILITY</label>
+            <div role="radiogroup" aria-label="Community visibility" className="grid grid-cols-2 gap-2">
+              {[["public", "Anyone can find and join this community."], ["private", "Only invited members can find and join."]].map(([v, blurb]) => {
+                const m = VIS_META[v]; const on = visibility === v;
+                return (
+                  <button key={v} type="button" role="radio" aria-checked={on} onClick={() => setVisibility(v)}
+                    className={`relative text-left rounded-2xl border-2 px-3 py-2.5 min-h-[4.5rem] transition ${on ? "border-emerald-500 bg-emerald-50" : "border-slate-200 bg-white active:bg-slate-50"}`}>
+                    <span className="flex items-center gap-1.5">
+                      <span className="text-base leading-none">{m.icon}</span>
+                      <span className={`font-bold text-sm ${on ? "text-emerald-900" : "text-slate-900"}`}>{m.label}</span>
+                      <span className={`ml-auto w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 ${on ? "bg-emerald-600 border-emerald-600 text-white" : "border-slate-300"}`}>{on && <Check size={12} strokeWidth={3} />}</span>
+                    </span>
+                    <span className={`block text-[11.5px] leading-snug mt-1 ${on ? "text-emerald-800" : "text-slate-500"}`}>{blurb}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div>
+            <label className={label}>DESCRIPTION <span className="font-medium normal-case tracking-normal">· optional{visibility === "public" ? ", shown in search" : ""}</span></label>
+            <textarea value={description} onChange={(e) => setDescription(e.target.value.slice(0, 280))} rows={2} placeholder="What's this community about?" aria-label="Description"
+              className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm bg-white outline-none focus:border-emerald-400 resize-none h-[3.75rem]" />
+          </div>
+
+          <div>
+            <label className={label}>TOPICS & TICKERS <span className="font-medium normal-case tracking-normal">· optional{visibility === "public" ? ", searchable" : ""}</span></label>
+            <TopicInput value={topics} onChange={setTopics} />
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className={label + " mb-0"}>INVITE FRIENDS</label>
+              <span className="text-[11px] font-semibold text-slate-500 tabular-nums" aria-live="polite">{picked.size} picked</span>
+            </div>
+            {mutuals.length === 0 ? (
+              <p className="text-[13px] text-slate-500 leading-snug">No mutual friends yet — that's fine. {visibility === "private" ? "You'll get an invite link right after creating it." : "Anyone on RichR can join a public community."}</p>
+            ) : (
+              <>
+                {mutuals.length > 6 && (
+                  <div className="relative mb-2">
+                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input value={fq} onChange={(e) => setFq(e.target.value)} placeholder="Search friends" aria-label="Search friends" className={`${field} pl-9 h-10`} />
                   </div>
-                  <div className="text-[10px] text-slate-400 shrink-0 mt-0.5">{timeAgo(e.created_at)}</div>
-                </div>
-                <div className="flex items-center gap-1 mt-1.5 flex-wrap">
-                  {REACTIONS.map((em) => {
-                    const n = rs.filter((r) => r.emoji === em).length;
-                    const mine = rs.some((r) => r.emoji === em && r.user_id === user.id);
+                )}
+                <div className="border border-slate-200 rounded-2xl divide-y divide-slate-100 overflow-hidden max-h-56 overflow-y-auto">
+                  {friends.length === 0 ? <p className="text-[13px] text-slate-400 px-3 py-3">No friend matches “{fq}”.</p> : friends.map((f) => {
+                    const on = picked.has(f.id);
                     return (
-                      <button key={em} onClick={() => react(e, em)}
-                        className={`text-[11px] px-1.5 py-0.5 rounded-full border ${mine ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-white border-slate-100 text-slate-500"} ${n === 0 ? "opacity-50" : ""}`}>
-                        {em}{n > 0 ? ` ${n}` : ""}
+                      <button key={f.id} type="button" onClick={() => toggle(f.id)} aria-pressed={on}
+                        className={`w-full h-11 flex items-center gap-2.5 px-3 text-sm text-left ${on ? "bg-emerald-50" : "bg-white active:bg-slate-50"}`}>
+                        <Avatar name={f.username} size={24} />
+                        <span className={`flex-1 truncate font-semibold ${on ? "text-emerald-900" : "text-slate-700"}`}>@{f.username}</span>
+                        <span className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 ${on ? "bg-emerald-600 border-emerald-600 text-white" : "border-slate-300"}`}>{on && <Check size={12} strokeWidth={3} />}</span>
                       </button>
                     );
                   })}
-                  <button onClick={() => setOpenComments((o) => ({ ...o, [e.id]: !open }))}
-                    className="text-[11px] font-semibold text-slate-400 px-1.5 py-0.5 ml-1">
-                    {cs.length ? `${cs.length} comment${cs.length === 1 ? "" : "s"}` : "Comment"}
-                  </button>
                 </div>
-                {open && (
-                  <div className="mt-2 ml-2 pl-3 border-l-2 border-slate-100 space-y-1.5">
-                    {cs.map((c) => (
-                      <div key={c.id} className="text-xs text-slate-600">
-                        <span className="font-semibold text-slate-700">@{c.user_id === user.id ? (myName || "you") : (names[c.user_id] || "friend")}</span>{" "}
-                        <span className="whitespace-pre-wrap break-words">{c.body}</span>
-                        <span className="text-slate-300 ml-1">{timeAgo(c.created_at)}</span>
-                      </div>
-                    ))}
-                    <div className="flex items-center gap-1.5 pt-0.5">
-                      <input value={draft[e.id] || ""} onChange={(ev) => setDraft((d) => ({ ...d, [e.id]: ev.target.value }))}
-                        onKeyDown={(ev) => { if (ev.key === "Enter") comment(e); }}
-                        placeholder="Write a comment…" className="flex-1 min-w-0 border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs" />
-                      <button onClick={() => comment(e)} disabled={!(draft[e.id] || "").trim()}
-                        className="text-xs font-semibold text-emerald-600 disabled:opacity-40">Post</button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
+              </>
+            )}
+          </div>
         </div>
-      )}
-      {events.length > 8 && (
-        <button onClick={() => setShowAll((v) => !v)} className="text-xs font-semibold text-emerald-600 mt-2">{showAll ? "Show less" : `Show all ${events.length}`}</button>
-      )}
+
+        {/* sticky CTA — above the tab bar / Safari toolbar / home indicator */}
+        <div className="shrink-0 px-5 pt-3 border-t border-slate-100 bg-white" style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom, 0px))" }}>
+          <button onClick={create} disabled={!valid || busy}
+            className={`w-full h-12 rounded-full text-[15px] font-bold transition ${valid ? "bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white shadow" : "bg-slate-100 text-slate-400"} disabled:cursor-not-allowed`}>
+            {busy ? "Creating…" : valid ? `Create ${VIS_META[visibility].icon} community` : "Create community"}
+          </button>
+          {!valid && <p className="text-[11px] text-slate-400 text-center mt-1.5">{!name.trim() ? "Give it a name" : "Choose public or private"}{!name.trim() && !visibility ? " and choose public or private" : ""}</p>}
+        </div>
+      </div>
     </div>
   );
 }
@@ -9303,4 +9241,4 @@ export function PublicProfile({ username }) {
 export const __helpers = { pct, money, moneyShort, fxConvert, parseHoldingsCsv, latestCalls, activeCalls, tallyAfterVote, castVote, removeVote, SENT_CACHE, sentimentBus, SOCIAL_ME,
   editHolding, removeHoldings, setHoldingShares, addHoldingShares, portfolioTotals, holdingValue, round6,
   QuickEditSheet, SharesSheet, ConfirmDialog, EditPortfolio, Stepper,
-  VIS_META, visOf, isDiscoverable, canSelfJoin, parseTopics, communityMatches, inviteUrl, CommunityCard, NewGroupModal, InviteSheet, ScopeSummary, cutSeries, exchangeOf, isFund, pctOf, daysOld, withTimeout, periodReturn, idxOnOrBefore, computeScore };
+  VIS_META, visOf, isDiscoverable, canSelfJoin, parseTopics, communityMatches, inviteUrl, CommunityCard, NewGroupModal, TopicInput, InviteSheet, ScopeSummary, cutSeries, exchangeOf, isFund, pctOf, daysOld, withTimeout, periodReturn, idxOnOrBefore, computeScore };

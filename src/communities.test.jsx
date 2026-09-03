@@ -68,8 +68,9 @@ describe("creating a community", () => {
   it("cannot be created until public or private is chosen explicitly", () => {
     const onCreate = mount();
     fireEvent.change(screen.getByLabelText("Community name"), { target: { value: "Hanken Investors" } });
-    const btn = screen.getByText("Choose public or private").closest("button");
+    const btn = screen.getByText("Create community").closest("button");
     expect(btn.disabled).toBe(true);
+    expect(screen.getByText("Choose public or private")).toBeTruthy();
     fireEvent.click(btn);
     expect(onCreate).not.toHaveBeenCalled();
   });
@@ -78,18 +79,52 @@ describe("creating a community", () => {
     fireEvent.change(screen.getByLabelText("Community name"), { target: { value: "AI & Semiconductors" } });
     fireEvent.click(screen.getByRole("radio", { name: /Public/ }));
     fireEvent.change(screen.getByLabelText("Description"), { target: { value: "Chips" } });
-    fireEvent.change(screen.getByLabelText("Topics"), { target: { value: "nvda, tsm" } });
-    fireEvent.click(screen.getByText("Create 🌐 public community"));
+    fireEvent.change(screen.getByLabelText("Topics"), { target: { value: "nvda," } });
+    fireEvent.change(screen.getByLabelText("Topics"), { target: { value: "$tsm" } });
+    fireEvent.keyDown(screen.getByLabelText("Topics"), { key: "Enter" });
+    expect(screen.getByText("$NVDA")).toBeTruthy();
+    expect(screen.getByText("$TSM")).toBeTruthy();
+    fireEvent.click(screen.getByText("Create 🌐 community"));
     await waitFor(() => expect(onCreate).toHaveBeenCalledWith({ name: "AI & Semiconductors", visibility: "public", description: "Chips", topics: ["NVDA", "TSM"], memberIds: [] }));
   });
   it("creating a private community with a friend", async () => {
     const onCreate = mount();
     fireEvent.change(screen.getByLabelText("Community name"), { target: { value: "Hanken Investors" } });
     fireEvent.click(screen.getByRole("radio", { name: /Private/ }));
-    expect(screen.getByText(/Only invited members can find and access/)).toBeTruthy();
+    expect(screen.getByText(/Only invited members can find and join/)).toBeTruthy();
     fireEvent.click(screen.getByText("@jaan"));
-    fireEvent.click(screen.getByText("Create 🔒 private community"));
+    expect(screen.getByText("1 picked")).toBeTruthy();
+    fireEvent.click(screen.getByText("Create 🔒 community"));
     await waitFor(() => expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ visibility: "private", memberIds: ["f1"] })));
+  });
+});
+
+describe("friend picker", () => {
+  it("shows a search field for many friends, filters, and counts picks", () => {
+    const many = Array.from({ length: 9 }, (_, i) => ({ id: "f" + i, username: i === 3 ? "jaan" : "friend" + i }));
+    render(<h.NewGroupModal mutuals={many} onClose={vi.fn()} onCreate={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Search friends"), { target: { value: "jaa" } });
+    expect(screen.getByText("@jaan")).toBeTruthy();
+    expect(screen.queryByText("@friend0")).toBeNull();
+    fireEvent.click(screen.getByText("@jaan"));
+    expect(screen.getByText("@jaan").closest("button").getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByText("1 picked")).toBeTruthy();
+  });
+});
+
+describe("topic chips", () => {
+  it("turns typed text into removable $TICKER / topic chips", () => {
+    let val = ["NVDA"]; const onChange = vi.fn((v) => { val = v; });
+    const { rerender } = render(<h.TopicInput value={val} onChange={onChange} />);
+    fireEvent.change(screen.getByLabelText("Topics"), { target: { value: "ai " } });
+    expect(onChange).toHaveBeenLastCalledWith(["NVDA", "AI"]);
+    rerender(<h.TopicInput value={val} onChange={onChange} />);
+    expect(screen.getByText("$NVDA")).toBeTruthy();
+    expect(screen.getByText("AI")).toBeTruthy();                 // short word, not a ticker
+    fireEvent.click(screen.getByLabelText("Remove NVDA"));
+    expect(onChange).toHaveBeenLastCalledWith(["AI"]);
+    fireEvent.keyDown(screen.getByLabelText("Topics"), { key: "Backspace" });   // empty input + backspace removes the last chip
+    expect(onChange).toHaveBeenLastCalledWith(["NVDA"]);
   });
 });
 
