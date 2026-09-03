@@ -83,7 +83,10 @@ export function HomeTab({ data, active, cur, totals, chartData, refreshing, onRe
                 {active.name} <Pencil size={12} className="opacity-70" />
               </button>
             )}
-            <button onClick={() => setConfirmDelete(true)} aria-label="Delete this portfolio" title="Delete this portfolio" className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-300 hover:text-rose-500 hover:bg-rose-50"><Trash2 size={15} /></button>
+            <div className="flex items-center">
+              <button onClick={onAddPortfolio} aria-label="New portfolio" title="New portfolio" className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-300 hover:text-emerald-600 hover:bg-emerald-50"><Plus size={15} /></button>
+              <button onClick={() => setConfirmDelete(true)} aria-label="Delete this portfolio" title="Delete this portfolio" className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-300 hover:text-rose-500 hover:bg-rose-50"><Trash2 size={15} /></button>
+            </div>
           </div>
           <div className="w-12 h-12 mt-5 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center mb-3">
             <Sparkles size={22} />
@@ -142,6 +145,7 @@ export function HomeTab({ data, active, cur, totals, chartData, refreshing, onRe
                 {active.name} <Pencil size={11} className="opacity-60" />
               </button>
             )}
+            <button onClick={onAddPortfolio} aria-label="New portfolio" title="New portfolio" className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-300 hover:text-emerald-600 hover:bg-emerald-50"><Plus size={13} /></button>
             <button onClick={() => setConfirmDelete(true)} aria-label="Delete this portfolio" title="Delete this portfolio" className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-300 hover:text-rose-500 hover:bg-rose-50"><Trash2 size={13} /></button>
           </div>
           <div className="flex items-center gap-1.5">
