@@ -8359,6 +8359,143 @@ function NewGroupModal({ mutuals, onClose, onCreate }) {
   );
 }
 
+/* ================= ACTIVITY FEED ================= */
+function ActivityFeed({ user, friends, names, myName, onOpenProfile, board, onOpenTicker }) {
+  const [events, setEvents] = useState(null);
+  const [showAll, setShowAll] = useState(false);
+  const [reactions, setReactions] = useState([]); // {event_id,user_id,emoji}
+  const [comments, setComments] = useState([]);   // {id,event_id,user_id,body,created_at}
+  const [openComments, setOpenComments] = useState({}); // event id -> bool
+  const [draft, setDraft] = useState({});
+  const load = async () => {
+    try {
+      const { data: rows, error } = await supabase
+        .from("portfolio_events").select("id, user_id, kind, ticker, from_pct, to_pct, created_at")
+        .order("created_at", { ascending: false }).limit(60);
+      if (error) throw error;
+      const ids = (rows || []).map((r) => r.id);
+      let rs = [], cs = [];
+      if (ids.length) {
+        const [{ data: r1 }, { data: c1 }] = await Promise.all([
+          supabase.from("event_reactions").select("event_id, user_id, emoji").in("event_id", ids),
+          supabase.from("event_comments").select("id, event_id, user_id, body, created_at").in("event_id", ids).order("created_at", { ascending: true }),
+        ]);
+        rs = r1 || []; cs = c1 || [];
+      }
+      setEvents(rows || []); setReactions(rs); setComments(cs);
+    } catch (e) { setEvents([]); }
+  };
+  useEffect(() => { load(); }, [user.id, (friends || []).length]);
+
+  const react = async (ev, emoji) => {
+    const mine = reactions.find((r) => r.event_id === ev.id && r.user_id === user.id && r.emoji === emoji);
+    setReactions((rs) => mine ? rs.filter((r) => r !== mine) : [...rs, { event_id: ev.id, user_id: user.id, emoji }]);
+    if (mine) await supabase.from("event_reactions").delete().match({ event_id: ev.id, user_id: user.id, emoji });
+    else await supabase.from("event_reactions").insert({ event_id: ev.id, user_id: user.id, emoji });
+  };
+  const comment = async (ev) => {
+    const body = (draft[ev.id] || "").trim().slice(0, 500);
+    if (!body) return;
+    const { error } = await supabase.from("event_comments").insert({ event_id: ev.id, user_id: user.id, body });
+    if (error) return;
+    setDraft((d) => ({ ...d, [ev.id]: "" }));
+    await load();
+  };
+
+  /* "3 of your friends own NVDA" — from mutual friends' shared top holdings. */
+  const popular = (() => {
+    const rows = (board || []).filter((b) => b.userId !== user.id && Array.isArray(b.topHoldings));
+    const count = {};
+    rows.forEach((b) => b.topHoldings.forEach((h) => { count[h.ticker] = (count[h.ticker] || 0) + 1; }));
+    return Object.entries(count).filter(([, n]) => n >= 2).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  })();
+
+  if (events === null) return null;
+  const text = eventText;
+  const shown = showAll ? events : events.slice(0, 8);
+  return (
+    <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
+      <h3 className="font-bold text-slate-700 flex items-center gap-2 mb-1">
+        <Activity size={16} className="text-emerald-500" /> Activity
+      </h3>
+      {popular.length > 0 && (
+        <div className="bg-slate-50 rounded-2xl p-3 mb-2">
+          <div className="text-[10px] font-bold text-slate-400 mb-1">POPULAR AMONG YOUR FRIENDS</div>
+          <div className="flex flex-wrap gap-1.5">
+            {popular.map(([t, n]) => (
+              <button key={t} onClick={() => onOpenTicker && onOpenTicker(t)}
+                className="text-xs font-semibold text-slate-700 bg-white border border-slate-200 px-2 py-1 rounded-full">
+                {n} of your friends own <b>{t}</b>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {events.length === 0 ? (
+        <p className="text-sm text-slate-400">Nothing yet. When you or a friend changes a shared portfolio, it shows up here — as percentages, never amounts.</p>
+      ) : (
+        <div className="divide-y divide-slate-50">
+          {shown.map((e) => {
+            const me = e.user_id === user.id;
+            const who = me ? "You" : `@${names[e.user_id] || "friend"}`;
+            const rs = reactions.filter((r) => r.event_id === e.id);
+            const cs = comments.filter((c) => c.event_id === e.id);
+            const open = !!openComments[e.id];
+            return (
+              <div key={e.id} className="py-2.5">
+                <div className="flex items-start gap-2">
+                  <div className="flex-1 min-w-0 text-sm text-slate-600">
+                    <button onClick={() => !me && onOpenProfile(e.user_id, names[e.user_id])} className={`font-semibold ${me ? "text-slate-700" : "text-emerald-700"}`}>{who}</button>{" "}
+                    {text(e)}
+                  </div>
+                  <div className="text-[10px] text-slate-400 shrink-0 mt-0.5">{timeAgo(e.created_at)}</div>
+                </div>
+                <div className="flex items-center gap-1 mt-1.5 flex-wrap">
+                  {REACTIONS.map((em) => {
+                    const n = rs.filter((r) => r.emoji === em).length;
+                    const mine = rs.some((r) => r.emoji === em && r.user_id === user.id);
+                    return (
+                      <button key={em} onClick={() => react(e, em)}
+                        className={`text-[11px] px-1.5 py-0.5 rounded-full border ${mine ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-white border-slate-100 text-slate-500"} ${n === 0 ? "opacity-50" : ""}`}>
+                        {em}{n > 0 ? ` ${n}` : ""}
+                      </button>
+                    );
+                  })}
+                  <button onClick={() => setOpenComments((o) => ({ ...o, [e.id]: !open }))}
+                    className="text-[11px] font-semibold text-slate-400 px-1.5 py-0.5 ml-1">
+                    {cs.length ? `${cs.length} comment${cs.length === 1 ? "" : "s"}` : "Comment"}
+                  </button>
+                </div>
+                {open && (
+                  <div className="mt-2 ml-2 pl-3 border-l-2 border-slate-100 space-y-1.5">
+                    {cs.map((c) => (
+                      <div key={c.id} className="text-xs text-slate-600">
+                        <span className="font-semibold text-slate-700">@{c.user_id === user.id ? (myName || "you") : (names[c.user_id] || "friend")}</span>{" "}
+                        <span className="whitespace-pre-wrap break-words">{c.body}</span>
+                        <span className="text-slate-300 ml-1">{timeAgo(c.created_at)}</span>
+                      </div>
+                    ))}
+                    <div className="flex items-center gap-1.5 pt-0.5">
+                      <input value={draft[e.id] || ""} onChange={(ev) => setDraft((d) => ({ ...d, [e.id]: ev.target.value }))}
+                        onKeyDown={(ev) => { if (ev.key === "Enter") comment(e); }}
+                        placeholder="Write a comment…" className="flex-1 min-w-0 border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs" />
+                      <button onClick={() => comment(e)} disabled={!(draft[e.id] || "").trim()}
+                        className="text-xs font-semibold text-emerald-600 disabled:opacity-40">Post</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {events.length > 8 && (
+        <button onClick={() => setShowAll((v) => !v)} className="text-xs font-semibold text-emerald-600 mt-2">{showAll ? "Show less" : `Show all ${events.length}`}</button>
+      )}
+    </div>
+  );
+}
+
 function GroupChat({ group, user, active, cur, fx, say, username, mutuals, onOpenTicker, onBack, onGroupChanged, onJoin = null, richrData = null }) {
   const [posts, setPosts] = useState(null);
   const [reactions, setReactions] = useState([]);   // [{post_id,user_id,emoji}]
