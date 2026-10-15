@@ -1,6 +1,47 @@
 import { useEffect, useRef, useState } from "react";
 import { supabase } from "./supabase";
 import RichR, { PublicProfile } from "./RichR";
+import { LegalPage, TermsGate } from "./features/safety.jsx";
+import { hasAcceptedTerms } from "./lib/moderation.js";
+import { authRedirect, closeAuthBrowser, initNativeShell, isNative, listenPushTaps, openAuthBrowser, platform, watchNetwork } from "./lib/native.js";
+
+/* Completes an OAuth / magic-link sign-in that came back through the app's
+   deep link (fi.richr.app://auth-callback?code=… or #access_token=…). */
+async function finishNativeAuth(url) {
+  try {
+    const u = new URL(url);
+    const code = u.searchParams.get("code");
+    const hash = new URLSearchParams((u.hash || "").replace(/^#/, ""));
+    if (code) await supabase.auth.exchangeCodeForSession(code);
+    else if (hash.get("access_token")) await supabase.auth.setSession({ access_token: hash.get("access_token"), refresh_token: hash.get("refresh_token") });
+  } catch (e) { console.error("RichR auth callback failed:", e); }
+  closeAuthBrowser();
+}
+
+const sha256Hex = async (str) => {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+};
+
+/* Native Sign in with Apple (Face ID sheet) → Supabase ID-token sign-in. */
+async function signInWithAppleNative() {
+  const { SignInWithApple } = await import("@capacitor-community/apple-sign-in");
+  const rawNonce = crypto.getRandomValues(new Uint32Array(4)).join("-");
+  const res = await SignInWithApple.authorize({
+    clientId: "fi.richr.app",
+    redirectURI: "https://exknelcubfqlzbkwfyic.supabase.co/auth/v1/callback",
+    scopes: "email name",
+    state: String(Date.now()),
+    nonce: await sha256Hex(rawNonce),
+  });
+  const r = res && res.response;
+  if (!r || !r.identityToken) throw new Error("Apple didn't return a sign-in token.");
+  const { error } = await supabase.auth.signInWithIdToken({ provider: "apple", token: r.identityToken, nonce: rawNonce });
+  if (error) throw error;
+  // Apple shares the name only on the very first sign-in — keep it.
+  const name = [r.givenName, r.familyName].filter(Boolean).join(" ");
+  if (name) await supabase.auth.updateUser({ data: { full_name: name } });
+}
 
 /* Invite links (/?invite=CODE) survive the OAuth round-trip through localStorage;
    RichR consumes the code once the user is signed in. */
@@ -20,11 +61,48 @@ export default function App() {
   // undefined = still checking the stored session, null = signed out
   const [session, setSession] = useState(undefined);
 
+  const [termsOk, setTermsOk] = useState(undefined); // undefined = checking
+  const [online, setOnline] = useState(true);
+  const [legal, setLegal] = useState(null);
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session ?? null));
     const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
     return () => sub.subscription.unsubscribe();
   }, []);
+
+  // iOS app: deep links (auth callback, shared /u/ and invite links), push taps, offline state
+  useEffect(() => {
+    const go = (path) => { if (path && path !== window.location.pathname + window.location.search) window.location.assign(path); };
+    let offShell = () => {}, offPush = () => {};
+    initNativeShell({ onAuthUrl: finishNativeAuth, onOpenPath: go }).then((f) => { offShell = f; });
+    listenPushTaps(go).then((f) => { offPush = f; });
+    const offNet = watchNetwork(setOnline);
+    return () => { offShell(); offPush(); offNet(); };
+  }, []);
+
+  const uid = session && session.user && session.user.id;
+  useEffect(() => {
+    if (!uid) { setTermsOk(undefined); return; }
+    let dead = false;
+    hasAcceptedTerms(uid).then((ok) => { if (!dead) setTermsOk(ok); });
+    return () => { dead = true; };
+  }, [uid]);
+
+  const legalOverlay = legal && <LegalPage which={legal} onSwitch={setLegal} onClose={() => setLegal(null)} />;
+  const offlineBanner = !online && (
+    <div role="status" className="fixed top-0 inset-x-0 z-[80] bg-slate-900 text-white text-[12px] font-semibold text-center py-1.5"
+      style={{ paddingTop: "max(0.375rem, env(safe-area-inset-top))" }}>
+      You're offline — showing your last synced portfolio. Changes save when you reconnect.
+    </div>
+  );
+
+  // /privacy, /terms, /support — public pages (App Store Connect needs these URLs)
+  const legalPath = typeof window !== "undefined" && window.location.pathname.match(/^\/(privacy|terms|support)\/?$/);
+  if (legalPath) {
+    const which = legalPath[1] === "support" ? "terms" : legalPath[1];
+    return <LegalPage which={legal || which} onSwitch={setLegal} onClose={() => window.location.assign("/")} support={legalPath[1] === "support"} />;
+  }
 
   // /u/<username> — public profile page, no sign-in needed
   const m = typeof window !== "undefined" && window.location.pathname.match(/^\/u\/([a-z0-9_]{3,20})\/?$/i);
@@ -32,12 +110,14 @@ export default function App() {
 
   // Local-only demo session (never active on the deployed host): lets the UI be
   // exercised without an account — every backend call simply comes back empty.
-  const demo = typeof window !== "undefined" && /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname) && new URLSearchParams(window.location.search).get("demo") === "1";
+  const demo = !isNative && typeof window !== "undefined" && /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname) && new URLSearchParams(window.location.search).get("demo") === "1";
   if (demo) return <RichR user={{ id: "00000000-0000-4000-8000-000000000000", email: "demo@richr.local" }} onSignOut={() => {}} />;
 
   if (session === undefined) return <Splash />;
-  if (!session) return <Login />;
-  return <RichR user={session.user} onSignOut={() => supabase.auth.signOut()} />;
+  if (!session) return <>{offlineBanner}<Login onOpenLegal={setLegal} />{legalOverlay}</>;
+  if (termsOk === undefined) return <Splash />;
+  if (!termsOk) return <>{offlineBanner}<TermsGate user={session.user} onAccepted={() => setTermsOk(true)} onOpenLegal={setLegal} />{legalOverlay}</>;
+  return <>{offlineBanner}<RichR user={session.user} onSignOut={() => supabase.auth.signOut()} /></>;
 }
 
 function Splash() {
@@ -49,25 +129,46 @@ function Splash() {
   );
 }
 
-function Login() {
+function Login({ onOpenLegal }) {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(""); // which provider is opening
   const [email, setEmail] = useState("");
   const [linkSent, setLinkSent] = useState(false);
+  const [usePassword, setUsePassword] = useState(false);
+  const [password, setPassword] = useState("");
 
-  // One handler for all OAuth providers.
+  // One handler for all OAuth providers. In the iOS app the provider opens in
+  // an in-app Safari sheet and returns through the fi.richr.app:// deep link.
   const signInWith = async (provider, label) => {
     setErr("");
     setBusy(provider);
-    const { error } = await supabase.auth.signInWithOAuth({
+    if (provider === "apple" && platform === "ios") {
+      try { await signInWithAppleNative(); }
+      catch (e) { if (!/cancel|1001/i.test(String(e && (e.message || e.code)))) setErr(`Apple: ${(e && e.message) || "sign-in failed"}`); }
+      setBusy("");
+      return;
+    }
+    const { data, error } = await supabase.auth.signInWithOAuth({
       provider,
-      options: { redirectTo: window.location.origin },
+      options: { redirectTo: authRedirect(), skipBrowserRedirect: isNative },
     });
     if (error) {
       setErr(`${label}: ${error.message}`);
       setBusy("");
+      return;
     }
-    // on success the browser redirects to the provider, so busy stays set
+    if (isNative && data && data.url) { await openAuthBrowser(data.url); setBusy(""); }
+    // on the web the browser redirects to the provider, so busy stays set
+  };
+
+  // Email + password — for accounts created with a password (e.g. the App Review demo account).
+  const signInWithPassword = async () => {
+    const addr = email.trim().toLowerCase();
+    if (!addr.includes("@") || !password) { setErr("Enter your email and password."); return; }
+    setErr(""); setBusy("password");
+    const { error } = await supabase.auth.signInWithPassword({ email: addr, password });
+    setBusy("");
+    if (error) setErr(error.message);
   };
 
   // Email magic link — no password to remember.
@@ -78,7 +179,7 @@ function Login() {
     setBusy("email");
     const { error } = await supabase.auth.signInWithOtp({
       email: addr,
-      options: { emailRedirectTo: window.location.origin },
+      options: { emailRedirectTo: authRedirect() },
     });
     setBusy("");
     if (error) { setErr(error.message); return; }
@@ -109,6 +210,12 @@ function Login() {
     </svg>
   );
 
+  const AppleIcon = (
+    <svg width="17" height="17" viewBox="0 0 384 512" aria-hidden="true">
+      <path fill="currentColor" d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/>
+    </svg>
+  );
+
   /* One clear path: Google → or → email. LinkedIn/Facebook stay available
      but small, so the card reads as a single decision, not a menu. */
   const signInCard = (
@@ -125,6 +232,11 @@ function Login() {
         className="mt-6 w-full h-14 flex items-center justify-center gap-3 rounded-2xl bg-slate-900 hover:bg-slate-800 text-white font-semibold text-[15px] transition disabled:opacity-60">
         <span className="bg-white rounded-full p-1 flex">{GoogleIcon}</span>
         {busy === "google" ? "Opening Google…" : "Continue with Google"}
+      </button>
+      <button onClick={() => signInWith("apple", "Apple")} disabled={!!busy}
+        className="mt-2.5 w-full h-14 flex items-center justify-center gap-3 rounded-2xl bg-black hover:bg-slate-900 text-white font-semibold text-[15px] transition disabled:opacity-60">
+        {AppleIcon}
+        {busy === "apple" ? "Opening Apple…" : "Continue with Apple"}
       </button>
 
       <div className="flex items-center gap-3 my-5">
@@ -149,11 +261,20 @@ function Login() {
             onKeyDown={(e) => { if (e.key === "Enter") sendMagicLink(); }}
             placeholder="you@email.com" type="email" autoComplete="email" aria-label="Email address"
             className="w-full h-14 border border-slate-200 rounded-2xl px-4 text-[15px] outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 transition" />
-          <button onClick={sendMagicLink} disabled={!!busy}
+          {usePassword && (
+            <input value={password} onChange={(e) => setPassword(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") signInWithPassword(); }}
+              placeholder="Password" type="password" autoComplete="current-password" aria-label="Password"
+              className="w-full h-14 border border-slate-200 rounded-2xl px-4 text-[15px] outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 transition" />
+          )}
+          <button onClick={usePassword ? signInWithPassword : sendMagicLink} disabled={!!busy}
             className="w-full h-14 rounded-2xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 font-semibold text-[15px] transition disabled:opacity-60">
-            {busy === "email" ? "Sending link…" : "Continue with email"}
+            {busy === "email" ? "Sending link…" : busy === "password" ? "Signing in…" : usePassword ? "Sign in" : "Continue with email"}
           </button>
-          <p className="text-[11px] text-slate-400 text-center">No password — we email you a sign-in link.</p>
+          <p className="text-[11px] text-slate-400 text-center">
+            {usePassword ? <>Or <button onClick={() => { setUsePassword(false); setErr(""); }} className="underline">email me a sign-in link</button> instead.</>
+              : <>No password — we email you a sign-in link. <button onClick={() => { setUsePassword(true); setErr(""); }} className="underline">Use a password</button></>}
+          </p>
         </div>
       )}
 
@@ -177,6 +298,9 @@ function Login() {
         <span><span className="font-semibold text-slate-800">Private by default.</span> You control what friends can see.</span>
       </div>
       <p className="text-[11px] text-slate-400 mt-2">Already have an account? Sign in the same way.</p>
+      <p className="text-[11px] text-slate-400 mt-2">
+        By continuing you agree to the <button onClick={() => onOpenLegal("terms")} className="underline">Terms of Use</button> and <button onClick={() => onOpenLegal("privacy")} className="underline">Privacy Policy</button>.
+      </p>
     </div>
   );
 
@@ -234,6 +358,7 @@ function Login() {
 
         <p className="text-[11px] text-slate-400 text-center mt-12 leading-relaxed max-w-lg mx-auto">
           RichR is a tool for tracking and talking about investments with friends. Nothing here is investment advice.
+          <br /><button onClick={() => onOpenLegal("terms")} className="underline">Terms</button> · <button onClick={() => onOpenLegal("privacy")} className="underline">Privacy</button> · <a href="mailto:oliverwartiovaara@gmail.com" className="underline">Contact</a>
         </p>
       </div>
     </div>

@@ -1,0 +1,21 @@
+{
+  "appId": "fi.richr.app",
+  "appName": "RichR",
+  "webDir": "dist",
+  "ios": {
+    "contentInset": "never",
+    "scheme": "RichR",
+    "limitsNavigationsToAppBoundDomains": false
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 600,
+      "launchAutoHide": true,
+      "backgroundColor": "#F8FAFC",
+      "showSpinner": false
+    },
+    "PushNotifications": {
+      "presentationOptions": ["badge", "sound", "alert"]
+    }
+  }
+}

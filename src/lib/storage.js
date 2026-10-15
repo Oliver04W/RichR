@@ -1,5 +1,6 @@
 /* Split out of RichR.jsx — see tools/split.cjs. Keep modules small; shared pure helpers live in lib/. */
 import { supabase } from "../supabase";
+import { apiUrl } from "./native.js";
 
 /* ---------- storage (cloud-first via Supabase, localStorage as offline cache) ---------- */
 /* The whole app state lives in one document per user:
@@ -120,5 +121,5 @@ export const watchTicker = async (t) => {
 export const aiFetch = async (url, init = {}) => {
   let token = null;
   try { const { data } = await supabase.auth.getSession(); token = data && data.session && data.session.access_token; } catch (e) { /* signed-out */ }
-  return fetch(url, { ...init, headers: { ...(init.headers || {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) } });
+  return fetch(apiUrl(url), { ...init, headers: { ...(init.headers || {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) } });
 };

@@ -8,6 +8,9 @@ import { REACTIONS, SOCIAL_ME, eventText, mutualIdsCached, useNames } from "./so
 import { fxConvert, money, pct, pctOf, timeAgo, withTimeout } from "../lib/format.js";
 import { byValueDesc, holdingValue } from "../lib/portfolio.js";
 import { Avatar, Logo, Ret, Skeleton } from "../ui/primitives.jsx";
+import { ModMenu } from "./safety.jsx";
+import { BLOCKED, moderationBus, postErrorMessage } from "../lib/moderation.js";
+import { haptic } from "../lib/native.js";
 
 /* ---------- Home feed: friends, communities, sentiment, rankings — one stream ---------- */
 export const FEED_CACHE = { at: 0, user: null, items: null, trending: [], top: null, scope: "friends", groupNames: {} };
@@ -184,6 +187,16 @@ export function HomeFeed({ user, onOpenTicker, goFriends, goCommunities, rankMov
               <div key={x.id} className="py-3 flex items-start gap-2.5">
                 <Avatar name={x.user_id === me ? (SOCIAL_ME.username || "you") : (names[x.user_id] || "?")} size={30} />
                 <div className="flex-1 min-w-0">
+                  {x.t !== "rank" && x.t !== "event" && (
+                    <ModMenu className="float-right -mt-0.5" me={me}
+                      kind={x.t === "post" ? "stock_post" : x.t === "call" ? "stock_call" : "group_post"}
+                      contentId={x.t === "post" ? x.p.id : x.t === "call" ? x.c.id : x.g.id}
+                      authorId={x.user_id} authorName={names[x.user_id]}
+                      onDone={() => {
+                        FEED_CACHE.at = 0;
+                        setItems((its) => (its || []).filter((y) => y.id !== x.id && !BLOCKED.ids.has(y.user_id)));
+                      }} />
+                  )}
                   <div className="text-[13px] text-slate-700 leading-snug"><span className="font-bold text-slate-900">{who(x.user_id)}</span> {line(x)}{x.global && <span className="ml-1.5 text-[9px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded-full align-middle">RichR</span>}</div>
                   {poll && <div className="mt-2 bg-slate-50 rounded-xl p-3"><SentimentMini ticker={x.g.card.ticker} name={x.g.card.name} onOpenTicker={onOpenTicker} headline={false} /></div>}
                   {x.t === "group" && x.g.body && x.g.card && <div className="text-[13px] text-slate-600 mt-1">“{x.g.body}”</div>}
@@ -371,8 +384,11 @@ export function ActivityFeed({ user, friends, names, myName, onOpenProfile, boar
     } catch (e) { setEvents([]); }
   };
   useEffect(() => { load(); }, [user.id, (friends || []).length]);
+  useEffect(() => { const f = () => load(); moderationBus.subs.add(f); return () => moderationBus.subs.delete(f); }, [user.id]);
+  const [commentErr, setCommentErr] = useState("");
 
   const react = async (ev, emoji) => {
+    haptic("select");
     const mine = reactions.find((r) => r.event_id === ev.id && r.user_id === user.id && r.emoji === emoji);
     setReactions((rs) => mine ? rs.filter((r) => r !== mine) : [...rs, { event_id: ev.id, user_id: user.id, emoji }]);
     if (mine) await supabase.from("event_reactions").delete().match({ event_id: ev.id, user_id: user.id, emoji });
@@ -382,7 +398,8 @@ export function ActivityFeed({ user, friends, names, myName, onOpenProfile, boar
     const body = (draft[ev.id] || "").trim().slice(0, 500);
     if (!body) return;
     const { error } = await supabase.from("event_comments").insert({ event_id: ev.id, user_id: user.id, body });
-    if (error) return;
+    if (error) { setCommentErr(postErrorMessage(error)); return; }
+    setCommentErr("");
     setDraft((d) => ({ ...d, [ev.id]: "" }));
     await load();
   };
@@ -458,8 +475,10 @@ export function ActivityFeed({ user, friends, names, myName, onOpenProfile, boar
                         <span className="font-semibold text-slate-700">@{c.user_id === user.id ? (myName || "you") : (names[c.user_id] || "friend")}</span>{" "}
                         <span className="whitespace-pre-wrap break-words">{c.body}</span>
                         <span className="text-slate-300 ml-1">{timeAgo(c.created_at)}</span>
+                        <ModMenu className="inline-flex align-middle ml-1" kind="event_comment" contentId={c.id} authorId={c.user_id} authorName={names[c.user_id]} me={user.id} />
                       </div>
                     ))}
+                    {commentErr && <p role="alert" className="text-[11px] text-rose-600">{commentErr}</p>}
                     <div className="flex items-center gap-1.5 pt-0.5">
                       <input value={draft[e.id] || ""} onChange={(ev) => setDraft((d) => ({ ...d, [e.id]: ev.target.value }))}
                         onKeyDown={(ev) => { if (ev.key === "Enter") comment(e); }}

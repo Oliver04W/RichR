@@ -9,6 +9,9 @@ import { PostBody, REACTIONS, SOCIAL_ME, mutualIdsCached, ownsTicker, useNames }
 import { daysOld, fmtDate, fmtTime, pctOf, timeAgo, withTimeout } from "../lib/format.js";
 import { dataKey } from "../lib/storage.js";
 import { Avatar, Logo, Ret, Skeleton } from "../ui/primitives.jsx";
+import { ModMenu } from "./safety.jsx";
+import { moderationBus, postErrorMessage } from "../lib/moderation.js";
+import { haptic } from "../lib/native.js";
 
 // set by the main component on every render
 export const VOTE_META = {
@@ -213,6 +216,7 @@ export const VOTE_CHAIN = new Map();
 export async function castVote(ticker, vote, { reason = null, price = null, currency = null, reaffirmed = false } = {}) {
   const tk = String(ticker).toUpperCase();
   const next = vote === "none" ? null : vote;
+  haptic(next ? "medium" : "select");
   const row = { user_id: SOCIAL_ME.id, ticker: tk, vote, reason: next && reason ? String(reason).slice(0, 140) : null,
     price_at: next && Number(price) > 0 ? Number(price) : null, currency: next ? currency || null : null, reaffirmed: !!next && reaffirmed,
     owner: !!next && ownsTicker(tk) };   // "✓ Owner" badge — a social signal, never extra weight
@@ -661,6 +665,7 @@ export function StockSocial({ ticker: rawTicker, name, price, currency, onOpenTi
   const [replyTo, setReplyTo] = useState(null);
   const [sending, setSending] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  const [postErr, setPostErr] = useState("");
   const communities = useMyCommunities(me);
 
   const load = async () => {
@@ -683,6 +688,7 @@ export function StockSocial({ ticker: rawTicker, name, price, currency, onOpenTi
     setPosts(list);
   };
   useEffect(() => { setPosts(null); load(); }, [ticker]);
+  useEffect(() => { const f = () => load(); moderationBus.subs.add(f); return () => moderationBus.subs.delete(f); }, [ticker]);
   useEffect(() => { const f = (t, phase) => { if (t === ticker && phase !== "optimistic") load(); }; sentimentBus.subs.add(f); return () => sentimentBus.subs.delete(f); }, [ticker]);
 
   const names = useNames((posts || []).map((p) => p.user_id));
@@ -694,12 +700,14 @@ export function StockSocial({ ticker: rawTicker, name, price, currency, onOpenTi
     setSending(true);
     const { error } = await supabase.from("stock_posts").insert({ user_id: me, ticker, body, parent_id: replyTo ? replyTo.id : null });
     setSending(false);
-    if (error) return;
-    setText(""); setReplyTo(null);
+    if (error) { setPostErr(postErrorMessage(error)); return; }
+    haptic("light");
+    setPostErr(""); setText(""); setReplyTo(null);
     await load();
   };
   const react = async (post, emoji) => {
     const mine = reactions.find((r) => r.post_id === post.id && r.user_id === me && r.emoji === emoji);
+    haptic("select");
     setReactions((rs) => mine ? rs.filter((r) => r !== mine) : [...rs, { post_id: post.id, user_id: me, emoji }]);
     if (mine) await supabase.from("stock_post_reactions").delete().match({ post_id: post.id, user_id: me, emoji });
     else await supabase.from("stock_post_reactions").insert({ post_id: post.id, user_id: me, emoji });
@@ -724,6 +732,7 @@ export function StockSocial({ ticker: rawTicker, name, price, currency, onOpenTi
           {v && <VoteChip vote={v} />}
           <span className="text-[10px] text-slate-400 ml-auto">{timeAgo(p.created_at)}</span>
           {mine && <button onClick={() => removePost(p)} className="text-[10px] text-slate-300 hover:text-rose-400">delete</button>}
+          <ModMenu kind="stock_post" contentId={p.id} authorId={p.user_id} authorName={names[p.user_id]} me={me} />
         </div>
         <div className="text-[14px] text-slate-700 leading-relaxed"><PostBody text={p.body} onTicker={onOpenTicker || (() => {})} /></div>
         <div className="flex items-center gap-1 mt-1 flex-wrap">
@@ -777,6 +786,7 @@ export function StockSocial({ ticker: rawTicker, name, price, currency, onOpenTi
             <Send size={16} />
           </button>
         </div>
+        {postErr && <p role="alert" className="text-xs text-rose-600 mt-1.5">{postErr}</p>}
       </div>
     </div>
   );

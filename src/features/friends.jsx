@@ -1,6 +1,7 @@
 /* Split out of RichR.jsx — see tools/split.cjs. Keep modules small; shared pure helpers live in lib/. */
 import { useEffect, useState } from "react";
 import { supabase } from "../supabase";
+import { moderationBus } from "../lib/moderation.js";
 import { Check, ChevronRight, Clock, Lock, Plus, RefreshCw, Share2, Trophy, Users } from "lucide-react";
 import { ActivityFeed } from "./feed.jsx";
 import { ProfileSheet } from "./profile.jsx";
@@ -144,6 +145,7 @@ export function FriendsTab({ data, active, totals, cur, say, user, onEditSharing
     } catch (e) { /* feed is decoration here */ }
   };
   useEffect(() => { loadAll(); }, []);
+  useEffect(() => { const f = () => loadAll(); moderationBus.subs.add(f); return () => moderationBus.subs.delete(f); }, []);
 
   // Tap a friend -> open the same investor profile sheet as the leaderboard.
   const openFriendProfile = (id, username) => {
@@ -538,7 +540,7 @@ export function FriendsTab({ data, active, totals, cur, say, user, onEditSharing
       </>)}
       {viewing && (
         <ProfileSheet r={viewing} me={viewing.userId === user.id} mine={(shown || []).find((x) => x.userId === user.id) || null}
-          latest={latest[viewing.userId] || null} onClose={() => setViewing(null)} />
+          latest={latest[viewing.userId] || null} onClose={() => setViewing(null)} say={say} />
       )}
     </div>
   );

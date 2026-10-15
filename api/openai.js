@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import { requireUser, unauthorized } from "./_auth.js";
+import { cors, requireUser, unauthorized } from "./_auth.js";
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -36,6 +36,7 @@ function convertMessages(messages = []) {
 }
 
 export default async function handler(req, res) {
+  if (cors(req, res)) return;
   if (req.method === "GET") {
     return res.status(200).json({
       success: true,

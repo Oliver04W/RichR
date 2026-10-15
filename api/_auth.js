@@ -23,3 +23,20 @@ export async function requireUser(req) {
 
 export const unauthorized = (res) =>
   res.status(401).json({ error: { message: "Sign in to use AI features." } });
+
+// The iOS app runs at capacitor://localhost (or ionic://localhost), so its
+// calls to these routes are cross-origin. Allow exactly those origins plus
+// the site itself; answers the CORS preflight. Returns true when handled.
+const ALLOWED_ORIGINS = new Set(["capacitor://localhost", "ionic://localhost", "https://rich-r.vercel.app", "http://localhost:5173"]);
+export function cors(req, res) {
+  const origin = req.headers?.origin || "";
+  if (ALLOWED_ORIGINS.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Max-Age", "86400");
+  }
+  if (req.method === "OPTIONS") { res.status(204).end(); return true; }
+  return false;
+}

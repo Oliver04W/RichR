@@ -4,9 +4,10 @@
 // key, which must live server-side — set ANTHROPIC_API_KEY in Vercel's
 // project environment variables. Without it, AI features show a friendly
 // error and the rest of the app (auth, prices, portfolios) works normally.
-import { requireUser, unauthorized } from "./_auth.js";
+import { cors, requireUser, unauthorized } from "./_auth.js";
 
 export default async function handler(req, res) {
+  if (cors(req, res)) return;
   if (req.method !== "POST") {
     return res.status(405).json({ error: { message: "POST only" } });
   }

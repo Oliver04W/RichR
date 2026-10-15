@@ -8,6 +8,8 @@ import { eventText } from "./social.jsx";
 import { CURRENCIES, DEFAULT_FX, fmtDateTime, pct, timeAgo, withTimeout } from "../lib/format.js";
 import { PROFILES, SCORE_LABEL, SHARE_ITEMS, byValueDesc, holdingValue, profileOf, publishBoard, scoreTone, shareOf } from "../lib/portfolio.js";
 import { Avatar, Ret, Skeleton } from "../ui/primitives.jsx";
+import { enablePush, haptic, isNative, pushStatus, shareContent, webOrigin } from "../lib/native.js";
+import { LegalPage, ModMenu, SafetySection } from "./safety.jsx";
 
 /* ================= PROFILE ================= */
 export const TAB_LABEL = { portfolio: "Home", research: "Discover", groups: "Communities", friends: "Friends", profile: "Profile" };
@@ -49,6 +51,7 @@ export function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrenc
   const prof = profileOf(data.profile);
   const share = shareOf(data);
   const [syncing, setSyncing] = useState(false);
+  const [legal, setLegal] = useState(null); // null | terms | privacy
   const syncTimer = useRef(null);
 
   /* Flip one sharing switch. Saved instantly to your synced document;
@@ -94,7 +97,7 @@ export function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrenc
     if (error) { setIsPublic(!next); say("Couldn't update — try again."); return; }
     say(next ? "Your profile link is live." : "Profile link switched off — the page now shows “private”.");
   };
-  const profileUrl = data.username ? `${window.location.origin}/u/${data.username}` : "";
+  const profileUrl = data.username ? `${webOrigin()}/u/${data.username}` : "";
   const copyLink = async () => {
     try { await navigator.clipboard.writeText(profileUrl); setCopied(true); setTimeout(() => setCopied(false), 1500); }
     catch (e) { say(profileUrl); }
@@ -259,14 +262,41 @@ export function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrenc
         {cardPreview && <ShareCardPreview url={cardPreview} username={data.username} onClose={() => { URL.revokeObjectURL(cardPreview); setCardPreview(null); }} />}
       </div>
 
-      {/* account card */}
-      <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
-        <div className="text-xs text-slate-400 mb-3">
-          Signed in{user && user.email ? ` as ${user.email}` : ""}. Your portfolio syncs to your account and follows you across devices.
-        </div>
-        <button onClick={onSignOut}
-          className="w-full bg-rose-50 rounded-xl py-2.5 text-sm font-semibold text-rose-500">Sign out</button>
+      {isNative && <NotificationsCard user={user} say={say} />}
+
+      {/* safety, support, legal, sign out, delete account */}
+      <SafetySection user={user} say={say} onSignOut={onSignOut} onOpenLegal={setLegal} />
+      {legal && <LegalPage which={legal} onSwitch={setLegal} onClose={() => setLegal(null)} />}
+    </div>
+  );
+}
+
+/* Push notifications (iOS app): nudges, replies, comments, friend requests. */
+function NotificationsCard({ user, say }) {
+  const [status, setStatus] = useState(null); // granted | denied | prompt | …
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { pushStatus().then(setStatus); }, []);
+  const on = status === "granted";
+  return (
+    <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100 flex items-center gap-3">
+      <div className="flex-1 min-w-0">
+        <h3 className="font-bold text-slate-700">Notifications</h3>
+        <p className="text-[11px] text-slate-400 leading-snug mt-1">
+          {status === "denied" ? "Turned off in iOS Settings › RichR › Notifications." : "Nudges, replies to your posts, comments on your activity and new friends."}
+        </p>
       </div>
+      {status !== "denied" && (
+        <button disabled={busy || on} onClick={async () => {
+          setBusy(true);
+          const r = await enablePush(supabase, user.id);
+          setBusy(false);
+          setStatus(await pushStatus());
+          if (r.ok) { haptic("success"); say("Notifications on."); }
+          else if (r.reason !== "denied") say("Couldn't turn on notifications — try again.");
+        }} className={`text-xs font-semibold px-3 py-2 rounded-full shrink-0 ${on ? "bg-emerald-50 text-emerald-700" : "bg-slate-900 text-white"}`}>
+          {on ? "On" : busy ? "…" : "Turn on"}
+        </button>
+      )}
     </div>
   );
 }
@@ -274,7 +304,7 @@ export function ProfileTab({ data, user, say, onName, onUsername, cur, onCurrenc
 /* ================= PROFILE SHEET ================= */
 /* Tapping a leaderboard entry opens this: badge, philosophy, unrealized +
    realized return, win rate, average hold, and top-10 allocation. */
-export function ProfileSheet({ r, me, mine = null, latest = null, onClose }) {
+export function ProfileSheet({ r, me, mine = null, latest = null, onClose, say = null }) {
   useEffect(() => {
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
@@ -297,6 +327,7 @@ export function ProfileSheet({ r, me, mine = null, latest = null, onClose }) {
           <button onClick={onClose} className="flex items-center gap-0.5 text-sm font-semibold text-emerald-600 -ml-1">
             <ChevronLeft size={20} /> Back
           </button>
+          {!me && <ModMenu kind="user" contentId={r.userId} authorId={r.userId} authorName={r.name} me={null} say={say} onDone={onClose} className="w-8 h-8" />}
         </div>
         <div className="flex-1 overflow-y-auto overscroll-contain p-5 space-y-4">
           <PortfolioCard name={r.name} mascot={prof ? prof.mascot : "👤"} style={prof ? prof.label : "Investor"}
@@ -514,8 +545,10 @@ export async function shareProfileCard({ user, data, active, cur, fx, say, setPr
       spark: me && Array.isArray(me.spark) ? me.spark : null,
     });
     const file = new File([blob], `richr-${data.username}.png`, { type: "image/png" });
-    if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
-      await navigator.share({ files: [file], title: "My RichR profile", text: `@${data.username} on RichR` });
+    const canWebShareFile = !isNative && navigator.share && navigator.canShare && navigator.canShare({ files: [file] });
+    if (isNative || canWebShareFile) {
+      const r = await shareContent({ title: "My RichR profile", text: `@${data.username} on RichR`, file });
+      if (r === "unsupported") setPreview(URL.createObjectURL(blob));
     } else {
       setPreview(URL.createObjectURL(blob));
     }

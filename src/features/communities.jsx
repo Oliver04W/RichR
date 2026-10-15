@@ -8,6 +8,9 @@ import { PostBody, REACTIONS, loadMutualFriends } from "./social.jsx";
 import { daysOld, extractTickers, fmtDate, pct, timeAgo, withTimeout } from "../lib/format.js";
 import { byValueDesc } from "../lib/portfolio.js";
 import { Avatar, BottomSheet, Logo, Ret, Skeleton } from "../ui/primitives.jsx";
+import { ModMenu, ReportSheet } from "./safety.jsx";
+import { moderationBus, postErrorMessage } from "../lib/moderation.js";
+import { haptic, isNative, shareContent, webOrigin } from "../lib/native.js";
 
 /* Where a post/poll goes: one of your communities, or a stock's discussion. */
 export function useMyCommunities(userId) {
@@ -55,7 +58,7 @@ export const communityMatches = (g, q) => {
     || (Array.isArray(g.topics) && g.topics.some((t) => String(t).toLowerCase().startsWith(s)));
 };
 
-export const inviteUrl = (code) => `${typeof window !== "undefined" ? window.location.origin : "https://rich-r.vercel.app"}/?invite=${code}`;
+export const inviteUrl = (code) => `${webOrigin()}/?invite=${code}`;
 
 export const fmtMembers = (n) => `${Number(n || 0).toLocaleString()} member${Number(n) === 1 ? "" : "s"}`;
 
@@ -563,6 +566,7 @@ export function GroupChat({ group, user, active, cur, fx, say, username, mutuals
     }
   };
   useEffect(() => { load(); }, [group.id]);
+  useEffect(() => { const f = () => load(true); moderationBus.subs.add(f); return () => moderationBus.subs.delete(f); }, [group.id]);
   // Poll while the chat is open and the app is visible — simple, no realtime setup needed.
   useEffect(() => {
     const id = setInterval(() => {
@@ -595,13 +599,15 @@ export function GroupChat({ group, user, active, cur, fx, say, username, mutuals
     if (card && card.kind === "vote" && card.ticker) await castVote(card.ticker, card.vote, { reason: card.reason || null });
     const { error } = await supabase.from("group_posts").insert(row);
     setSending(false);
-    if (error) { say("Couldn't send — try again."); return; }
+    if (error) { say(postErrorMessage(error)); return; }
+    haptic("light");
     setText(""); setReplyTo(null); setSharing(false);
     await load(true);
   };
 
   const react = async (post, emoji) => {
     const mine = reactions.find((r) => r.post_id === post.id && r.user_id === user.id && r.emoji === emoji);
+    haptic("select");
     // optimistic
     setReactions((rs) => mine ? rs.filter((r) => r !== mine) : [...rs, { post_id: post.id, user_id: user.id, emoji }]);
     if (mine) await supabase.from("post_reactions").delete().match({ post_id: post.id, user_id: user.id, emoji });
@@ -668,9 +674,12 @@ export function GroupChat({ group, user, active, cur, fx, say, username, mutuals
           {isReply && <CornerDownRight size={11} className="text-slate-300 self-center" />}
           <span className={`text-xs font-bold ${mine ? "text-emerald-700" : "text-slate-600"}`}>@{uname(p.user_id)}</span>
           <span className="text-[10px] text-slate-400">{timeAgo(p.created_at)}</span>
-          {(mine || isOwner) && (
-            <button onClick={() => removePost(p)} className="text-[10px] text-slate-300 hover:text-rose-400 ml-auto">delete</button>
-          )}
+          <span className="ml-auto flex items-center gap-1">
+            {(mine || isOwner) && (
+              <button onClick={() => removePost(p)} className="text-[10px] text-slate-300 hover:text-rose-400">delete</button>
+            )}
+            <ModMenu kind="group_post" contentId={p.id} authorId={p.user_id} authorName={names[p.user_id]} me={user.id} say={say} />
+          </span>
         </div>
         <div className={`rounded-2xl px-3.5 py-2.5 text-[15px] leading-relaxed ${mine ? "bg-emerald-50 text-slate-700" : "bg-white border border-slate-100 text-slate-700"}`}>
           {p.card ? <ChatCard card={p.card} onTicker={onOpenTicker} /> : p.position && <PositionShareCard pos={p.position} onTicker={onOpenTicker} />}
@@ -961,6 +970,7 @@ export function SharePositionPicker({ holdings, cur, fx, onPick, onClose }) {
 
 export function MembersSheet({ group, members, names, user, isOwner, mutuals, onAdd, onRemove, onLeave, onDelete, onRename, onSettings, onClose, say }) {
   const [confirm, setConfirm] = useState(null); // "leave" | "delete"
+  const [reporting, setReporting] = useState(false);
   const [invites, setInvites] = useState(null);
   const [minting, setMinting] = useState(false);
   const [copied, setCopied] = useState(null);
@@ -984,6 +994,7 @@ export function MembersSheet({ group, members, names, user, isOwner, mutuals, on
   };
   const copy = async (code, id) => {
     const url = inviteUrl(code);
+    if (isNative) { await shareContent({ title: `Join ${group.name} on RichR`, text: `Join “${group.name}” on RichR`, url }); return; }
     try { await navigator.clipboard.writeText(url); setCopied(id); setTimeout(() => setCopied(null), 2000); say && say("Invite link copied."); }
     catch (e) { window.prompt("Copy this invite link", url); }
   };
@@ -1058,9 +1069,12 @@ export function MembersSheet({ group, members, names, user, isOwner, mutuals, on
           {members.map((id) => (
             <div key={id} className="flex items-center justify-between px-3 py-2.5 text-sm">
               <span className="font-semibold text-slate-600">@{names[id] || "…"}{id === user.id ? " (you)" : ""}{id === group.created_by ? " · creator" : ""}</span>
-              {isOwner && id !== user.id && (
-                <button onClick={() => onRemove(id, names[id])} className="text-xs font-semibold text-slate-400 bg-slate-100 px-2.5 py-1 rounded-full">Remove</button>
-              )}
+              <span className="flex items-center gap-1.5">
+                {isOwner && id !== user.id && (
+                  <button onClick={() => onRemove(id, names[id])} className="text-xs font-semibold text-slate-400 bg-slate-100 px-2.5 py-1 rounded-full">Remove</button>
+                )}
+                <ModMenu kind="user" contentId={id} authorId={id} authorName={names[id]} me={user.id} say={say} />
+              </span>
             </div>
           ))}
         </div>
@@ -1096,6 +1110,13 @@ export function MembersSheet({ group, members, names, user, isOwner, mutuals, on
               <button onClick={() => setConfirm("delete")} className="flex-1 bg-rose-50 text-rose-500 rounded-xl py-2.5 text-sm font-semibold flex items-center justify-center gap-1.5"><Trash2 size={14} /> Delete community</button>
             )}
           </div>
+        )}
+        {!isOwner && (
+          <button onClick={() => setReporting(true)} className="w-full mt-3 text-xs font-semibold text-slate-400 py-2">Report this community</button>
+        )}
+        {reporting && (
+          <ReportSheet kind="group" contentId={group.id} authorId={group.created_by} authorName={names[group.created_by]}
+            onClose={() => setReporting(false)} onDone={() => { setReporting(false); say && say("Thanks — we'll review this community."); }} />
         )}
       </div>
     </div>
