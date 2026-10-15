@@ -5,6 +5,12 @@ import { LegalPage, TermsGate } from "./features/safety.jsx";
 import { hasAcceptedTerms } from "./lib/moderation.js";
 import { authRedirect, closeAuthBrowser, initNativeShell, isNative, listenPushTaps, openAuthBrowser, platform, watchNetwork } from "./lib/native.js";
 
+/* Sign in with Apple: always shown in the iOS app (Apple requires it there).
+   On the website it stays hidden until the Apple provider is enabled in
+   Supabase › Authentication › Providers — then set APPLE_ON_WEB to true. */
+const APPLE_ON_WEB = false;
+const SHOW_APPLE_SIGN_IN = platform === "ios" || APPLE_ON_WEB;
+
 /* Completes an OAuth / magic-link sign-in that came back through the app's
    deep link (fi.richr.app://auth-callback?code=… or #access_token=…). */
 async function finishNativeAuth(url) {
@@ -233,11 +239,13 @@ function Login({ onOpenLegal }) {
         <span className="bg-white rounded-full p-1 flex">{GoogleIcon}</span>
         {busy === "google" ? "Opening Google…" : "Continue with Google"}
       </button>
-      <button onClick={() => signInWith("apple", "Apple")} disabled={!!busy}
-        className="mt-2.5 w-full h-14 flex items-center justify-center gap-3 rounded-2xl bg-black hover:bg-slate-900 text-white font-semibold text-[15px] transition disabled:opacity-60">
-        {AppleIcon}
-        {busy === "apple" ? "Opening Apple…" : "Continue with Apple"}
-      </button>
+      {SHOW_APPLE_SIGN_IN && (
+        <button onClick={() => signInWith("apple", "Apple")} disabled={!!busy}
+          className="mt-2.5 w-full h-14 flex items-center justify-center gap-3 rounded-2xl bg-black hover:bg-slate-900 text-white font-semibold text-[15px] transition disabled:opacity-60">
+          {AppleIcon}
+          {busy === "apple" ? "Opening Apple…" : "Continue with Apple"}
+        </button>
+      )}
 
       <div className="flex items-center gap-3 my-5">
         <div className="flex-1 h-px bg-slate-200" />
